@@ -2,6 +2,11 @@
   "expo": {
     "name": "LumVibeNative",
     "slug": "LumVibeNative",
-    "version": "1.0.0"
+    "version": "1.0.0",
+    "extra": {
+      "eas": {
+        "projectId": "aba96528-c3ae-4256-b7af-f412926dcdf5"
+      }
+    }
   }
 }

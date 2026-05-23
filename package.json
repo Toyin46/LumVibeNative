@@ -62,6 +62,7 @@
     "expo-updates": "~55.0.24",
     "expo-video": "~55.0.17",
     "expo-web-browser": "~55.0.16",
+    "fs-extra": "^11.3.5",
     "lucide-react-native": "^1.8.0",
     "pitchy": "^4.1.0",
     "react": "19.2.0",
