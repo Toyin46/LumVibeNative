@@ -3,6 +3,8 @@
     "name": "LumVibeNative",
     "slug": "LumVibeNative",
     "version": "1.0.0",
+    "scheme": "lumvibenative",
+    "orientation": "portrait",
     "extra": {
       "eas": {
         "projectId": "aba96528-c3ae-4256-b7af-f412926dcdf5"
@@ -10,7 +12,8 @@
     },
     "owner": "lumvibe",
     "android": {
-      "package": "com.lumvibe.LumVibeNative"
+      "package": "com.lumvibe.LumVibeNative",
+      "googleServicesFile": "./google-services.json"
     },
     "plugins": [
       "@sentry/react-native",

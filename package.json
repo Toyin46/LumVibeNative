@@ -54,7 +54,6 @@
     "expo-location": "~55.1.11",
     "expo-media-library": "~55.0.18",
     "expo-notifications": "~55.0.24",
-    "expo-router": "~55.0.16",
     "expo-secure-store": "~55.0.15",
     "expo-speech": "~55.0.15",
     "expo-splash-screen": "~55.0.22",
