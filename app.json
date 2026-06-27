@@ -7,6 +7,25 @@
       "eas": {
         "projectId": "aba96528-c3ae-4256-b7af-f412926dcdf5"
       }
-    }
+    },
+    "owner": "lumvibe",
+    "android": {
+      "package": "com.lumvibe.LumVibeNative"
+    },
+    "plugins": [
+      "@sentry/react-native",
+      "expo-audio",
+      "expo-build-properties",
+      "expo-localization",
+      "expo-secure-store",
+      "expo-video",
+      "expo-web-browser",
+      [
+        "ffmpeg-kit-react-native",
+        {
+          "package": "audio"
+        }
+      ]
+    ]
   }
 }

@@ -34,3 +34,17 @@ yarn-error.*
 
 # typescript
 *.tsbuildinfo
+
+
+
+node_modules
+android/.gradle
+android/build
+android/app/build
+ios/build
+*.log
+archive.tar.gz
+archive.tar.gz/
+download-skia/
+gradlew-log.txt
+*.tar.gz
