@@ -8,8 +8,7 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      },
-      "prebuildCommand": "bash generate-gradle-wrapper.sh"
+      }
     },
     "preview": {
       "distribution": "internal"
