@@ -3,6 +3,7 @@
     "name": "LumVibeNative",
     "slug": "LumVibeNative",
     "version": "1.0.0",
+    "ffmpegKitPackage": "audio",
     "scheme": "lumvibenative",
     "orientation": "portrait",
     "extra": {
