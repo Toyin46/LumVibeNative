@@ -16,18 +16,12 @@
       "googleServicesFile": "./google-services.json"
     },
     "plugins": [
-  "expo-audio",
-  "expo-build-properties",
-  "expo-localization",
-  "expo-secure-store",
-  "expo-video",
-  "expo-web-browser",
-  [
-    "ffmpeg-kit-react-native",
-    {
-      "package": "audio"
-    }
-  ]
-]
+      "expo-audio",
+      "expo-build-properties",
+      "expo-localization",
+      "expo-secure-store",
+      "expo-video",
+      "expo-web-browser"
+    ]
   }
 }
