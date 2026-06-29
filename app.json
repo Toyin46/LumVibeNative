@@ -3,9 +3,14 @@
     "name": "LumVibeNative",
     "slug": "LumVibeNative",
     "version": "1.0.0",
-    "ffmpegKitPackage": "audio",
     "scheme": "lumvibenative",
     "orientation": "portrait",
+    "icon": "./src/assets/images/icon.png",
+    "splash": {
+      "image": "./src/assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
     "extra": {
       "eas": {
         "projectId": "aba96528-c3ae-4256-b7af-f412926dcdf5"
@@ -14,7 +19,11 @@
     "owner": "lumvibe",
     "android": {
       "package": "com.kinsta.kinsta2",
-      "googleServicesFile": "./google-services.json"
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "foregroundImage": "./src/assets/images/adaptive-icon.png",
+        "backgroundColor": "#000000"
+      }
     },
     "plugins": [
       "expo-audio",
