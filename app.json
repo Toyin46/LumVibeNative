@@ -13,7 +13,7 @@
     },
     "owner": "lumvibe",
     "android": {
-      "package": "com.lumvibenative",
+      "package": "com.kinsta.kinsta2",
       "googleServicesFile": "./google-services.json"
     },
     "plugins": [
