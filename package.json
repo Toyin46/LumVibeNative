@@ -72,7 +72,6 @@
     "react-native-audio-api": "^0.12.2",
     "react-native-dotenv": "^3.4.11",
     "react-native-gesture-handler": "~2.30.0",
-    "react-native-google-mobile-ads": "16.3.3",
     "react-native-incall-manager": "^4.2.1",
     "react-native-localize": "^3.6.0",
     "react-native-nitro-modules": "^0.35.9",
