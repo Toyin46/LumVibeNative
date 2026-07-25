@@ -4,12 +4,18 @@ import {
   CreateScreen,
   ExploreScreen,
   HomeScreen,
-  MessagesScreen,
   ProfileScreen,
   VideosScreen,
 } from '../screens';
-import { PlaceholderScreen } from '../screens/PlaceholderScreen';
-import { MainTabBar }        from './MainTabBar';
+import { MarketplaceStack } from './MarketplaceStack';
+// FIX: the Messages tab must render the nested ChatStack, not
+// MessagesScreen directly — otherwise NewChat/ChatDM/GroupChat/Circle/
+// Cowatch aren't reachable no matter how correct their navigate() calls
+// are, since none of those screens exist in any navigator that's
+// actually mounted. Same pattern as the Market tab below, which already
+// renders MarketplaceStack instead of a lone screen.
+import { ChatStack } from './ChatStack';
+import { MainTabBar } from './MainTabBar';
 import type { MainTabParamList } from './types';
 
 const Tab = createBottomTabNavigator<MainTabParamList>();
@@ -26,10 +32,10 @@ export function MainTabs() {
       <Tab.Screen name="Home"     component={HomeScreen} />
       <Tab.Screen name="Explore"  component={ExploreScreen} />
       <Tab.Screen name="Create"   component={CreateScreen} />
-      <Tab.Screen name="Messages" component={MessagesScreen} />
+      <Tab.Screen name="Messages" component={ChatStack} />
       <Tab.Screen name="Videos"   component={VideosScreen} />
-      <Tab.Screen name="Market"   component={PlaceholderScreen} />
+      <Tab.Screen name="Market"   component={MarketplaceStack} />
       <Tab.Screen name="Profile"  component={ProfileScreen} />
     </Tab.Navigator>
   );
-}
+} 

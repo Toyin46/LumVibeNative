@@ -11,7 +11,7 @@ import {
   Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from './store/authStore'; 
 import { supabase } from './config/supabase'; 
 import {
@@ -31,7 +31,7 @@ import {
 } from './lib/youtube-oauth';
 
 export default function SettingsScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user, signOut } = useAuthStore();
 
   const [loading, setLoading] = useState(true);
@@ -142,7 +142,7 @@ export default function SettingsScreen() {
         style: 'destructive',
         onPress: async () => {
           await signOut();
-          router.replace('/');
+          navigation.navigate('/' as never);
         },
       },
     ]);
@@ -152,7 +152,7 @@ export default function SettingsScreen() {
     return (
       <View style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => navigation.goBack()}>
             <Ionicons name="arrow-back" size={24} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Settings</Text>
@@ -169,7 +169,7 @@ export default function SettingsScreen() {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Settings</Text>
@@ -181,7 +181,7 @@ export default function SettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Account</Text>
 
-          <TouchableOpacity style={styles.item} onPress={() => router.push('./edit-profile')}>
+          <TouchableOpacity style={styles.item} onPress={() => navigation.navigate('./edit-profile' as never)}>
             <View style={styles.itemLeft}>
               <Ionicons name="person-outline" size={22} color="#00ff88" />
               <Text style={styles.itemText}>Edit Profile</Text>
@@ -189,7 +189,7 @@ export default function SettingsScreen() {
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.item} onPress={() => router.push('/privacy-settings')}>
+          <TouchableOpacity style={styles.item} onPress={() => navigation.navigate('/privacy-settings' as never)}>
             <View style={styles.itemLeft}>
               <Ionicons name="shield-outline" size={22} color="#00ff88" />
               <Text style={styles.itemText}>Privacy & Security</Text>
@@ -197,7 +197,7 @@ export default function SettingsScreen() {
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.item} onPress={() => router.push('./blocked-users')}>
+          <TouchableOpacity style={styles.item} onPress={() => navigation.navigate('./blocked-users' as never)}>
             <View style={styles.itemLeft}>
               <Ionicons name="ban-outline" size={22} color="#00ff88" />
               <Text style={styles.itemText}>Blocked Users</Text>

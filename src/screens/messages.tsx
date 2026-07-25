@@ -1,4 +1,4 @@
-// FILE: app/(tabs)/messages.tsx
+// FILE: src/screens/messages.tsx
 // ─────────────────────────────────────────────────────────────
 // Kinsta — Inbox / Messages Screen
 // ✅ Working Friends / Groups / Requests / Circles tabs
@@ -13,6 +13,26 @@
 // ✅ FIX: Real-time subscription now catches INSERT (new convos) not just UPDATE
 // ✅ FIX: Circle subscribe button no longer double-fires the card onPress
 // ✅ FIX: Story viewer modal added (full screen, swipeable, close button)
+// ✅ CRITICAL FIX: removed dead `const navigation = useNavigation` (no
+//    parens) sitting at module scope — never called, just leftover
+//    confusion shadowed by the real `useNavigation<any>()` inside the
+//    component. Harmless as-is but deleted for clarity.
+// ✅ CRITICAL FIX: every navigate() call used expo-router's path-string /
+//    {pathname, params} style ('/chat/new', '/chat/[id]', etc). None of
+//    those are real screen names in @react-navigation — swapped every
+//    one for the actual registered name from ChatStackParamList
+//    ('NewChat', 'ChatDM', 'GroupChat', 'Circle', 'NewGroup', 'NewCircle')
+//    or the parent tab navigator ('Explore').
+// ✅ FIX: openFriendChat's "no existing conversation" branch tried to
+//    navigate to NewChat with a userId param — but NewChat is a search
+//    screen with no params in its type, and doesn't accept a pre-picked
+//    friend anyway. Now creates the conversation directly (same insert
+//    logic as chat/new.tsx's getOrCreateConversation) and opens ChatDM,
+//    matching what tapping "Message" on a friend card should actually do.
+// ✅ FIX: swapped '@/config/supabase' and '@/store/authStore' alias
+//    imports for relative paths, matching every other screen file. If
+//    the '@' alias isn't configured in babel/metro, those two lines
+//    would fail to bundle before the routing bug even mattered.
 // ─────────────────────────────────────────────────────────────
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
@@ -22,11 +42,11 @@ import {
   Image, ScrollView, ActivityIndicator, Alert, Modal,
   TouchableWithoutFeedback, Dimensions,
 } from 'react-native';
-import { router } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../../config/supabase';
-import { useAuthStore } from '../../store/authStore';
+import { supabase } from '../config/supabase';
+import { useAuthStore } from '../store/authStore';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 
@@ -261,6 +281,42 @@ async function fetchStories(currentUserId: string): Promise<Story[]> {
       has_viewed: viewedIds.has(story.id),
     }));
   } catch { return []; }
+}
+
+// NEW: creates a conversation + both participant rows and returns the
+// new conversation id. Same insert logic as chat/new.tsx's
+// getOrCreateConversation — used by openFriendChat below so tapping
+// "Message" on a friend card opens a real chat directly instead of
+// bouncing through the search screen with an unsupported param.
+async function startConversationWith(
+  currentUserId: string, otherUserId: string
+): Promise<string | null> {
+  try {
+    const { data: newConv, error: convError } = await supabase
+      .from('conversations')
+      .insert({ disappearing_enabled: false, disappearing_duration: 86400 })
+      .select('id')
+      .single();
+
+    if (convError || !newConv) {
+      console.error('startConversationWith error:', convError);
+      return null;
+    }
+
+    const { error: partError } = await supabase
+      .from('conversation_participants')
+      .insert([
+        { conversation_id: newConv.id, user_id: currentUserId, unread_count: 0 },
+        { conversation_id: newConv.id, user_id: otherUserId, unread_count: 0 },
+      ]);
+
+    if (partError) console.error('startConversationWith participants error:', partError);
+
+    return newConv.id;
+  } catch (error) {
+    console.error('startConversationWith error:', error);
+    return null;
+  }
 }
 
 // ✅ FIX: Now listens for INSERT (new conversations) AND UPDATE (existing ones)
@@ -607,6 +663,7 @@ const TABS = [
 // ── MAIN SCREEN ───────────────────────────────────────────────
 export default function MessagesScreen() {
   const { user } = useAuthStore();
+  const navigation = useNavigation<any>();
 
   const [activeTab,     setActiveTab]     = useState('All');
   const [search,        setSearch]        = useState('');
@@ -618,6 +675,7 @@ export default function MessagesScreen() {
   const [stories,       setStories]       = useState<Story[]>([]);
   const [loading,       setLoading]       = useState(true);
   const [refreshing,    setRefreshing]    = useState(false);
+  const [startingChat,  setStartingChat]  = useState<string | null>(null);
 
   // ✅ NEW: Story viewer state
   const [viewingStoryIndex, setViewingStoryIndex] = useState<number | null>(null);
@@ -681,32 +739,51 @@ export default function MessagesScreen() {
     await toggleCircleSubscription(circle.id, user.id, circle.is_subscribed || false);
   };
 
+  // FIX: real screen name + real param shape from ChatStackParamList,
+  // instead of expo-router's { pathname: '/chat/[id]', params } object.
   const openChat = useCallback((convo: Conversation) => {
     if (!convo.other_user) return;
-    router.push({
-      pathname: '/chat/[id]',
-      params: {
-        id: convo.id, otherUserId: convo.other_user.id,
-        otherName: convo.other_user.display_name,
-        otherPhoto: convo.other_user.photo_url || '',
-      },
+    navigation.navigate('ChatDM', {
+      id: convo.id,
+      otherUserId: convo.other_user.id,
+      otherName: convo.other_user.display_name,
+      otherPhoto: convo.other_user.photo_url || '',
     });
-  }, []);
+  }, [navigation]);
 
-  const openFriendChat = useCallback((friend: ChatUser) => {
+  // FIX: previously navigated to '/chat/new' with a userId param that
+  // NewChatScreen doesn't accept (it's a search screen with no params).
+  // Now creates the conversation directly and opens ChatDM — matches
+  // what tapping "Message" on a friend you already know should do.
+  const openFriendChat = useCallback(async (friend: ChatUser) => {
     const existing = conversations.find(c => c.other_user?.id === friend.id);
     if (existing) {
-      router.push({
-        pathname: '/chat/[id]',
-        params: {
-          id: existing.id, otherUserId: friend.id,
-          otherName: friend.display_name, otherPhoto: friend.photo_url || '',
-        },
+      navigation.navigate('ChatDM', {
+        id: existing.id,
+        otherUserId: friend.id,
+        otherName: friend.display_name,
+        otherPhoto: friend.photo_url || '',
       });
-    } else {
-      router.push({ pathname: '/chat/new', params: { userId: friend.id } } as any);
+      return;
     }
-  }, [conversations]);
+    if (!user?.id || startingChat) return;
+    setStartingChat(friend.id);
+    try {
+      const convId = await startConversationWith(user.id, friend.id);
+      if (!convId) {
+        Alert.alert('Error', 'Could not start the conversation. Please try again.');
+        return;
+      }
+      navigation.navigate('ChatDM', {
+        id: convId,
+        otherUserId: friend.id,
+        otherName: friend.display_name,
+        otherPhoto: friend.photo_url || '',
+      });
+    } finally {
+      setStartingChat(null);
+    }
+  }, [conversations, navigation, user?.id, startingChat]);
 
   // ── Filtered data ──────────────────────────────────────────
   const filteredConvos = conversations.filter(c =>
@@ -739,7 +816,8 @@ export default function MessagesScreen() {
                 <Ionicons name="chatbubble-outline" size={56} color={C.border} />
                 <Text style={styles.emptyTitle}>No messages yet</Text>
                 <Text style={styles.emptySubtitle}>Start a conversation with someone you follow</Text>
-                <TouchableOpacity style={styles.newChatBtn} onPress={() => router.push('/chat/new' as any)}>
+                {/* FIX: was navigate('/chat/new') — real screen name is 'NewChat' */}
+                <TouchableOpacity style={styles.newChatBtn} onPress={() => navigation.navigate('NewChat')}>
                   <Ionicons name="create-outline" size={16} color="#000" />
                   <Text style={styles.newChatBtnText}>New Message</Text>
                 </TouchableOpacity>
@@ -755,14 +833,23 @@ export default function MessagesScreen() {
           <FlatList
             data={filteredFriends}
             keyExtractor={item => item.id}
-            renderItem={({ item }) => <FriendCard user={item} onMessage={() => openFriendChat(item)} />}
+            renderItem={({ item }) => (
+              <FriendCard
+                user={item}
+                onMessage={() => openFriendChat(item)}
+              />
+            )}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={C.green} />}
             ListEmptyComponent={
               <View style={styles.emptyWrap}>
                 <Ionicons name="people-outline" size={56} color={C.border} />
                 <Text style={styles.emptyTitle}>No friends yet</Text>
                 <Text style={styles.emptySubtitle}>Follow people and send friend requests to connect</Text>
-                <TouchableOpacity style={styles.newChatBtn} onPress={() => router.push('/(tabs)/explore' as any)}>
+                {/* FIX: was navigate('/(tabs)/explore') — the parent Tab.Navigator
+                    registers this tab as 'Explore' (see MainTabs.tsx); React
+                    Navigation bubbles the call up to the parent navigator
+                    automatically since 'Explore' doesn't exist in this stack. */}
+                <TouchableOpacity style={styles.newChatBtn} onPress={() => navigation.navigate('Explore')}>
                   <Ionicons name="search-outline" size={16} color="#000" />
                   <Text style={styles.newChatBtnText}>Discover People</Text>
                 </TouchableOpacity>
@@ -780,12 +867,14 @@ export default function MessagesScreen() {
             keyExtractor={item => item.id}
             renderItem={({ item }) => (
               <GroupCard group={item} onPress={() => {
-                router.push({ pathname: '/chat/group/[id]', params: { id: item.id } } as any);
+                // FIX: was { pathname: '/chat/group/[id]', params } — real
+                // screen name is 'GroupChat', param shape is { id }.
+                navigation.navigate('GroupChat', { id: item.id });
               }} />
             )}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={C.green} />}
             ListHeaderComponent={
-              <TouchableOpacity style={styles.createGroupBtn} onPress={() => router.push('/chat/new-group' as any)}>
+              <TouchableOpacity style={styles.createGroupBtn} onPress={() => navigation.navigate('NewGroup')}>
                 <Ionicons name="add" size={18} color="#000" />
                 <Text style={styles.createGroupBtnText}>Create a Group</Text>
               </TouchableOpacity>
@@ -835,13 +924,15 @@ export default function MessagesScreen() {
             renderItem={({ item }) => (
               <CircleCard
                 circle={item}
-                onPress={() => router.push({ pathname: '/chat/circle/[id]', params: { id: item.id } } as any)}
+                // FIX: was { pathname: '/chat/circle/[id]', params } — real
+                // screen name is 'Circle', param shape is { id }.
+                onPress={() => navigation.navigate('Circle', { id: item.id })}
                 onToggle={() => handleToggleCircle(item)}
               />
             )}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={C.green} />}
             ListHeaderComponent={
-              <TouchableOpacity style={styles.createGroupBtn} onPress={() => router.push('/chat/new-circle' as any)}>
+              <TouchableOpacity style={styles.createGroupBtn} onPress={() => navigation.navigate('NewCircle')}>
                 <Ionicons name="radio-outline" size={16} color="#000" />
                 <Text style={styles.createGroupBtnText}>Create a Circle</Text>
               </TouchableOpacity>
@@ -853,7 +944,7 @@ export default function MessagesScreen() {
                 <Text style={styles.emptySubtitle}>
                   Circles are broadcast channels where creators share content with their audience
                 </Text>
-                <TouchableOpacity style={styles.newChatBtn} onPress={() => router.push('/chat/new-circle' as any)}>
+                <TouchableOpacity style={styles.newChatBtn} onPress={() => navigation.navigate('NewCircle')}>
                   <Ionicons name="add" size={16} color="#000" />
                   <Text style={styles.newChatBtnText}>Start a Circle</Text>
                 </TouchableOpacity>
@@ -884,7 +975,7 @@ export default function MessagesScreen() {
           >
             <Ionicons name="search-outline" size={18} color={C.white} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/chat/new' as any)}>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.navigate('NewChat')}>
             <Ionicons name="create-outline" size={18} color={C.white} />
           </TouchableOpacity>
         </View>

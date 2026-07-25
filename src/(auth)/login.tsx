@@ -1,4 +1,13 @@
-// app/(auth)/login.tsx - IMPROVED VERSION
+// src/(auth)/login.tsx - IMPROVED VERSION
+//
+// ✅ Fixed: navigate('/(auth)/signup') → navigate('Signup') (correct
+//    sibling screen name inside AuthStack's own navigator).
+// ✅ Removed: navigate('/(tabs)') after login. RootNavigator already
+//    swaps AuthStack → MainTabs automatically the moment useAuthStore's
+//    `user` becomes non-null (reactive conditional render). Calling
+//    navigate('Main') here would fail anyway — AuthStack's navigator
+//    has no "Main" screen registered, only Login/Signup.
+
 import React, { useState } from 'react';
 import {
   View,
@@ -14,8 +23,8 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useAuthStore } from '../store/authStore'; 
-import { useRouter } from 'expo-router';
+import { useAuthStore } from '../store/authStore';
+import { useNavigation } from '@react-navigation/native';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -24,12 +33,11 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
 
   const { login } = useAuthStore();
-  const router = useRouter();
+  const navigation = useNavigation<any>();
 
   const handleLogin = async () => {
-    // Validation
     const trimmedEmail = email.trim().toLowerCase();
-    
+
     if (!trimmedEmail) {
       Alert.alert('Error', 'Please enter your email');
       return;
@@ -40,7 +48,6 @@ export default function LoginScreen() {
       return;
     }
 
-    // Email format validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(trimmedEmail)) {
       Alert.alert('Error', 'Please enter a valid email address');
@@ -51,24 +58,20 @@ export default function LoginScreen() {
 
     try {
       console.log('🔐 Logging in:', trimmedEmail);
-      
+
       await login(trimmedEmail, password);
-      
+
       console.log('✅ Login successful');
-      
-      // Small delay for smooth transition
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      // Navigate to home
-      router.replace('/(tabs)');
-      
+
+      // RootNavigator reactively swaps to MainTabs once `user` updates —
+      // no manual navigation needed here.
+
     } catch (error: any) {
       console.error('❌ Login error:', error);
-      
+
       let errorTitle = 'Login Failed';
       let errorMessage = 'Unable to log in. Please try again.';
-      
-      // Handle specific error cases
+
       if (error.message?.toLowerCase().includes('invalid login credentials')) {
         errorMessage = 'Incorrect email or password. Please check and try again.';
       } else if (error.message?.toLowerCase().includes('email not confirmed')) {
@@ -186,8 +189,8 @@ export default function LoginScreen() {
 
         <View style={styles.footer}>
           <Text style={styles.footerText}>Don't have an account? </Text>
-          <TouchableOpacity 
-            onPress={() => router.push('/(auth)/signup')} 
+          <TouchableOpacity
+            onPress={() => navigation.navigate('Signup')}
             disabled={loading}
           >
             <Text style={[
@@ -204,100 +207,25 @@ export default function LoginScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000000',
-  },
-  header: {
-    paddingTop: 60,
-    paddingBottom: 40,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#00ff00',
-    marginBottom: 8,
-  },
-  headerSubtitle: {
-    fontSize: 16,
-    color: '#888',
-  },
-  content: {
-    padding: 24,
-  },
-  form: {
-    marginBottom: 24,
-  },
-  inputContainer: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#00ff00',
-    marginBottom: 8,
-  },
-  inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1a1a1a',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#333',
-    paddingHorizontal: 16,
-  },
-  inputDisabled: {
-    opacity: 0.6,
-  },
-  inputIcon: {
-    marginRight: 12,
-  },
-  input: {
-    flex: 1,
-    paddingVertical: 16,
-    fontSize: 16,
-    color: '#ffffff',
-  },
-  eyeIcon: {
-    padding: 4,
-  },
-  loginButton: {
-    borderRadius: 12,
-    overflow: 'hidden',
-    marginBottom: 24,
-  },
-  loginButtonDisabled: {
-    opacity: 0.7,
-  },
-  loginButtonGradient: {
-    paddingVertical: 16,
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  loginButtonText: {
-    color: '#000',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  footer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  footerText: {
-    fontSize: 14,
-    color: '#888',
-  },
-  signupLink: {
-    fontSize: 14,
-    color: '#00ff00',
-    fontWeight: '600',
-  },
-  linkDisabled: {
-    opacity: 0.5,
-  },
-});
+  container: { flex: 1, backgroundColor: '#000000' },
+  header: { paddingTop: 60, paddingBottom: 40, paddingHorizontal: 24, alignItems: 'center' },
+  headerTitle: { fontSize: 32, fontWeight: 'bold', color: '#00ff00', marginBottom: 8 },
+  headerSubtitle: { fontSize: 16, color: '#888' },
+  content: { padding: 24 },
+  form: { marginBottom: 24 },
+  inputContainer: { marginBottom: 20 },
+  label: { fontSize: 14, fontWeight: '600', color: '#00ff00', marginBottom: 8 },
+  inputWrapper: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 12, borderWidth: 1, borderColor: '#333', paddingHorizontal: 16 },
+  inputDisabled: { opacity: 0.6 },
+  inputIcon: { marginRight: 12 },
+  input: { flex: 1, paddingVertical: 16, fontSize: 16, color: '#ffffff' },
+  eyeIcon: { padding: 4 },
+  loginButton: { borderRadius: 12, overflow: 'hidden', marginBottom: 24 },
+  loginButtonDisabled: { opacity: 0.7 },
+  loginButtonGradient: { paddingVertical: 16, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 8 },
+  loginButtonText: { color: '#000', fontSize: 16, fontWeight: 'bold' },
+  footer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
+  footerText: { fontSize: 14, color: '#888' },
+  signupLink: { fontSize: 14, color: '#00ff00', fontWeight: '600' },
+  linkDisabled: { opacity: 0.5 },
+}); 

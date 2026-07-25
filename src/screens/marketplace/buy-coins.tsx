@@ -1,11 +1,15 @@
-// app/(tabs)/marketplace/buy-coins.tsx
+// src/screens/marketplace/buy-coins.tsx
 // ✅ SECRET KEY completely removed — lives only in Supabase Edge Function
 // ✅ NO WebView — redirects to lumvibe.site/buy-coins?type=marketplace
-// ✅ FIXED: email sourced consistently from userProfile first, user fallback second
-// ✅ FIXED: accessibilityLabel on all header buttons
-// ✅ FIXED: transaction-history uses correct absolute Expo Router path
-// ✅ FIXED: currency code shown alongside price on each card
-// ✅ FIXED: support email updated to lumvibesupport@gmail.com
+// ✅ email sourced consistently from userProfile first, user fallback second
+// ✅ accessibilityLabel on all header buttons
+// ✅ currency code shown alongside price on each card
+// ✅ support email updated to lumvibesupport@gmail.com
+//
+// ✅ Fixed: navigate('/transaction-history') → navigate('TransactionHistory')
+//    (this is a ROOT stack screen, so navigate up out of the marketplace
+//    stack — using getParent() since 'TransactionHistory' isn't part of
+//    MarketplaceStackParamList).
 
 import React, { useState, useEffect } from 'react';
 import {
@@ -13,9 +17,9 @@ import {
   Alert, ActivityIndicator, Linking,
 } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { supabase } from '../../config/supabase'; 
-import { useAuthStore } from '../../store/authStore'; 
+import { useNavigation } from '@react-navigation/native';
+import { supabase } from '../../config/supabase';
+import { useAuthStore } from '../../store/authStore';
 import { detectCurrency, convertFromNgn, formatNgn } from '../../utils/currencyUtils';
 import { FLW_TEST_MODE } from '../../utils/flutterwaveUtils';
 
@@ -31,7 +35,7 @@ const COIN_PACKAGES = [
 ] as const;
 
 export default function MarketplaceBuyCoinsScreen() {
-  const router                = useRouter();
+  const navigation = useNavigation<any>();
   const { user, userProfile } = useAuthStore();
   const currency              = detectCurrency();
 
@@ -62,7 +66,7 @@ export default function MarketplaceBuyCoinsScreen() {
         Alert.alert(
           '🎉 Coins Added!',
           'Your marketplace coins have been credited! Start shopping.',
-          [{ text: 'Start Shopping →', onPress: () => router.back() }],
+          [{ text: 'Start Shopping →', onPress: () => navigation.goBack() }],
         );
       }
     });
@@ -72,7 +76,6 @@ export default function MarketplaceBuyCoinsScreen() {
   const handleBuyPackage = async (pkg: typeof COIN_PACKAGES[number]) => {
     if (!user?.id) { Alert.alert('Error', 'Please log in first'); return; }
 
-    // ✅ FIXED: consistent email — userProfile first, user object fallback
     const userEmail =
       (userProfile as any)?.email ||
       (user as any)?.email ||
@@ -92,7 +95,6 @@ export default function MarketplaceBuyCoinsScreen() {
       ? `🎁 Bonus: +${pkg.bonusCoins} coins\n✅ Total: ${totalCoins.toLocaleString()} coins\n\n`
       : `✅ You get: ${totalCoins.toLocaleString()} coins\n\n`;
 
-    // ── TEST MODE ────────────────────────────────────────────────────────
     if (FLW_TEST_MODE) {
       Alert.alert(
         `🧪 Test Mode — ${pkg.icon} ${pkg.label}`,
@@ -114,7 +116,7 @@ export default function MarketplaceBuyCoinsScreen() {
               if (data?.success) {
                 await loadBalance();
                 Alert.alert('🎉 Coins Added!', `${totalCoins} marketplace coins added!`, [
-                  { text: 'Start Shopping →', onPress: () => router.back() },
+                  { text: 'Start Shopping →', onPress: () => navigation.goBack() },
                 ]);
               } else {
                 Alert.alert('Error', data?.message || 'Simulation failed');
@@ -130,7 +132,6 @@ export default function MarketplaceBuyCoinsScreen() {
       return;
     }
 
-    // ── PRODUCTION: open website ──────────────────────────────────────────
     Alert.alert(
       `${pkg.icon} Buy ${pkg.coins.toLocaleString()} Marketplace Coins`,
       `${bonusLine}You will pay ${localPrice} ${currency.code}` +
@@ -165,7 +166,7 @@ export default function MarketplaceBuyCoinsScreen() {
     <View style={s.container}>
 
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} accessibilityLabel="Go back">
+        <TouchableOpacity onPress={() => navigation.goBack()} accessibilityLabel="Go back">
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Buy Marketplace Coins</Text>
@@ -280,10 +281,9 @@ export default function MarketplaceBuyCoinsScreen() {
           );
         })}
 
-        {/* ✅ FIXED: absolute path for Expo Router */}
         <TouchableOpacity
           style={s.historyLink}
-          onPress={() => router.push('/transaction-history')}
+          onPress={() => navigation.getParent()?.navigate('TransactionHistory')}
           accessibilityLabel="View purchase history"
         >
           <Feather name="clock" size={14} color="#555" />

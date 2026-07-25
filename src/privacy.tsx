@@ -8,15 +8,15 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 
 export default function PrivacyPolicyScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
 
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Privacy Policy</Text>

@@ -1,4 +1,4 @@
-// FILE: app/chat/circle/[id].tsx
+// src/chat/circle/[id].tsx
 // ─────────────────────────────────────────────────────────────
 // LumVibe — Circle Detail Screen (Broadcast Channel)
 // ✅ Owner can post text, images, voice notes
@@ -6,6 +6,13 @@
 // ✅ Real-time new posts via Supabase subscription
 // ✅ Subscribe/unsubscribe button
 // ─────────────────────────────────────────────────────────────
+//
+// ✅ Removed dead `import { router, useLocalSearchParams } from 'expo-router'`
+//    (router was never used anywhere in this file).
+// ✅ CRITICAL FIX: `useNavigation()` was at MODULE scope. Moved inside
+//    CircleScreen().
+// ✅ Converted route param: `id` now comes from useRoute() against
+//    ChatStackParamList's Circle: { id: string }.
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -13,12 +20,17 @@ import {
   StyleSheet, SafeAreaView, StatusBar, Image,
   ActivityIndicator, Alert, Modal, KeyboardAvoidingView, Platform,
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../../config/supabase'; 
-import { useAuthStore } from '../../store/authStore'; 
+import { supabase } from '../../config/supabase';
+import { useAuthStore } from '../../store/authStore';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { ChatStackParamList } from '../../navigation/ChatStackTypes';
+
+type CircleRouteProp = RouteProp<ChatStackParamList, 'Circle'>;
+type NavProp = NativeStackNavigationProp<ChatStackParamList>;
 
 const C = {
   black: '#000000', card: '#1a1a1a', card2: '#222222',
@@ -49,7 +61,10 @@ const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvikz
 const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'unsigned_preset_name';
 
 export default function CircleScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const navigation = useNavigation<NavProp>();
+  const route = useRoute<CircleRouteProp>();
+  const { id } = route.params;
+
   const { user } = useAuthStore();
   const channelRef = useRef<RealtimeChannel | null>(null);
 
@@ -66,7 +81,7 @@ export default function CircleScreen() {
 
   useEffect(() => {
     if (!id || id === 'new-circle' || id === 'undefined') {
-      Alert.alert('Error', 'Invalid Circle.'); router.back(); return;
+      Alert.alert('Error', 'Invalid Circle.'); navigation.goBack(); return;
     }
     loadCircle();
     loadPosts();
@@ -138,7 +153,6 @@ export default function CircleScreen() {
     } else {
       await supabase.from('circle_subscribers').delete().eq('circle_id', id).eq('user_id', user.id);
     }
-    // Update count in circles table
     const newCount = (circle?.subscriber_count || 1) + (next ? 1 : -1);
     await supabase.from('circles').update({ subscriber_count: Math.max(0, newCount) }).eq('id', id);
   };
@@ -198,7 +212,6 @@ export default function CircleScreen() {
         onLongPress={() => { setSelectedPost(item); setShowReact(true); }}
         activeOpacity={0.85}
       >
-        {/* Owner info */}
         <View style={ps.cardHeader}>
           {circle?.owner?.photo_url
             ? <Image source={{ uri: circle.owner.photo_url }} style={ps.ownerAv} />
@@ -213,14 +226,12 @@ export default function CircleScreen() {
           </View>
         </View>
 
-        {/* Content */}
         {item.message_type === 'image' && item.media_url
           ? <Image source={{ uri: item.media_url }} style={ps.postImg} resizeMode="cover" />
           : item.content
           ? <Text style={ps.postText}>{item.content}</Text>
           : null}
 
-        {/* Reactions */}
         {Object.keys(reactionGroups).length > 0 && (
           <View style={ps.reactRow}>
             {Object.entries(reactionGroups).map(([emoji, count]) => (
@@ -241,9 +252,8 @@ export default function CircleScreen() {
     <SafeAreaView style={s.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.black} />
 
-      {/* Header */}
       <View style={s.header}>
-        <TouchableOpacity style={s.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={s.backBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="chevron-back" size={22} color={C.white} />
         </TouchableOpacity>
         <View style={s.circleAv}>
@@ -270,7 +280,6 @@ export default function CircleScreen() {
         )}
       </View>
 
-      {/* Description */}
       {circle?.description ? (
         <View style={s.descRow}>
           <Text style={s.descText}>{circle.description}</Text>
@@ -300,7 +309,6 @@ export default function CircleScreen() {
         />
       )}
 
-      {/* Owner post composer */}
       {isOwner && (
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <View style={s.composer}>
@@ -330,7 +338,6 @@ export default function CircleScreen() {
         </KeyboardAvoidingView>
       )}
 
-      {/* Reaction picker */}
       <Modal visible={showReact} transparent animationType="fade" onRequestClose={() => setShowReact(false)}>
         <TouchableOpacity style={s.reactOverlay} onPress={() => setShowReact(false)}>
           <View style={s.reactPicker}>
@@ -379,4 +386,4 @@ const s = StyleSheet.create({
   sendBtn:   { width: 44, height: 44, borderRadius: 22, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center' },
   reactOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   reactPicker:  { flexDirection: 'row', backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 28, paddingVertical: 10, paddingHorizontal: 14, gap: 12 },
-});
+}); 

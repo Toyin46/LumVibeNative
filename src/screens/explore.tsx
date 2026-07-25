@@ -11,7 +11,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuthStore } from '../store/authStore'; 
 import { supabase } from '../config/supabase'; 
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from '../locales/LanguageContext'; 
 
 const { width } = Dimensions.get('window');
@@ -36,7 +36,7 @@ export default function ExploreScreen() {
   const { user, userProfile } = useAuthStore();
   const { t } = useTranslation();
   const userId = user?.id || (user as any)?.id;
-  const router  = useRouter();
+  const navigation = useNavigation<any>();
 
   const [searchQuery,       setSearchQuery]       = useState('');
   const [activeTab,         setActiveTab]         = useState<TabType>('discover');
@@ -207,11 +207,13 @@ export default function ExploreScreen() {
     setRefreshing(false);
   };
 
-  const handlePostPress = (post: Post) => { router.push(`/post/${post.id}` as any); };
-
+  const handlePostPress = (post: Post) => { 
+    navigation.navigate('PostDetail', { postId: post.id }); 
+  };
+  
   const handleUserPress = (targetUserId: string) => {
-    if (targetUserId === userId) router.push('/(tabs)/profile' as any);
-    else router.push(`/user/${targetUserId}` as any);
+    if (targetUserId === userId) navigation.navigate('Profile');
+    else navigation.navigate('UserProfile', { userId: targetUserId });
   };
 
   const handleFollowUser = async (targetUser: UserProfile) => {

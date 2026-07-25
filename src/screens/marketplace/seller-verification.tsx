@@ -5,7 +5,7 @@ import {
   Alert, ActivityIndicator,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../../config/supabase'; 
 import { useAuthStore } from '../../store/authStore'; 
 
@@ -18,7 +18,7 @@ const COUNTRIES = [
 ];
 
 export default function SellerVerificationScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user, userProfile, loadProfile } = useAuthStore();
   const [country,  setCountry]  = useState('');
   const [payEmail, setPayEmail] = useState('');
@@ -52,10 +52,10 @@ export default function SellerVerificationScreen() {
           <Text style={{ fontSize: 72 }}>🎉</Text>
           <Text style={s.doneTitle}>You're a Seller!</Text>
           <Text style={s.doneSub}>Your account is now verified. Create your first listing and start earning.</Text>
-          <TouchableOpacity style={s.doneBtn} onPress={() => router.replace('/marketplace/create-listing')}>
+          <TouchableOpacity style={s.doneBtn} onPress={() => navigation.navigate('/marketplace/create-listing' as never)}>
             <Text style={s.doneBtnText}>Create First Listing</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={s.backLink} onPress={() => router.replace('/(tabs)/marketplace')}>
+          <TouchableOpacity style={s.backLink} onPress={() => navigation.navigate('/(tabs)/marketplace' as never)}>
             <Text style={s.backLinkText}>Go to Marketplace</Text>
           </TouchableOpacity>
         </View>
@@ -66,7 +66,7 @@ export default function SellerVerificationScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}><Feather name="arrow-left" size={24} color="#fff" /></TouchableOpacity>
+        <TouchableOpacity onPress={() => navigation.goBack()}><Feather name="arrow-left" size={24} color="#fff" /></TouchableOpacity>
         <Text style={s.headerTitle}>Become a Seller</Text>
         <View style={{ width: 24 }} />
       </View>

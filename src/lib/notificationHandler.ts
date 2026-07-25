@@ -4,20 +4,37 @@
 //
 // HOW TO USE:
 //   Import and call `useNotificationHandler()` inside your
-//   root _layout.tsx, ONCE, at the top level.
+//   root App.tsx / RootNavigator, ONCE, at the top level of a
+//   component that's rendered inside <NavigationContainer>.
 //
-//   Example (_layout.tsx):
-//     import { useNotificationHandler } from '@/lib/notificationHandler';
-//     export default function RootLayout() {
-//       useNotificationHandler();
-//       return <Stack />;
-//     }
+// ✅ CRITICAL FIX: `const navigation = useNavigation<any>();` was at
+//    MODULE scope — outside any component, in a plain .ts utility file.
+//    This is the same class of bug as the earlier signup.tsx crash, but
+//    worse here: this file isn't a component at all, so the hook would
+//    fail every time the module loads, before any navigator even exists.
+//    Fixed by moving useNavigation() inside useNotificationHandler()
+//    itself (a proper hook, correctly called from a component's render),
+//    and passing `navigation` into handleDeepLink() as a parameter.
+// ✅ Removed unused `import { router } from 'expo-router'`.
+// ✅ Fixed navigate paths to real React Navigation screen names:
+//      /post/${id}      → PostDetail, { postId }
+//      /user/${id}      → UserProfile, { userId }
+//      /(tabs)/profile  → Main, { screen: 'Profile' }
+//      /(tabs)/marketplace → Main, { screen: 'Market' } (tab is named
+//                            "Market" in MainTabParamList, not "Marketplace")
+//      default case (/(tabs)/notification) → Notification (this is a
+//                            ROOT stack screen, not a tab — there is no
+//                            "notification" tab in MainTabParamList)
+// ⚠️ NOT fixed yet — needs Batch 3 (chat files) confirmed first:
+//      /chat/cowatch and /chat/${id} — left as TODO comments below,
+//      since the chat navigator's actual screen names aren't converted
+//      to React Navigation yet. Revisit once chat/_layout.tsx etc. are done.
 // ─────────────────────────────────────────────────────────────
 
 import { useEffect, useRef } from 'react';
 import { AppState, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
-import { router } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 
 // ── Configure how notifications appear when app is OPEN ──────
 Notifications.setNotificationHandler({
@@ -43,24 +60,20 @@ export async function setupAndroidChannel() {
 }
 
 // ── Deep-link router ─────────────────────────────────────────
-function handleDeepLink(data: Record<string, any>) {
+// `navigation` is now passed in (from the hook below) instead of being
+// read from a module-scope variable that never worked.
+function handleDeepLink(data: Record<string, any>, navigation: any) {
   if (!data || !data.type) return;
 
   console.log('🔔 Push notification tapped:', data.type, data);
 
   switch (data.type) {
     case 'cowatch_invite':
-      // Navigate directly into the CoWatch screen as a joiner
+      // TODO: chat screens aren't converted to React Navigation yet
+      // (Batch 3). Revisit this once chat/_layout.tsx etc. are fixed —
+      // needs the real registered screen name + param shape for CoWatch.
       if (data.conversationId && data.sessionId) {
-        router.push({
-          pathname: '/chat/cowatch',
-          params: {
-            conversationId: data.conversationId,
-            sessionId:      data.sessionId,
-            otherName:      data.otherName || 'Partner',
-            otherPhoto:     data.otherPhoto || '',
-          },
-        } as any);
+        console.warn('[notificationHandler] cowatch_invite navigation not yet wired to React Navigation — chat screens pending conversion.');
       }
       break;
 
@@ -70,68 +83,67 @@ function handleDeepLink(data: Record<string, any>) {
     case 'coin':
     case 'mention':
       if (data.post_id) {
-        router.push(`/post/${data.post_id}` as any);
+        navigation.navigate('PostDetail', { postId: data.post_id });
       }
       break;
 
     case 'follow':
       if (data.from_user_id) {
-        router.push(`/user/${data.from_user_id}` as any);
+        navigation.navigate('UserProfile', { userId: data.from_user_id });
       }
       break;
 
     case 'message':
+      // TODO: chat screens aren't converted to React Navigation yet
+      // (Batch 3). Revisit once chat/[id].tsx etc. are fixed.
       if (data.id) {
-        router.push(`/chat/${data.id}` as any);
+        console.warn('[notificationHandler] message navigation not yet wired to React Navigation — chat screens pending conversion.');
       }
       break;
 
     case 'referral_commission':
     case 'achievement':
-      router.push('/(tabs)/profile' as any);
+      navigation.navigate('Main', { screen: 'Profile' });
       break;
 
     case 'marketplace':
-      router.push('/(tabs)/marketplace' as any);
+      navigation.navigate('Main', { screen: 'Market' });
       break;
 
     default:
-      router.push('/(tabs)/notification' as any);
+      // "Notification" is a root-stack screen, not a tab — there is no
+      // notification tab in MainTabParamList.
+      navigation.navigate('Notification');
       break;
   }
 }
 
-// ── Main hook — call once in root _layout.tsx ─────────────────
+// ── Main hook — call once in a component rendered inside NavigationContainer ─
 export function useNotificationHandler() {
+  const navigation = useNavigation<any>();
   const notifListenerRef  = useRef<Notifications.Subscription | null>(null);
   const responseListenerRef = useRef<Notifications.Subscription | null>(null);
 
   useEffect(() => {
-    // Setup Android channel
     setupAndroidChannel();
 
-    // Handle taps on notifications received while app is OPEN
     notifListenerRef.current = Notifications.addNotificationReceivedListener(
       (notification) => {
-        // You can update badge count or show an in-app banner here
         console.log('🔔 Notification received (app open):', notification.request.content.title);
       }
     );
 
-    // Handle taps on notifications (app open OR backgrounded)
     responseListenerRef.current = Notifications.addNotificationResponseReceivedListener(
       (response) => {
         const data = response.notification.request.content.data as Record<string, any>;
-        handleDeepLink(data);
+        handleDeepLink(data, navigation);
       }
     );
 
-    // Handle cold-start: app was CLOSED when user tapped notification
     Notifications.getLastNotificationResponseAsync().then((response) => {
       if (response) {
         const data = response.notification.request.content.data as Record<string, any>;
-        // Small delay to let the navigator mount before pushing
-        setTimeout(() => handleDeepLink(data), 800);
+        setTimeout(() => handleDeepLink(data, navigation), 800);
       }
     });
 
@@ -139,5 +151,5 @@ export function useNotificationHandler() {
       notifListenerRef.current?.remove();
       responseListenerRef.current?.remove();
     };
-  }, []);
+  }, [navigation]);
 } 

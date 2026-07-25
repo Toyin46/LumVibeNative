@@ -1,4 +1,4 @@
-// FILE: app/chat/group/[id].tsx
+// src/chat/group/[id].tsx
 // ─────────────────────────────────────────────────────────────
 // LumVibe — Group Chat Screen
 // ✅ Full real-time group messaging
@@ -7,6 +7,19 @@
 // ✅ Message reactions
 // ✅ Member avatars on messages
 // ─────────────────────────────────────────────────────────────
+//
+// ✅ Removed TWO dead expo-router imports:
+//    `import { router, useLocalSearchParams } from 'expo-router'`
+//    `import { navigate } from 'expo-router/build/global-state/routing'`
+//    Neither `router` nor the bare `navigate` function were ever called
+//    anywhere in this file.
+// ✅ CRITICAL FIX: `useNavigation()` was at MODULE scope. Moved inside
+//    GroupChatScreen().
+// ✅ Converted route param: `id` now comes from useRoute() against
+//    ChatStackParamList's GroupChat: { id: string }.
+// ⚠️ GroupInfo screen isn't converted/registered yet (see ChatStack.tsx
+//    TODO) — the navigate call below points at the correct future
+//    screen name so no further changes are needed here once it exists.
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -14,13 +27,18 @@ import {
   StyleSheet, SafeAreaView, StatusBar, KeyboardAvoidingView,
   Platform, Image, ActivityIndicator, Alert, Modal,
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../../config/supabase'; 
-import { useAuthStore } from '../../store/authStore'; 
+import { supabase } from '../../config/supabase';
+import { useAuthStore } from '../../store/authStore';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { ChatStackParamList } from '../../navigation/ChatStackTypes';
+
+type GroupChatRouteProp = RouteProp<ChatStackParamList, 'GroupChat'>;
+type NavProp = NativeStackNavigationProp<ChatStackParamList>;
 
 const C = {
   black: '#000000', card: '#1a1a1a', card2: '#222222',
@@ -74,7 +92,10 @@ async function uploadImage(uri: string): Promise<string | null> {
 }
 
 export default function GroupChatScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const navigation = useNavigation<NavProp>();
+  const route = useRoute<GroupChatRouteProp>();
+  const { id } = route.params;
+
   const { user } = useAuthStore();
   const flatRef = useRef<FlatList>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -93,7 +114,7 @@ export default function GroupChatScreen() {
 
   useEffect(() => {
     if (!id || id === 'new-group' || id === 'undefined') {
-      Alert.alert('Error', 'Invalid group.'); router.back(); return;
+      Alert.alert('Error', 'Invalid group.'); navigation.goBack(); return;
     }
     loadGroup();
     loadMessages();
@@ -310,9 +331,8 @@ export default function GroupChatScreen() {
     <SafeAreaView style={s.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.black} />
 
-      {/* Header */}
       <View style={s.header}>
-        <TouchableOpacity style={s.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={s.backBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="chevron-back" size={22} color={C.white} />
         </TouchableOpacity>
         <View style={s.groupAv}>
@@ -323,7 +343,7 @@ export default function GroupChatScreen() {
           <Text style={s.memberCount}>{group?.member_count || 0} members</Text>
         </View>
         <TouchableOpacity style={s.infoBtn}
-          onPress={() => router.push({ pathname: '/chat/group/info', params: { id } } as any)}>
+          onPress={() => navigation.navigate('GroupInfo', { id })}>
           <Ionicons name="information-circle-outline" size={22} color={C.muted} />
         </TouchableOpacity>
       </View>
@@ -345,14 +365,12 @@ export default function GroupChatScreen() {
           }
         />
 
-        {/* Attach row */}
         <View style={s.attachRow}>
           <TouchableOpacity style={s.attachBtn} onPress={sendImage}>
             <Ionicons name="image-outline" size={20} color={C.muted} />
           </TouchableOpacity>
         </View>
 
-        {/* Input */}
         <View style={s.inputBar}>
           <TouchableOpacity
             style={[s.micBtn, isRecording && { borderColor: C.red }]}
@@ -388,7 +406,6 @@ export default function GroupChatScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      {/* Reaction picker */}
       <Modal visible={showReact} transparent animationType="fade" onRequestClose={() => setShowReact(false)}>
         <TouchableOpacity style={s.reactOverlay} onPress={() => setShowReact(false)}>
           <View style={s.reactPicker}>
@@ -453,4 +470,4 @@ const s = StyleSheet.create({
   reactOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   reactPicker:  { flexDirection: 'row', backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 28, paddingVertical: 10, paddingHorizontal: 14, gap: 12 },
   deleteBtn:    { flexDirection: 'row', alignItems: 'center', marginTop: 12, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 20, paddingVertical: 10, paddingHorizontal: 20 },
-});
+}); 

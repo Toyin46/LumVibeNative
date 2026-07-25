@@ -1,8 +1,14 @@
-// app/user/[id].tsx - COMPLETE USER PROFILE SCREEN
+// src/user/[id].tsx - COMPLETE USER PROFILE SCREEN
 // ✅ Post thumbnails now navigate to post/[id] detail screen
 // ✅ Real-time like and comment counts fetched from likes/comments tables
 // ✅ Follow/unfollow with notification
 // ✅ Stats from actual follows table
+//
+// ✅ Converted from expo-router to React Navigation — this app uses
+//    RootNavigator (React Navigation), not expo-router's file-based
+//    routing. useLocalSearchParams/useRouter don't exist here; the
+//    equivalents are useRoute/useNavigation. Route param name matches
+//    RootStackParamList: UserProfile: { userId?: string }.
 
 import React, { useState, useEffect } from 'react';
 import {
@@ -16,17 +22,23 @@ import {
   Dimensions,
   RefreshControl,
 } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../config/supabase'; 
-import { useAuthStore } from '../store/authStore'; 
+import { supabase } from '../config/supabase';
+import { useAuthStore } from '../store/authStore';
+import type { RootStackParamList } from '../navigation/types';
+
+type UserProfileRouteProp = RouteProp<RootStackParamList, 'UserProfile'>;
+type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
 const { width } = Dimensions.get('window');
 const POST_SIZE = (width - 6) / 3;
 
 export default function UserProfileScreen() {
-  const { id } = useLocalSearchParams();
-  const router = useRouter();
+  const route      = useRoute<UserProfileRouteProp>();
+  const navigation = useNavigation<NavProp>();
+  const id         = route.params?.userId;
   const { user: currentUser } = useAuthStore();
 
   const [profile,       setProfile]       = useState<any>(null);
@@ -83,7 +95,6 @@ export default function UserProfileScreen() {
 
       if (!data || data.length === 0) { setPosts([]); return; }
 
-      // ✅ Fetch real-time like + comment counts from actual tables
       const enriched = await Promise.all(data.map(async (post: any) => {
         try {
           const [{ count: lc }, { count: cc }] = await Promise.all([
@@ -126,7 +137,6 @@ export default function UserProfileScreen() {
           follower_id:  currentUser.id,
           following_id: id,
         });
-        // Notify the user
         await supabase.from('notifications').insert({
           user_id:      id,
           type:         'follow',
@@ -155,7 +165,7 @@ export default function UserProfileScreen() {
     return (
       <View style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => navigation.goBack()}>
             <Ionicons name="arrow-back" size={24} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Profile</Text>
@@ -172,7 +182,7 @@ export default function UserProfileScreen() {
     return (
       <View style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => navigation.goBack()}>
             <Ionicons name="arrow-back" size={24} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Profile</Text>
@@ -192,7 +202,7 @@ export default function UserProfileScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>@{profile.username}</Text>
@@ -205,7 +215,6 @@ export default function UserProfileScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00ff88" />}
       >
-        {/* Profile Header */}
         <View style={styles.profileSection}>
           <View style={styles.topRow}>
             {avatarUrl ? (
@@ -255,18 +264,16 @@ export default function UserProfileScreen() {
             </TouchableOpacity>
           )}
 
-          {/* If own profile — go to full profile */}
           {isOwnProfile && (
             <TouchableOpacity
               style={styles.editProfileBtn}
-              onPress={() => router.push('/(tabs)/profile' as any)}
+              onPress={() => navigation.navigate('Main', { screen: 'Profile' } as any)}
             >
               <Text style={styles.editProfileBtnText}>View My Profile</Text>
             </TouchableOpacity>
           )}
         </View>
 
-        {/* Posts Grid */}
         <View style={styles.postsSection}>
           <Text style={styles.sectionTitle}>Posts</Text>
           {posts.length === 0 ? (
@@ -281,11 +288,10 @@ export default function UserProfileScreen() {
                 const isVoicePost = post.media_type === 'voice';
 
                 return (
-                  // ✅ KEY FIX: onPress now navigates to full post detail
                   <TouchableOpacity
                     key={post.id}
                     style={styles.postThumbnail}
-                    onPress={() => router.push(`/post/${post.id}` as any)}
+                    onPress={() => navigation.navigate('PostDetail', { postId: post.id })}
                     activeOpacity={0.8}
                   >
                     {isTextPost ? (
@@ -308,7 +314,6 @@ export default function UserProfileScreen() {
                       </View>
                     )}
 
-                    {/* ✅ Real-time counts shown on thumbnail */}
                     <View style={styles.postStats}>
                       <View style={styles.postStat}>
                         <Ionicons name="heart" size={11} color="#fff" />

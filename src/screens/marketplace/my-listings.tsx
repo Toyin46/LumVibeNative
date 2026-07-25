@@ -1,14 +1,25 @@
-// app/(tabs)/marketplace/my-listings.tsx
+// src/screens/marketplace/my-listings.tsx
+//
+// ✅ Fixed all navigate() calls from expo-router path strings to real
+//    React Navigation screen names within MarketplaceStackParamList.
+// ⚠️ 'ListingDetail' and 'SellerDashboard' aren't registered in
+//    MarketplaceStack.tsx yet (source files not converted) — calls to
+//    them are left pointing at the correct future screen name so no
+//    further changes are needed here once those screens exist.
+
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   Image, Alert, ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
-import { supabase } from '../../config/supabase'; 
-import { useAuthStore } from '../../store/authStore'; 
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { supabase } from '../../config/supabase';
+import { useAuthStore } from '../../store/authStore';
+import type { MarketplaceStackParamList } from '../../navigation/MarketplaceStackTypes';
+
+type NavProp = NativeStackNavigationProp<MarketplaceStackParamList>;
 
 function StarRating({ rating }: { rating: number }) {
   return (
@@ -21,7 +32,7 @@ function StarRating({ rating }: { rating: number }) {
 }
 
 export default function MyListingsScreen() {
-  const router  = useRouter();
+  const navigation = useNavigation<NavProp>();
   const { user } = useAuthStore();
   const [listings,   setListings]   = useState<any[]>([]);
   const [loading,    setLoading]    = useState(true);
@@ -67,7 +78,7 @@ export default function MyListingsScreen() {
 
   const renderListing = ({ item }: { item: any }) => (
     <View style={s.card}>
-      <TouchableOpacity onPress={() => router.push(`/(tabs)/marketplace/listing/${item.id}` as any)}>
+      <TouchableOpacity onPress={() => navigation.navigate('ListingDetail', { listingId: item.id })}>
         <View style={s.thumb}>
           {item.portfolio_urls?.[0] ? (
             <Image source={{ uri: item.portfolio_urls[0] }} style={s.thumbImg} />
@@ -103,7 +114,7 @@ export default function MyListingsScreen() {
           </View>
         </View>
         <View style={s.actions}>
-          <TouchableOpacity style={s.editBtn} onPress={() => router.push(`/(tabs)/marketplace/listing/${item.id}` as any)}>
+          <TouchableOpacity style={s.editBtn} onPress={() => navigation.navigate('ListingDetail', { listingId: item.id })}>
             <Feather name="eye" size={14} color="#00ff88" />
             <Text style={s.editBtnText}>View</Text>
           </TouchableOpacity>
@@ -122,11 +133,11 @@ export default function MyListingsScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>My Listings</Text>
-        <TouchableOpacity style={s.createBtn} onPress={() => router.push('/(tabs)/marketplace/create-listing')}>
+        <TouchableOpacity style={s.createBtn} onPress={() => navigation.navigate('CreateListing')}>
           <Feather name="plus" size={20} color="#000" />
         </TouchableOpacity>
       </View>
@@ -145,7 +156,7 @@ export default function MyListingsScreen() {
             <Text style={s.quickStatNum}>{listings.reduce((a, l) => a + (l.views_count || 0), 0)}</Text>
             <Text style={s.quickStatLabel}>Total Views</Text>
           </View>
-          <TouchableOpacity style={s.quickStat} onPress={() => router.push('/(tabs)/marketplace/seller-dashboard')}>
+          <TouchableOpacity style={s.quickStat} onPress={() => navigation.navigate('SellerDashboard')}>
             <Text style={[s.quickStatNum, { color: '#00ff88' }]}>💰</Text>
             <Text style={s.quickStatLabel}>Earnings</Text>
           </TouchableOpacity>
@@ -166,7 +177,7 @@ export default function MyListingsScreen() {
               <Text style={{ fontSize: 48 }}>🛍️</Text>
               <Text style={s.emptyTitle}>No listings yet</Text>
               <Text style={s.emptySubtitle}>Create your first service and start earning!</Text>
-              <TouchableOpacity style={s.createLargeBtn} onPress={() => router.push('/(tabs)/marketplace/create-listing')}>
+              <TouchableOpacity style={s.createLargeBtn} onPress={() => navigation.navigate('CreateListing')}>
                 <Text style={s.createLargeBtnText}>+ Create a Listing</Text>
               </TouchableOpacity>
             </View>

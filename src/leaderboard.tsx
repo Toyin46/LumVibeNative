@@ -1,5 +1,14 @@
-// app/leaderboard.tsx - UPGRADED: Weekly winners podium + countdown + proper filter logic
+// src/leaderboard.tsx - UPGRADED: Weekly winners podium + countdown + proper filter logic
 // ✅ Translations added via useTranslation()
+//
+// ✅ Fixed: removed `import { useRouter } from 'expo-router'` (this app
+//    uses React Navigation, not expo-router — same root cause as every
+//    other expo-router crash this session).
+// ✅ Fixed: `router.push(...)` / `router.back()` referenced a `router`
+//    variable that was never defined anywhere in this file — a genuine
+//    ReferenceError waiting to happen regardless of the expo-router
+//    import. Routed through the `navigation` object that was already
+//    correctly set up at the top of the component.
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -8,9 +17,13 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { supabase } from './config/supabase'; 
-import { useTranslation } from './locales/LanguageContext'; 
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { supabase } from './config/supabase';
+import { useTranslation } from './locales/LanguageContext';
+import type { RootStackParamList } from './navigation/types';
+
+type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
 interface LeaderboardUser {
   id: string; username: string; display_name: string; avatar_url: string;
@@ -176,7 +189,7 @@ const prevStyles = StyleSheet.create({
 });
 
 export default function LeaderboardScreen() {
-  const router = useRouter();
+  const navigation = useNavigation<NavProp>();
   const { t }  = useTranslation();
   const [users,           setUsers]           = useState<LeaderboardUser[]>([]);
   const [previousWinners, setPreviousWinners] = useState<WeeklyWinner[]>([]);
@@ -225,7 +238,9 @@ export default function LeaderboardScreen() {
     finally { setLoading(false); }
   };
 
-  const handleUserPress = (id: string) => router.push(`/user/${id}`);
+  // ✅ Fixed: was `router.push('/user/${id}')` — `router` didn't exist
+  // anywhere in this file. Uses the navigation object already set up above.
+  const handleUserPress = (id: string) => navigation.navigate('UserProfile', { userId: id });
   const getDisplayPoints = (user: LeaderboardUser) => filter === 'all' ? user.points : user.weekly_points;
 
   const renderUser = ({ item }: { item: LeaderboardUser }) => {
@@ -268,7 +283,8 @@ export default function LeaderboardScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+        {/* ✅ Fixed: was router.back() — router didn't exist in this file */}
+        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>🏆 {t.leaderboard.title}</Text>

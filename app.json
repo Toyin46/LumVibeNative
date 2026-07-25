@@ -30,7 +30,14 @@
     },
     "plugins": [
       "expo-audio",
-      "expo-build-properties",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "2.2.20"
+          }
+        }
+      ],
       "expo-localization",
       "expo-secure-store",
       "expo-video",
@@ -45,4 +52,4 @@
       ]
     ]
   }
-}
+} 

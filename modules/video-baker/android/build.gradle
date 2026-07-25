@@ -1,0 +1,25 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'com.lumvibe.videobaker'
+version = '1.0.0'
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace "com.lumvibe.videobaker"
+  defaultConfig {
+    minSdkVersion 24
+    targetSdkVersion 36
+  }
+  compileSdk 36
+}
+
+dependencies {
+  // Intentionally no FFmpeg / third-party media dependency.
+  // Everything here is android.media.* and android.opengl.* (built into the OS, free).
+}

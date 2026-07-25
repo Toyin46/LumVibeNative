@@ -2,22 +2,31 @@
 // BeatSyncMarkers.tsx — Beat detection + timeline markers
 // PATH: src/components/BeatSyncMarkers.tsx
 //
-// FIX: expo-file-system v18+ exposes directories as
-//      FileSystem.cacheDirectory (string | null) and
-//      FileSystem.documentDirectory (string | null).
-//      Accessing them via the module object is correct but
-//      TypeScript strict mode complains when the import
-//      namespace type doesn't include those keys.
-//      Solution: import the specific constants directly.
+// ✅ Beat DETECTION is fully replaced — no FFmpeg needed.
+//    react-native-audio-api's decodeAudioData() + AudioBuffer
+//    give direct access to raw PCM samples (Float32Array), so
+//    RMS energy analysis runs entirely in JS. This is actually
+//    more precise than the old FFmpeg astats log-parsing hack,
+//    and needs no temp files.
+//
+// ⚠️ Auto-sync (actually CUTTING the video at beat timestamps)
+//    is NOT replaced yet. That's frame-level video editing —
+//    audio libraries can't do it. It needs a Cloudinary video
+//    splice (fl_splice) pipeline: upload once, then build an
+//    eager transform that trims+concats segments at the beat
+//    timestamps. Same category of problem as Movie Studio scene
+//    concatenation and duet merging — deserves its own build,
+//    not a quick bolt-on here. Until then, "Auto Sync" is
+//    disabled with an honest message instead of silently doing
+//    nothing or crashing.
 // ═══════════════════════════════════════════════════════════
 
 import React, { useEffect, useState, useCallback, memo } from 'react';
 import {
   View, Text, TouchableOpacity,
-  ActivityIndicator, StyleSheet, Dimensions,
+  ActivityIndicator, StyleSheet, Dimensions, Alert,
 } from 'react-native';
-import { FFmpegKit, ReturnCode } from 'ffmpeg-kit-react-native';
-import * as FileSystem from 'expo-file-system';
+import { AudioContext } from 'react-native-audio-api';
 import * as Haptics from 'expo-haptics';
 import { Feather } from '@expo/vector-icons';
 
@@ -36,60 +45,49 @@ interface Props {
   visible:       boolean;
 }
 
-// FIX: use the named imports instead of FileSystem.cacheDirectory
-function getCacheDir(): string {
-  const fs = FileSystem as any
-  return (fs.cacheDirectory as string | null)
-    ?? (fs.documentDirectory as string | null)
-    ?? '';
-}
-
+// ─── Beat detection via direct PCM analysis ───────────────
+// Decodes the audio file, walks the raw sample array in small
+// windows, computes RMS (energy) per window, then flags a beat
+// wherever energy spikes meaningfully above its local rolling
+// average — same underlying idea as the FFmpeg version, just
+// computed directly on samples instead of parsed from a log file.
 async function detectBeatMarkers(audioUri: string): Promise<BeatMarker[]> {
   try {
-    const logFile = `${getCacheDir()}beatlog_${Date.now()}.txt`;
+    const ctx = new AudioContext();
+    const audioBuffer = await ctx.decodeAudioData(audioUri);
+    const sampleRate  = audioBuffer.sampleRate;
+    const channelData = audioBuffer.getChannelData(0); // Float32Array, samples in [-1, 1]
 
-    const cmd = [
-      `-y -i "${audioUri}"`,
-      `-af "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=${logFile}"`,
-      `-f null /dev/null`,
-    ].join(' ');
+    const WINDOW_SECONDS = 0.05; // 50ms windows
+    const windowSize = Math.max(1, Math.floor(sampleRate * WINDOW_SECONDS));
 
-    await FFmpegKit.execute(cmd);
-
-    let raw = '';
-    try { raw = await FileSystem.readAsStringAsync(logFile); } catch { raw = ''; }
+    const rmsValues: number[] = [];
+    for (let i = 0; i < channelData.length; i += windowSize) {
+      const end = Math.min(i + windowSize, channelData.length);
+      let sumSquares = 0;
+      for (let j = i; j < end; j++) sumSquares += channelData[j] * channelData[j];
+      rmsValues.push(Math.sqrt(sumSquares / (end - i)));
+    }
 
     const markers: BeatMarker[] = [];
+    const ROLLING_WINDOW = 8; // ~400ms rolling average
+    const MIN_RMS_FLOOR  = 0.02; // ignore near-silence
 
-    if (raw.trim().length > 0) {
-      const lines  = raw.split('\n');
-      const points: { t: number; rms: number }[] = [];
+    for (let i = ROLLING_WINDOW; i < rmsValues.length; i++) {
+      let sum = 0;
+      for (let k = i - ROLLING_WINDOW; k < i; k++) sum += rmsValues[k];
+      const avg     = sum / ROLLING_WINDOW;
+      const current = rmsValues[i];
 
-      for (const line of lines) {
-        const timeMatch = line.match(/pts_time:([\d.]+)/);
-        const rmsMatch  = line.match(/RMS_level=([-\d.]+)/);
-        if (timeMatch && rmsMatch) {
-          const rms = parseFloat(rmsMatch[1]);
-          if (isFinite(rms)) {
-            points.push({ t: parseFloat(timeMatch[1]), rms });
-          }
-        }
-      }
-
-      if (points.length > 4) {
-        const window = 5;
-        for (let i = window; i < points.length; i++) {
-          const avg     = points.slice(i - window, i).reduce((s, p) => s + p.rms, 0) / window;
-          const current = points[i].rms;
-          if (current > avg + 4 && current > -40) {
-            const intensity = Math.min(1, (current - avg) / 20);
-            markers.push({ time: points[i].t, intensity });
-          }
-        }
+      if (current > avg * 1.5 && current > MIN_RMS_FLOOR) {
+        const time      = (i * windowSize) / sampleRate;
+        const intensity = Math.min(1, (current - avg) / (avg + 0.001));
+        markers.push({ time, intensity });
       }
     }
 
-    // Fallback: 120 BPM grid if detection returned nothing
+    // Fallback: 120 BPM grid if detection returned too little
+    // (e.g. very quiet or ambient track with no clear transients)
     if (markers.length < 2) {
       const interval = 60 / 120;
       for (let t = interval; t < 60; t += interval) {
@@ -104,45 +102,11 @@ async function detectBeatMarkers(audioUri: string): Promise<BeatMarker[]> {
   }
 }
 
-async function autoSyncVideoToBeats(
-  videoUri: string,
-  markers:  BeatMarker[],
-): Promise<string> {
-  try {
-    if (markers.length < 2) return videoUri;
-
-    const clipDuration = 0.5;
-    const parts = markers.slice(0, 20).map(m =>
-      `between(t\\,${m.time.toFixed(2)}\\,${(m.time + clipDuration).toFixed(2)})`
-    );
-    const selectFilter = parts.join('+');
-    const outputUri    = `${getCacheDir()}beatsynced_${Date.now()}.mp4`;
-
-    const cmd = [
-      `-y -i "${videoUri}"`,
-      `-vf "select='${selectFilter}',setpts=N/FRAME_RATE/TB"`,
-      `-af "aselect='${selectFilter}',asetpts=N/SR/TB"`,
-      `-c:v libx264 -preset fast -crf 22`,
-      `"${outputUri}"`,
-    ].join(' ');
-
-    const session = await FFmpegKit.execute(cmd);
-    if (ReturnCode.isSuccess(await session.getReturnCode())) {
-      return outputUri;
-    }
-    return videoUri;
-  } catch (e) {
-    console.warn('[BeatSyncMarkers] Auto sync failed:', e);
-    return videoUri;
-  }
-}
-
 const BeatSyncMarkers = memo(function BeatSyncMarkers({
   musicUri, videoDuration, videoUri, onSynced, visible,
 }: Props) {
   const [markers,  setMarkers]  = useState<BeatMarker[]>([]);
   const [loading,  setLoading]  = useState(false);
-  const [syncing,  setSyncing]  = useState(false);
   const [analysed, setAnalysed] = useState(false);
 
   useEffect(() => {
@@ -155,15 +119,15 @@ const BeatSyncMarkers = memo(function BeatSyncMarkers({
     return () => { cancelled = true; };
   }, [musicUri, visible]);
 
-  const handleAutoSync = useCallback(async () => {
-    if (!videoUri || markers.length < 2) return;
-    setSyncing(true);
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    const synced = await autoSyncVideoToBeats(videoUri, markers);
-    onSynced(synced);
-    setSyncing(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  }, [videoUri, markers, onSynced]);
+  // Auto Sync (video cutting) is not implemented yet — see header note.
+  // Tapping it explains why, instead of silently no-op'ing or crashing.
+  const handleAutoSync = useCallback(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    Alert.alert(
+      'Coming Soon',
+      'Auto-cutting your video to the beat is being rebuilt on a new engine and isn\'t ready yet. Beat markers below are accurate — you can still cut manually to them.'
+    );
+  }, []);
 
   if (!visible || !musicUri) return null;
 
@@ -179,19 +143,9 @@ const BeatSyncMarkers = memo(function BeatSyncMarkers({
           <Text style={s.markerCount}>{markers.length} beats detected</Text>
         )}
         {analysed && !loading && videoUri && (
-          <TouchableOpacity
-            style={[s.syncBtn, syncing && s.syncBtnDisabled]}
-            onPress={handleAutoSync}
-            disabled={syncing}
-          >
-            {syncing ? (
-              <ActivityIndicator size="small" color="#000" />
-            ) : (
-              <>
-                <Feather name="zap" size={12} color="#000" />
-                <Text style={s.syncBtnTxt}>Auto Sync</Text>
-              </>
-            )}
+          <TouchableOpacity style={s.syncBtn} onPress={handleAutoSync}>
+            <Feather name="zap" size={12} color="#000" />
+            <Text style={s.syncBtnTxt}>Auto Sync</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -260,7 +214,6 @@ const s = StyleSheet.create({
     backgroundColor: '#ffd700', borderRadius: 10,
     paddingHorizontal: 12, paddingVertical: 6,
   },
-  syncBtnDisabled: { opacity: 0.5 },
   syncBtnTxt:      { color: '#000', fontSize: 12, fontWeight: '800' },
   timeline:        { height: 28, position: 'relative', marginBottom: 20 },
   track: {

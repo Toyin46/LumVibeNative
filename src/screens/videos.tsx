@@ -1,7 +1,7 @@
 // app/(tabs)/videos.tsx — LUMVIBE VIDEO FEED
 // ✅ Bare workflow — react-native-video replaces expo-av Video
 // ✅ Immerse mode removed completely
-// ✅ Watermark + filters + effects baked into saved file via FFmpegKit fork
+// ✅ Watermark + filters + effects baked server-side via Cloudinary eager transform (see create.tsx)
 // ✅ Co-Watch button + AI Match Me entry added to right action bar
 // ✅ Vibe Room tab + button added
 // ✅ Ad + winner card double-injection fixed, badge multiplier fixed
@@ -23,7 +23,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import Video from 'react-native-video';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
 import { useAuthStore } from '../store/authStore';
@@ -31,7 +31,6 @@ import { supabase } from '../config/supabase';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
-import { FFmpegKit, ReturnCode } from 'ffmpeg-kit-react-native';
 
 const { width, height } = Dimensions.get('window');
 
@@ -1070,42 +1069,10 @@ const VideoPost = memo(function VideoPost({
   prev.activePostId         === next.activePostId
 );
 
-// ─── FFMPEG TINT FILTER BUILDER ──────────────────────────────────────────────
-function buildTintFilter(filterName: string, filterTint?: string | null): string | null {
-  const presets: Record<string, string> = {
-    original:  '',
-    beauty:    'unsharp=5:5:1.5:5:5:0,eq=brightness=0.05:contrast=1.1:saturation=1.2',
-    vintage:   'curves=vintage,eq=saturation=0.7:brightness=-0.05',
-    cool:      'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131,eq=contrast=1.1',
-    warm:      'eq=saturation=1.3:brightness=0.05,colorchannelmixer=1.1:0:0:0:0:0.9:0:0:0:0:0:0.8',
-    dramatic:  'eq=contrast=1.4:brightness=-0.1:saturation=1.5,vignette',
-    bright:    'eq=brightness=0.08:contrast=0.95:saturation=1.1',
-    noir:      'colorchannelmixer=.299:.587:.114:0:.299:.587:.114:0:.299:.587:.114,eq=contrast=1.6:brightness=-0.04',
-    neon:      'eq=contrast=1.3:saturation=2.0,hue=s=2',
-    sunset:    'eq=saturation=1.4:brightness=0.02:contrast=1.2,colorchannelmixer=1.1:0:0:0:0:0.9:0:0:0:0:0:0.8',
-    cinematic: 'curves=preset=strong_contrast,vignette,pad=iw:ih+80:0:40:black,crop=iw:ih-80:0:40',
-    golden:    'eq=brightness=0.04:contrast=1.08:saturation=1.3,colorchannelmixer=1.1:0:0:0:0:0.95:0:0:0:0:0:0.85',
-    rose:      'eq=brightness=0.03:saturation=1.1,colorchannelmixer=1.05:0:0:0:0:0.9:0:0:0:0:0:0.95',
-    glitch:    'rgbashift=rh=3:bh=-3,chromashift=cbh=2:crh=-2,eq=contrast=1.35:saturation=1.8',
-  };
-
-  if (filterName && presets[filterName] !== undefined) return presets[filterName] || null;
-
-  if (filterTint) {
-    const match = filterTint.match(/rgba?\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/);
-    if (match) {
-      const r  = parseInt(match[1]) / 255;
-      const g  = parseInt(match[2]) / 255;
-      const b  = parseInt(match[3]) / 255;
-      const a  = parseFloat(match[4]);
-      const rs = ((r - 0.5) * a * 0.5).toFixed(2);
-      const gs = ((g - 0.5) * a * 0.5).toFixed(2);
-      const bs = ((b - 0.5) * a * 0.5).toFixed(2);
-      return `colorbalance=rs=${rs}:gs=${gs}:bs=${bs}`;
-    }
-  }
-  return null;
-}
+// ─── (FFmpeg tint filter builder removed — watermark/filter baking now happens
+// server-side via Cloudinary eager transform at upload time. See create.tsx
+// uploadVideoToCloudinary(). handleSaveMedia below just downloads the
+// pre-baked watermarked_url when available.) ────────────────────────────────
 
 // ─── MAIN SCREEN ──────────────────────────────────────────────────────────────
 export default function VideosScreen() {
@@ -1650,9 +1617,12 @@ export default function VideosScreen() {
 
   const handleSaveMedia = useCallback(async (post: Post) => {
     if (!post.media_url) return;
+    const hasBakedVersion = !!post.watermarked_url;
     Alert.alert(
       t.videos.saveVideo,
-      'Save this video? Watermark, filter and effects will be baked in.',
+      hasBakedVersion
+        ? 'Save this video? Watermark and effects are already baked in.'
+        : 'Save this video?',
       [
         { text: t.common.cancel, style: 'cancel' },
         { text: t.common.save, onPress: async () => {
@@ -1660,67 +1630,25 @@ export default function VideosScreen() {
             const { status } = await MediaLibrary.requestPermissionsAsync();
             if (status !== 'granted') { Alert.alert(t.videos.permissionDenied, t.videos.permissionMsg); return; }
 
-            const rawFileName = `lumvibe_raw_${post.id}_${Date.now()}.mp4`;
-            const rawUri = `${FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? ''}${rawFileName}`;
+            const sourceUrl = post.watermarked_url || post.media_url || '';
             const outFileName = `lumvibe_${post.id}_${Date.now()}.mp4`;
-            const outUri = `${FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? ''}${outFileName}`;
+            const outUri = `${(FileSystem as any).cacheDirectory ?? (FileSystem as any).documentDirectory ?? ''}${outFileName}`;
 
-            Alert.alert('⬇️ Downloading...', 'Processing your video with effects...');
+            Alert.alert('⬇️ Downloading...', 'Saving your video...');
 
-            const downloadResult = await FileSystem.downloadAsync(post.media_url ?? '', rawUri);
+            const downloadResult = await FileSystem.downloadAsync(sourceUrl, outUri);
             if (downloadResult.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
 
-            const postPlaybackRate = post.playback_rate ?? 1.0;
-            const tintFilter   = buildTintFilter(post.applied_filter || 'original', post.video_filter_tint);
-            const username     = post.username.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
+            const asset = await MediaLibrary.createAssetAsync(outUri);
+            await MediaLibrary.createAlbumAsync('LumVibe', asset, false);
+            await FileSystem.deleteAsync(outUri, { idempotent: true });
 
-            const buildAtempoChain = (rate: number): string => {
-              const parts: string[] = [];
-              let remaining = rate;
-              while (remaining > 2.0) { parts.push('atempo=2.0'); remaining /= 2.0; }
-              while (remaining < 0.5) { parts.push('atempo=0.5'); remaining /= 0.5; }
-              parts.push(`atempo=${remaining.toFixed(4)}`);
-              return parts.join(',');
-            };
-
-            const vfParts: string[] = [];
-            if (postPlaybackRate !== 1.0) vfParts.push(`setpts=${(1 / postPlaybackRate).toFixed(4)}*PTS`);
-            if (tintFilter) vfParts.push(tintFilter);
-            if (post.has_watermark) {
-              vfParts.push(`drawtext=text='LumVibe':fontcolor=white:fontsize=22:alpha=0.85:x=16:y=h-50`);
-              vfParts.push(`drawtext=text='@${username}':fontcolor=white:fontsize=16:alpha=0.75:x=16:y=h-26`);
-            }
-
-            const afParts: string[] = [];
-            if (postPlaybackRate !== 1.0) afParts.push(buildAtempoChain(postPlaybackRate));
-
-            const vfArg = vfParts.length > 0 ? `-vf "${vfParts.join(',')}"` : '';
-            const afArg = afParts.length > 0 ? `-af "${afParts.join(',')}"` : '';
-
-            const ffmpegCommand = `-y -i "${rawUri}" ${vfArg} ${afArg} -c:v libx264 -preset fast -crf 22 -c:a aac "${outUri}"`;
-
-            const session = await FFmpegKit.execute(ffmpegCommand);
-            const returnCode = await session.getReturnCode();
-
-            await FileSystem.deleteAsync(rawUri, { idempotent: true });
-
-            if (ReturnCode.isSuccess(returnCode)) {
-              const asset = await MediaLibrary.createAssetAsync(outUri);
-              await MediaLibrary.createAlbumAsync('LumVibe', asset, false);
-              await FileSystem.deleteAsync(outUri, { idempotent: true });
-              Alert.alert('✅ Saved!', 'Video saved with watermark and effects to your LumVibe gallery.');
-            } else {
-              console.warn('FFmpeg processing failed, saving plain video');
-              const plainDownload = await FileSystem.downloadAsync(post.media_url ?? '', outUri);
-              if (plainDownload.status === 200) {
-                const asset = await MediaLibrary.createAssetAsync(outUri);
-                await MediaLibrary.createAlbumAsync('LumVibe', asset, false);
-                await FileSystem.deleteAsync(outUri, { idempotent: true });
-                Alert.alert('✅ Saved!', 'Video saved to your LumVibe gallery (effects could not be baked on this device).');
-              } else {
-                Alert.alert('Error', 'Failed to save video. Please try again.');
-              }
-            }
+            Alert.alert(
+              '✅ Saved!',
+              hasBakedVersion
+                ? 'Video saved with watermark and effects to your LumVibe gallery.'
+                : 'Video saved to your LumVibe gallery.'
+            );
           } catch (e: any) { Alert.alert('Error', 'Failed to save video: ' + (e.message || 'Unknown error')); }
         }}
       ]

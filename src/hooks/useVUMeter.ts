@@ -2,21 +2,31 @@
 // useVUMeter.ts — Real-time VU metering + PCM buffer access
 // src/hooks/useVUMeter.ts
 //
-// PRIMARY:  react-native-audio-api → real PCM Float32Array
-// FALLBACK: expo-audio metering   → level only, buffer null
+// REWRITE: the old "primary" path used navigator.mediaDevices.getUserMedia,
+// which does not exist in React Native — it always failed, silently, on
+// every device. That forced a "fallback" that spun up a SECOND, separate
+// expo-audio AudioRecorder running in parallel with the real one in
+// useRecording.ts — two native recorder sessions fighting over the mic,
+// which is what caused the "shared object already released" crash.
+//
+// FIX: use react-native-audio-api's own native AudioRecorder in
+// "data callback" mode (onAudioReady). It hands us real PCM Float32Array
+// buffers directly — no browser API, no second file-recording session,
+// no conflict with useRecording's expo-audio recorder.
 // ═══════════════════════════════════════════════════════════
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { AudioModule, useAudioRecorder, useAudioRecorderState, RecordingPresets } from 'expo-audio';
+import { AudioModule } from 'expo-audio';
+import { AudioRecorder as NativePcmRecorder, AudioManager } from 'react-native-audio-api';
 
-// react-native-audio-api — safe optional import
-let RNAudioContext: any = null;
-try {
-  const audioApi = require('react-native-audio-api');
-  RNAudioContext = audioApi.AudioContext ?? audioApi.default?.AudioContext ?? null;
-} catch {
-  RNAudioContext = null;
-}
+const SAMPLE_RATE = 44100;
+// YIN only needs enough samples to capture ~2-3 cycles of the lowest note
+// it should detect. For an 80Hz vocal floor, one cycle is ~12.5ms — 35ms
+// gives comfortable margin for low voices while keeping YIN's O(n²) inner
+// loop cheap. The old 100ms buffer was ~8x more data than needed, which
+// was the real cause of the slowdown (YIN's cost grows with the SQUARE
+// of buffer length, so buffer size matters far more than the poll interval).
+const BUFFER_LENGTH = Math.floor(SAMPLE_RATE * 0.035);
 
 // ─── INTERFACE ─────────────────────────────────────────────
 // WHY: Interface matches EXACTLY what all existing callers expect
@@ -34,83 +44,30 @@ export function useVUMeter(): VUMeterResult {
   const [level,    setLevel]    = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(false);
 
-  // Web Audio API node refs
-  const audioCtxRef    = useRef<any>(null);
-  const sourceRef      = useRef<any>(null);
-  const analyserRef    = useRef<any>(null);
-  const processorRef   = useRef<any>(null);
-  const streamRef      = useRef<any>(null);
+  const pcmRecorderRef = useRef<any>(null);
 
-  // Shared state refs — read without re-render
   const bufferRef      = useRef<Float32Array | null>(null);
   const levelRef       = useRef<number>(0);
   const lastUpdateRef  = useRef<number>(0);
   const isActiveRef    = useRef<boolean>(false);
 
-  // Fallback metering interval ref
-  const fallbackRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Fallback recorder for expo-audio metering
-  const fallbackRecorder = useAudioRecorder({
-    ...RecordingPresets.HIGH_QUALITY,
-    isMeteringEnabled: true,
-  });
-  // FIX: metering isn't a property on the recorder instance — it comes from
-  // this separate state hook. We mirror it into a ref because the interval
-  // closure below is created once in start() and would otherwise read a
-  // stale value forever instead of the live metering reading.
-  const fallbackRecorderState = useAudioRecorderState(fallbackRecorder, 50);
-  const recorderStateRef = useRef<any>(null);
-  useEffect(() => {
-    recorderStateRef.current = fallbackRecorderState;
-  }, [fallbackRecorderState]);
-
   // ─── CLEANUP ─────────────────────────────────────────────
   // WHY: Synchronous cleanup — callers don't await stop()
   const cleanupAll = useCallback(() => {
     try {
-      // Stop fallback interval
-      if (fallbackRef.current) {
-        clearInterval(fallbackRef.current);
-        fallbackRef.current = null;
-      }
-
-      // Stop fallback recorder
-      try { fallbackRecorder.stop(); } catch { /* ignore */ }
-
-      // Disconnect Web Audio nodes
-      if (processorRef.current) {
+      if (pcmRecorderRef.current) {
         try {
-          processorRef.current.onaudioprocess = null;
-          processorRef.current.disconnect();
+          // stop() may or may not be async depending on native impl —
+          // guard both cases so a rejection can never surface as an
+          // unhandled promise rejection.
+          const result = pcmRecorderRef.current.stop?.();
+          result?.catch?.(() => {});
         } catch { /* ignore */ }
-        processorRef.current = null;
-      }
-      if (analyserRef.current) {
-        try { analyserRef.current.disconnect(); } catch { /* ignore */ }
-        analyserRef.current = null;
-      }
-      if (sourceRef.current) {
-        try { sourceRef.current.disconnect(); } catch { /* ignore */ }
-        sourceRef.current = null;
+        pcmRecorderRef.current = null;
       }
 
-      // Stop media stream tracks
-      if (streamRef.current) {
-        try {
-          streamRef.current.getTracks?.().forEach((t: any) => t.stop());
-        } catch { /* ignore */ }
-        streamRef.current = null;
-      }
-
-      // Close AudioContext
-      if (audioCtxRef.current) {
-        try { audioCtxRef.current.close(); } catch { /* ignore */ }
-        audioCtxRef.current = null;
-      }
-
-      // Reset all state
-      bufferRef.current  = null;
-      levelRef.current   = 0;
+      bufferRef.current   = null;
+      levelRef.current    = 0;
       isActiveRef.current = false;
     } catch (err) {
       console.warn('[useVUMeter] cleanup error:', err);
@@ -122,101 +79,54 @@ export function useVUMeter(): VUMeterResult {
     if (isActiveRef.current) return;
 
     try {
-      // Request microphone permission
+      // Reuses the same permission expo-audio's recorder already needs —
+      // requesting again here is safe/idempotent if already granted.
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
         console.warn('[useVUMeter] Microphone permission denied.');
         return;
       }
 
-      let webAudioStarted = false;
+      AudioManager.setAudioSessionOptions({
+        iosCategory: 'playAndRecord', // 'record' blocks simultaneous playback
+        iosMode:     'default',       // on iOS — coach speech/tones need this
+        iosOptions:  ['defaultToSpeaker'],
+      });
 
-      // ── ATTEMPT: react-native-audio-api (full PCM buffer) ──
-      if (RNAudioContext) {
-        try {
-          // WHY: getUserMedia gives us live mic stream as Web Audio source
-          const stream = await (
-            navigator?.mediaDevices?.getUserMedia?.({ audio: true }) ??
-            Promise.reject('getUserMedia unavailable')
-          );
-          streamRef.current = stream;
+      const pcmRecorder = new NativePcmRecorder();
+      pcmRecorderRef.current = pcmRecorder;
 
-          const ctx = new RNAudioContext({ sampleRate: 44100 });
-          audioCtxRef.current = ctx;
+      pcmRecorder.onAudioReady(
+        {
+          sampleRate:   SAMPLE_RATE,
+          bufferLength: BUFFER_LENGTH,
+          channelCount: 1,
+        },
+        (event: { buffer: any; numFrames: number; when: number }) => {
+          // TS confirmed the real shape: event.buffer is this library's own
+          // AudioBuffer class (same one bakeEngine.ts uses), not a raw
+          // Float32Array — so we read it the same way: getChannelData(0).
+          const samples: Float32Array = event.buffer.getChannelData(0);
+          if (!samples || samples.length === 0) return;
 
-          // Build audio processing graph: Mic → Analyser → Processor → Destination
-          const source   = ctx.createMediaStreamSource(stream);
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 2048;
+          bufferRef.current = new Float32Array(samples); // defensive copy
 
-          // WHY: ScriptProcessorNode gives us raw PCM per audio frame
-          // 2048 samples, 1 input channel, 1 output channel
-          const processor = ctx.createScriptProcessor(2048, 1, 1);
+          const now = Date.now();
+          if (now - lastUpdateRef.current >= 50) {
+            lastUpdateRef.current = now;
 
-          source.connect(analyser);
-          analyser.connect(processor);
-          // WHY: Must connect to destination or onaudioprocess never fires
-          processor.connect(ctx.destination);
+            let sumSquares = 0;
+            for (let i = 0; i < samples.length; i++) sumSquares += samples[i] * samples[i];
+            const rms = Math.sqrt(sumSquares / samples.length);
 
-          sourceRef.current    = source;
-          analyserRef.current  = analyser;
-          processorRef.current = processor;
-
-          processor.onaudioprocess = (event: any) => {
-            const inputData: Float32Array = event.inputBuffer.getChannelData(0);
-
-            // WHY: Always copy — never hold reference to inputBuffer (it's recycled)
-            bufferRef.current = new Float32Array(inputData);
-
-            const now = Date.now();
-            // WHY: Throttle setLevel to 50ms — avoids React render storm
-            if (now - lastUpdateRef.current >= 50) {
-              lastUpdateRef.current = now;
-
-              // Calculate RMS (true volume level)
-              let sumSquares = 0;
-              for (let i = 0; i < inputData.length; i++) {
-                sumSquares += inputData[i] * inputData[i];
-              }
-              const rms = Math.sqrt(sumSquares / inputData.length);
-
-              // Smooth: blend previous and current to remove jitter
-              const smoothed = levelRef.current * 0.35 + rms * 0.65;
-              levelRef.current = smoothed;
-              setLevel(smoothed);
-            }
-          };
-
-          webAudioStarted = true;
-        } catch (err) {
-          console.warn('[useVUMeter] react-native-audio-api failed, using fallback:', err);
-          cleanupAll();
-        }
-      }
-
-      // ── FALLBACK: expo-audio metering only (no PCM buffer) ──
-      if (!webAudioStarted) {
-        // WHY: bufferRef stays null — pitch detection won't work but level still works
-        bufferRef.current = null;
-
-        try {
-          await fallbackRecorder.prepareToRecordAsync();
-          fallbackRecorder.record();
-
-          // Poll metering every 50ms
-          fallbackRef.current = setInterval(() => {
-            if (!isActiveRef.current) return;
-            const db = recorderStateRef.current?.metering ?? -160;
-            // WHY: Convert dBFS (-160 to 0) to linear 0-1
-            const linear = Math.max(0, Math.min(1, (db + 60) / 60));
-            const smoothed = levelRef.current * 0.35 + linear * 0.65;
+            const smoothed = levelRef.current * 0.35 + rms * 0.65;
             levelRef.current = smoothed;
             setLevel(smoothed);
-          }, 50);
-        } catch (err) {
-          console.warn('[useVUMeter] expo-audio fallback also failed:', err);
-        }
-      }
+          }
+        },
+      );
+
+      pcmRecorder.start();
 
       isActiveRef.current = true;
       setIsActive(true);

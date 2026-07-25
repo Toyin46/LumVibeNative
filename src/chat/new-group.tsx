@@ -1,14 +1,25 @@
-// app/chat/new-group.tsx
+// src/chat/new-group.tsx
+//
+// ✅ Removed dead `import { router } from 'expo-router'`.
+// ✅ CRITICAL FIX: `useNavigation()` was at MODULE scope. Moved inside
+//    NewGroupScreen().
+// ✅ Fixed navigate() call using expo-router's object-style syntax —
+//    converted to `navigate('GroupChat', { id: group.id })`.
+
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, SafeAreaView, StatusBar, Image,
   ActivityIndicator, Alert, ScrollView, KeyboardAvoidingView, Platform,
 } from 'react-native';
-import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { ChatStackParamList } from '../navigation/ChatStackTypes';
+
+type NavProp = NativeStackNavigationProp<ChatStackParamList>;
 
 const C = {
   black: '#000', card: '#1a1a1a', border: '#2a2a2a',
@@ -20,6 +31,7 @@ interface Friend {
 }
 
 export default function NewGroupScreen() {
+  const navigation = useNavigation<NavProp>();
   const { user } = useAuthStore();
   const [groupName,   setGroupName]   = useState('');
   const [description, setDescription] = useState('');
@@ -79,7 +91,7 @@ export default function NewGroupScreen() {
         role: uid === user.id ? 'admin' : 'member',
       }));
       await supabase.from('group_members').insert(memberRows);
-      router.replace({ pathname: '/chat/group/[id]', params: { id: group.id } } as any);
+      navigation.navigate('GroupChat', { id: group.id });
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to create group. Please try again.');
     } finally { setCreating(false); }
@@ -94,7 +106,7 @@ export default function NewGroupScreen() {
       <StatusBar barStyle="light-content" backgroundColor={C.black} />
 
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={s.backBtn}>
           <Ionicons name="chevron-back" size={22} color={C.white} />
         </TouchableOpacity>
         <Text style={s.title}>New Group</Text>

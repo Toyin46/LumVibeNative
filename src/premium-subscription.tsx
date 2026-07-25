@@ -10,7 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from './store/authStore'; 
 import { supabase } from './config/supabase'; 
 
@@ -18,8 +18,14 @@ const TESTING_MODE = true;
 const MONTHLY_PRICE = 10.00; // Changed from $5 to $10
 
 export default function PremiumSubscriptionScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user } = useAuthStore();
+
+  // #region agent log
+  React.useEffect(() => {
+    fetch('http://127.0.0.1:7733/ingest/2ce51378-5f1a-4782-9a65-c75641847f4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'46b743'},body:JSON.stringify({sessionId:'46b743',location:'premium-subscription.tsx:mount',message:'PremiumSubscriptionScreen mounted without expo-router',data:{hasNavigation:!!navigation},timestamp:Date.now(),hypothesisId:'B',runId:'post-fix'})}).catch(()=>{});
+  }, [navigation]);
+  // #endregion
   const [loading, setLoading] = useState(false);
   const [subscription, setSubscription] = useState<any>(null);
 
@@ -104,7 +110,7 @@ export default function PremiumSubscriptionScreen() {
       Alert.alert(
         '🎉 Welcome to Premium!',
         'You now have access to all premium features!',
-        [{ text: 'Awesome!', onPress: () => router.back() }]
+        [{ text: 'Awesome!', onPress: () => navigation.goBack() }]
       );
     } catch (error: any) {
       setLoading(false);
@@ -143,7 +149,7 @@ export default function PremiumSubscriptionScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => navigation.goBack()}>
             <Feather name="arrow-left" size={24} color="#00ff88" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Premium Status</Text>
@@ -214,7 +220,7 @@ export default function PremiumSubscriptionScreen() {
       )}
 
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#00ff88" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Go Premium</Text>

@@ -1,17 +1,29 @@
-// app/chat/new.tsx
+// src/chat/new.tsx
 // ─────────────────────────────────────────────────────────────
 // LumVibe — New Chat Screen
 // SELF-CONTAINED: getOrCreateConversation inlined with safe queries
 // ─────────────────────────────────────────────────────────────
+//
+// ✅ Removed dead `import { router } from 'expo-router'` — never used
+//    anywhere in this file.
+// ✅ CRITICAL FIX: `useNavigation()` was at MODULE scope. Moved inside
+//    NewChatScreen().
+// ✅ Fixed navigate() call that used expo-router's object-style
+//    `navigate({ pathname, params })` — converted to
+//    `navigate('ChatDM', params)` matching ChatStackParamList.
 
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TextInput, FlatList, TouchableOpacity,
   StyleSheet, SafeAreaView, StatusBar, ActivityIndicator, Image,
 } from 'react-native';
-import { router } from 'expo-router';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { ChatStackParamList } from '../navigation/ChatStackTypes';
+
+type NavProp = NativeStackNavigationProp<ChatStackParamList>;
 
 const C = {
   black: '#000000', bg: '#0a0a0a', card: '#1a1a1a', card2: '#222222',
@@ -26,14 +38,11 @@ interface SearchUser {
   photo_url?: string;
 }
 
-// ── SAFE getOrCreateConversation ──────────────────────────────
-// No FK joins — all queries are simple flat selects
 async function getOrCreateConversation(
   currentUserId: string,
   otherUserId: string
 ): Promise<{ id: string } | null> {
   try {
-    // Step 1: get all conversation IDs the current user is in
     const { data: myConvs } = await supabase
       .from('conversation_participants')
       .select('conversation_id')
@@ -42,7 +51,6 @@ async function getOrCreateConversation(
     if (myConvs && myConvs.length > 0) {
       const myConvIds = myConvs.map((c: any) => c.conversation_id);
 
-      // Step 2: check if otherUser shares any of those conversations
       const { data: shared } = await supabase
         .from('conversation_participants')
         .select('conversation_id')
@@ -50,12 +58,10 @@ async function getOrCreateConversation(
         .in('conversation_id', myConvIds);
 
       if (shared && shared.length > 0) {
-        // Conversation already exists — return it
         return { id: shared[0].conversation_id };
       }
     }
 
-    // Step 3: no existing conversation — create one
     const { data: newConv, error: convError } = await supabase
       .from('conversations')
       .insert({ disappearing_enabled: false, disappearing_duration: 86400 })
@@ -67,7 +73,6 @@ async function getOrCreateConversation(
       return null;
     }
 
-    // Step 4: add both participants
     const { error: partError } = await supabase
       .from('conversation_participants')
       .insert([
@@ -77,7 +82,6 @@ async function getOrCreateConversation(
 
     if (partError) {
       console.error('addParticipants error:', partError);
-      // Still return the conversation — participants might have partial insert
     }
 
     return { id: newConv.id };
@@ -87,8 +91,8 @@ async function getOrCreateConversation(
   }
 }
 
-// ── SCREEN ────────────────────────────────────────────────────
 export default function NewChatScreen() {
+  const navigation = useNavigation<NavProp>();
   const { user } = useAuthStore();
   const [search, setSearch]     = useState('');
   const [results, setResults]   = useState<SearchUser[]>([]);
@@ -120,14 +124,11 @@ export default function NewChatScreen() {
     try {
       const conv = await getOrCreateConversation(user.id, otherUser.id);
       if (conv?.id) {
-        router.replace({
-          pathname: '/chat/[id]',
-          params: {
-            id:          conv.id,
-            otherUserId: otherUser.id,
-            otherName:   otherUser.display_name || otherUser.username,
-            otherPhoto:  otherUser.photo_url || '',
-          },
+        navigation.navigate('ChatDM', {
+          id:          conv.id,
+          otherUserId: otherUser.id,
+          otherName:   otherUser.display_name || otherUser.username,
+          otherPhoto:  otherUser.photo_url || '',
         });
       } else {
         console.error('Could not create conversation');
@@ -137,14 +138,14 @@ export default function NewChatScreen() {
     } finally {
       setStarting(null);
     }
-  }, [user?.id]);
+  }, [user?.id, navigation]);
 
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.black} />
 
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
           <Text style={styles.backArrow}>‹</Text>
         </TouchableOpacity>
         <Text style={styles.title}>New Message</Text>

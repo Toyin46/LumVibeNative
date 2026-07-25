@@ -7,7 +7,7 @@ import {
   Image, ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useFocusEffect } from '@react-navigation/native';
 import { supabase } from '../../config/supabase'; 
 import { useAuthStore } from '../../store/authStore'; 
@@ -36,7 +36,7 @@ function CountdownTimer({ deadline }: { deadline: string }) {
 }
 
 export default function OrdersScreen() {
-  const router   = useRouter();
+  const navigation = useNavigation<any>();
   const { user } = useAuthStore();
   const { t }    = useTranslation();
 
@@ -68,7 +68,7 @@ export default function OrdersScreen() {
     const cfg   = STATUS_CONFIG[item.status] || STATUS_CONFIG.in_progress;
     const other = tab === 'buying' ? item.seller : item.buyer;
     return (
-      <TouchableOpacity style={s.orderCard} onPress={() => router.push(`/(tabs)/marketplace/order/${item.id}` as any)} activeOpacity={0.85}>
+      <TouchableOpacity style={s.orderCard} onPress={() => navigation.navigate(`/(tabs)/marketplace/order/${item.id}` as never)} activeOpacity={0.85}>
         <View style={s.orderLeft}>
           {other?.avatar_url
             ? <Image source={{ uri: other.avatar_url }} style={s.avatar} />
@@ -96,11 +96,11 @@ export default function OrdersScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>My Orders</Text>
-        <TouchableOpacity onPress={() => router.push('/(tabs)/marketplace/seller-dashboard' as any)}>
+        <TouchableOpacity onPress={() => navigation.navigate('/(tabs)/marketplace/seller-dashboard' as never)}>
           <Feather name="bar-chart-2" size={22} color="#00ff88" />
         </TouchableOpacity>
       </View>
@@ -132,7 +132,7 @@ export default function OrdersScreen() {
               </Text>
               <TouchableOpacity
                 style={s.emptyBtn}
-                onPress={() => router.push(tab === 'buying' ? '/(tabs)/marketplace' : '/(tabs)/marketplace/create-listing' as any)}
+                onPress={() => navigation.navigate(tab === 'buying' ? '/(tabs)/marketplace' : '/(tabs)/marketplace/create-listing' as never)}
               >
                 <Text style={s.emptyBtnText}>{tab === 'buying' ? t.marketplace.browse : t.marketplace.addListing}</Text>
               </TouchableOpacity>

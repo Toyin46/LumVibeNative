@@ -13,12 +13,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from './store/authStore'; 
 import { supabase } from './config/supabase'; 
 
 export default function SubscriptionWalletScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user } = useAuthStore();
   const [balance, setBalance] = useState(0);
   const [totalEarned, setTotalEarned] = useState(0);
@@ -178,7 +178,7 @@ export default function SubscriptionWalletScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Subscription Wallet</Text>

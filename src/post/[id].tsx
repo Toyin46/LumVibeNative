@@ -1,4 +1,19 @@
-// app/post/[id].tsx - FULL SINGLE POST VIEW
+// src/post/[id].tsx - FULL SINGLE POST VIEW
+//
+// ⚠️ HEADS UP: this file's content is nearly identical to src/post-detail.tsx,
+//    which is the one actually registered in RootNavigator ("PostDetail"
+//    screen, imported as '../post-detail'). This file may be orphaned
+//    leftover from the old expo-router app/post/[id].tsx convention.
+//    Fixed it the same way regardless (in case something still imports
+//    it), but check whether you actually need both files — if nothing
+//    imports src/post/[id].tsx, it's safe to delete and just keep
+//    post-detail.tsx as the single source of truth.
+//
+// ✅ Converted from expo-router to React Navigation — same fix as
+//    post-detail.tsx and user/[id].tsx: useLocalSearchParams/useRouter
+//    don't exist in this app. Route param name matches
+//    RootStackParamList: PostDetail: { postId: string }.
+
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
@@ -15,11 +30,15 @@ import {
   Dimensions,
 } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
-// FIX: expo-av is deprecated — replaced with expo-video's hook-based player.
 import { useVideoPlayer, VideoView } from 'expo-video';
+import type { RootStackParamList } from '../navigation/types';
+
+type PostDetailRouteProp = RouteProp<RootStackParamList, 'PostDetail'>;
+type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
 const { width } = Dimensions.get('window');
 
@@ -55,8 +74,9 @@ interface Comment {
 }
 
 export default function ViewPostScreen() {
-  const { id } = useLocalSearchParams();
-  const router = useRouter();
+  const route      = useRoute<PostDetailRouteProp>();
+  const navigation = useNavigation<NavProp>();
+  const id         = route.params?.postId;
   const { user, userProfile } = useAuthStore();
   const userId = user?.id;
 
@@ -69,9 +89,6 @@ export default function ViewPostScreen() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [checkingFollow, setCheckingFollow] = useState(true);
 
-  // FIX: expo-video's hook-based player replaces expo-av's <Video> ref/props.
-  // Hook is called once with a null source; .replace() is called once the
-  // post actually loads and media_url becomes available, in the effect below.
   const videoPlayer = useVideoPlayer(null, (player) => {
     player.loop = true;
   });
@@ -136,7 +153,7 @@ export default function ViewPostScreen() {
     } catch (error: any) {
       console.error('Load post error:', error);
       Alert.alert('Error', 'Failed to load post');
-      router.back();
+      navigation.goBack();
     } finally {
       setLoading(false);
     }
@@ -289,7 +306,7 @@ export default function ViewPostScreen() {
 
     try {
       await Share.share({
-        message: `Check out @${post.username}'s post on Kinsta!\n\n${post.caption || ''}`,
+        message: `Check out @${post.username}'s post on LumVibe!\n\n${post.caption || ''}`,
       });
     } catch (error) {
       console.error('Share error:', error);
@@ -367,7 +384,7 @@ export default function ViewPostScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Post</Text>
@@ -377,11 +394,10 @@ export default function ViewPostScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Post Header */}
         <View style={styles.postHeader}>
           <TouchableOpacity
             style={styles.userInfo}
-            onPress={() => router.push(`/user/${post.user_id}` as any)}
+            onPress={() => navigation.navigate('UserProfile', { userId: post.user_id })}
           >
             {post.user_photo_url ? (
               <Image source={{ uri: post.user_photo_url }} style={styles.userAvatar} />
@@ -409,7 +425,6 @@ export default function ViewPostScreen() {
           )}
         </View>
 
-        {/* Media */}
         {post.media_url && (
           <View style={styles.mediaContainer}>
             {post.media_type === 'video' ? (
@@ -425,7 +440,6 @@ export default function ViewPostScreen() {
           </View>
         )}
 
-        {/* Actions */}
         <View style={styles.actionsContainer}>
           <View style={styles.actionsLeft}>
             <TouchableOpacity style={styles.actionButton} onPress={handleLike}>
@@ -433,7 +447,6 @@ export default function ViewPostScreen() {
                 name="heart"
                 size={28}
                 color={isLiked ? '#00ff88' : '#666'}
-                fill={isLiked ? '#00ff88' : 'none'}
               />
               <Text style={styles.actionCount}>{post.likes_count}</Text>
             </TouchableOpacity>
@@ -462,13 +475,11 @@ export default function ViewPostScreen() {
                 name="bookmark"
                 size={26}
                 color={isSaved ? '#00ff88' : '#666'}
-                fill={isSaved ? '#00ff88' : 'none'}
               />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Caption & Info */}
         <View style={styles.infoSection}>
           {post.caption && (
             <View style={styles.captionContainer}>
@@ -496,7 +507,6 @@ export default function ViewPostScreen() {
           <Text style={styles.timestamp}>{formatTime(post.created_at)}</Text>
         </View>
 
-        {/* Comments Section */}
         <View style={styles.commentsSection}>
           <Text style={styles.commentsTitle}>Comments ({post.comments_count})</Text>
 
@@ -519,7 +529,6 @@ export default function ViewPostScreen() {
         </View>
       </ScrollView>
 
-      {/* Comment Input */}
       <View style={styles.commentInputContainer}>
         <TextInput
           style={styles.commentInput}

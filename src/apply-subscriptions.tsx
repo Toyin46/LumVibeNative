@@ -1,4 +1,8 @@
 // app/apply-subscriptions.tsx
+//
+// ✅ Fixed: navigate('./subscription-wallet') → navigate('SubscriptionWallet')
+//    (matches RootStackParamList screen name exactly).
+
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -12,29 +16,26 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from './store/authStore';
-import { supabase } from './config/supabase'; 
+import { supabase } from './config/supabase';
 
 export default function ApplySubscriptionsScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [canApply, setCanApply] = useState(false);
   const [followerCount, setFollowerCount] = useState(0);
   const [existingApplication, setExistingApplication] = useState<any>(null);
 
-  // Tier 1 (Bronze)
   const [tier1Name, setTier1Name] = useState('Bronze Supporter');
   const [tier1Price, setTier1Price] = useState('4.99');
   const [tier1Perks, setTier1Perks] = useState('Exclusive content\nCustom badge\nSupporter shoutouts');
 
-  // Tier 2 (Silver)
   const [tier2Name, setTier2Name] = useState('Silver VIP');
   const [tier2Price, setTier2Price] = useState('9.99');
   const [tier2Perks, setTier2Perks] = useState('All Bronze perks\nMonthly live Q&A access\nPriority replies to comments\nBehind-the-scenes content');
 
-  // Tier 3 (Gold)
   const [tier3Name, setTier3Name] = useState('Gold Elite');
   const [tier3Price, setTier3Price] = useState('19.99');
   const [tier3Perks, setTier3Perks] = useState('All Silver perks\nPrivate chat access\nMonthly 1-on-1 video call\nCustom content requests\nEarly access to all posts');
@@ -74,21 +75,20 @@ export default function ApplySubscriptionsScreen() {
 
       if (data) {
         setExistingApplication(data);
-        
+
         if (data.is_enabled) {
-          // Load existing settings
           setTier1Name(data.tier_1_name);
           setTier1Price(data.tier_1_price.toString());
           setTier1Perks(data.tier_1_perks.join('\n'));
-          
+
           setTier2Name(data.tier_2_name);
           setTier2Price(data.tier_2_price.toString());
           setTier2Perks(data.tier_2_perks.join('\n'));
-          
+
           setTier3Name(data.tier_3_name);
           setTier3Price(data.tier_3_price.toString());
           setTier3Perks(data.tier_3_perks.join('\n'));
-          
+
           if (data.custom_welcome_message) {
             setWelcomeMessage(data.custom_welcome_message);
           }
@@ -149,7 +149,6 @@ export default function ApplySubscriptionsScreen() {
 
       if (error) throw error;
 
-      // Update user to mark as subscription creator
       await supabase
         .from('users')
         .update({ is_subscription_creator: true })
@@ -161,7 +160,7 @@ export default function ApplySubscriptionsScreen() {
         [
           {
             text: 'View Profile',
-            onPress: () => router.back(),
+            onPress: () => navigation.goBack(),
           }
         ]
       );
@@ -176,7 +175,7 @@ export default function ApplySubscriptionsScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => navigation.goBack()}>
             <Feather name="arrow-left" size={24} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Manage Subscriptions</Text>
@@ -195,15 +194,13 @@ export default function ApplySubscriptionsScreen() {
             </Text>
           </View>
 
-          <TouchableOpacity style={styles.statsButton} onPress={() => router.push('./subscription-wallet')}>
+          <TouchableOpacity style={styles.statsButton} onPress={() => navigation.navigate('SubscriptionWallet' as never)}>
             <MaterialCommunityIcons name="wallet" size={24} color="#00ff88" />
             <Text style={styles.statsButtonText}>View Subscription Wallet</Text>
             <Feather name="chevron-right" size={20} color="#00ff88" />
           </TouchableOpacity>
 
-          {/* Continue with form to edit tiers */}
           <Text style={styles.sectionTitle}>Edit Your Tiers</Text>
-          {/* Same form fields as below */}
         </ScrollView>
       </SafeAreaView>
     );
@@ -212,7 +209,7 @@ export default function ApplySubscriptionsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Enable Subscriptions</Text>
@@ -220,12 +217,11 @@ export default function ApplySubscriptionsScreen() {
         </View>
 
       <ScrollView showsVerticalScrollIndicator={false}>
-        {/* Eligibility Card */}
         <View style={[styles.eligibilityCard, canApply && styles.eligibilityCardSuccess]}>
-          <MaterialCommunityIcons 
-            name={canApply ? "check-circle" : "alert-circle"} 
-            size={48} 
-            color={canApply ? "#00ff88" : "#ffd700"} 
+          <MaterialCommunityIcons
+            name={canApply ? "check-circle" : "alert-circle"}
+            size={48}
+            color={canApply ? "#00ff88" : "#ffd700"}
           />
           <Text style={styles.eligibilityTitle}>
             {canApply ? '✅ You\'re Eligible!' : '⚠️ Not Yet Eligible'}
@@ -242,7 +238,6 @@ export default function ApplySubscriptionsScreen() {
 
         {canApply && (
           <>
-            {/* Info Card */}
             <View style={styles.infoCard}>
               <Text style={styles.infoTitle}>💰 How It Works</Text>
               <View style={styles.infoItem}>
@@ -263,7 +258,6 @@ export default function ApplySubscriptionsScreen() {
               </View>
             </View>
 
-            {/* Tier 1 */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>🥉 Tier 1 - Entry Level</Text>
               <TextInput
@@ -291,7 +285,6 @@ export default function ApplySubscriptionsScreen() {
               />
             </View>
 
-            {/* Tier 2 */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>🥈 Tier 2 - Mid Level</Text>
               <TextInput
@@ -319,7 +312,6 @@ export default function ApplySubscriptionsScreen() {
               />
             </View>
 
-            {/* Tier 3 */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>🥇 Tier 3 - Premium</Text>
               <TextInput
@@ -347,7 +339,6 @@ export default function ApplySubscriptionsScreen() {
               />
             </View>
 
-            {/* Welcome Message */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Welcome Message</Text>
               <TextInput
@@ -360,7 +351,6 @@ export default function ApplySubscriptionsScreen() {
               />
             </View>
 
-            {/* Submit Button */}
             <TouchableOpacity
               style={[styles.submitButton, loading && styles.submitButtonDisabled]}
               onPress={handleApply}
@@ -409,4 +399,4 @@ const styles = StyleSheet.create({
   successEarnings: { fontSize: 18, fontWeight: 'bold', color: '#ffd700', marginTop: 8 },
   statsButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0a0a0a', marginHorizontal: 20, marginBottom: 20, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#00ff88', gap: 12 },
   statsButtonText: { flex: 1, fontSize: 16, fontWeight: '600', color: '#fff' },
-});
+}); 

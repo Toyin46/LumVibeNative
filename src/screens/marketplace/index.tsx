@@ -8,7 +8,7 @@ import {
   TextInput, ActivityIndicator, RefreshControl, ScrollView, Dimensions,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useFocusEffect } from '@react-navigation/native';
 import { supabase } from '../../config/supabase'; 
 import { useAuthStore } from '../../store/authStore'; 
@@ -75,7 +75,7 @@ function ListingCard({ item, onPress }: { item: any; onPress: () => void }) {
 }
 
 export default function MarketplaceScreen() {
-  const router   = useRouter();
+  const navigation = useNavigation<any>();
   const { user } = useAuthStore();
   const { t }    = useTranslation();
 
@@ -120,14 +120,14 @@ export default function MarketplaceScreen() {
       <View style={s.header}>
         <Text style={s.headerTitle}>🛍️ {t.marketplace.title}</Text>
         <View style={s.headerRight}>
-          <TouchableOpacity style={s.walletBtn} onPress={() => router.push('/(tabs)/marketplace/buy-coins' as any)}>
+          <TouchableOpacity style={s.walletBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/buy-coins' as never)}>
             <Text style={s.walletCoins}>{mktCoins} 🪙</Text>
             <View style={s.walletAdd}><Feather name="plus" size={12} color="#000" /></View>
           </TouchableOpacity>
-          <TouchableOpacity style={s.withdrawBtn} onPress={() => router.push('/(tabs)/marketplace/withdraw' as any)}>
+          <TouchableOpacity style={s.withdrawBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/withdraw' as never)}>
             <Feather name="arrow-up-circle" size={16} color="#ffd700" />
           </TouchableOpacity>
-          <TouchableOpacity style={s.createBtn} onPress={() => router.push('/(tabs)/marketplace/create-listing' as any)}>
+          <TouchableOpacity style={s.createBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/create-listing' as never)}>
             <Feather name="plus" size={18} color="#000" />
             <Text style={s.createBtnText}>'Sell'</Text>
           </TouchableOpacity>
@@ -141,8 +141,8 @@ export default function MarketplaceScreen() {
             style={[s.tab, activeTab === tab && s.tabActive]}
             onPress={() => {
               setActiveTab(tab);
-              if (tab === 'orders')  router.push('/(tabs)/marketplace/orders' as any);
-              if (tab === 'selling') router.push('/(tabs)/marketplace/my-listings' as any);
+              if (tab === 'orders')  navigation.navigate('/(tabs)/marketplace/orders' as never);
+              if (tab === 'selling') navigation.navigate('/(tabs)/marketplace/my-listings' as never);
             }}
           >
             <Text style={[s.tabText, activeTab === tab && s.tabTextActive]}>
@@ -189,14 +189,14 @@ export default function MarketplaceScreen() {
           showsVerticalScrollIndicator={false}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00ff88" />}
           renderItem={({ item }) => (
-            <ListingCard item={item} onPress={() => router.push(`/(tabs)/marketplace/listing/${item.id}` as any)} />
+            <ListingCard item={item} onPress={() => navigation.navigate(`/(tabs)/marketplace/listing/${item.id}` as never)} />
           )}
           ListEmptyComponent={
             <View style={s.empty}>
               <Text style={{ fontSize: 48 }}>🛒</Text>
               <Text style={s.emptyTitle}>{t.marketplace.noListings}</Text>
               <Text style={s.emptySubtitle}>Be the first to offer a service!</Text>
-              <TouchableOpacity style={s.emptyBtn} onPress={() => router.push('/(tabs)/marketplace/create-listing' as any)}>
+              <TouchableOpacity style={s.emptyBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/create-listing' as never)}>
                 <Text style={s.emptyBtnText}>{t.marketplace.addListing}</Text>
               </TouchableOpacity>
             </View>

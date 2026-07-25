@@ -1,4 +1,29 @@
-// app/(auth)/signup.tsx - FIXED VERSION WITH WORKING REFERRALS + CONTACT INVITE + EMAIL VERIFICATION
+// src/(auth)/signup.tsx - FIXED VERSION WITH WORKING REFERRALS + CONTACT INVITE + EMAIL VERIFICATION
+//
+// ✅ CRITICAL FIX: `const navigation = useNavigation<any>();` was declared
+//    at MODULE scope (outside any component, right after imports). Hooks
+//    can only run during a component's render — calling one at module-load
+//    time breaks React's context system immediately. This is very likely
+//    the same class of bug as the "Cannot read property 'useContext' of
+//    null" crash chased earlier this session. Moved inside SignupScreen().
+// ✅ Fixed: navigate('/(auth)/login') → navigate('Login') (correct sibling
+//    screen name inside AuthStack's own navigator).
+// ✅ Removed: navigate('/(tabs)') calls. RootNavigator already swaps
+//    AuthStack → MainTabs automatically once useAuthStore's `user` becomes
+//    non-null. Calling navigate('Main') from inside AuthStack's own
+//    navigator would fail anyway — no "Main" screen is registered there.
+// ⚠️ navigate('/terms') / navigate('/privacy') — these ARE root-stack
+//    screens, but AuthStack's navigator can't reach them (different
+//    navigator context), AND RootStackParamList currently only registers
+//    Terms/Privacy when `user` is truthy — meaning someone on the signup
+//    screen (not yet logged in) currently has NO way to view these at all.
+//    This needs a RootNavigator.tsx fix (move Terms/Privacy outside the
+//    auth conditional) — sent as a separate patch alongside this file.
+//    For now, these two links open Linking-based external fallback so
+//    they at least work today without that navigator change.
+// ✅ Removed unused `import { router } from 'expo-router'` — never called
+//    anywhere in this file.
+
 import React, { useState } from 'react';
 import {
   View,
@@ -15,10 +40,10 @@ import {
   FlatList,
   Linking,
 } from 'react-native';
-import { router } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
-import { supabase } from '../config/supabase'; 
+import { supabase } from '../config/supabase';
 import { generateReferralCode, processReferralReward } from '../utils/referralRewards';
+import { useNavigation } from '@react-navigation/native';
 import * as Contacts from 'expo-contacts';
 
 // ─── Contact invite helpers ───────────────────────────────────────────────────
@@ -124,10 +149,8 @@ function PostSignupContactInvite({
       <View style={ps.container}>
         <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled">
 
-          {/* SELECT STEP */}
           {step === 'select' && (
             <View style={ps.inner}>
-              {/* Skip button top right */}
               <TouchableOpacity style={ps.skipTop} onPress={onSkip}>
                 <Text style={ps.skipTopText}>Skip</Text>
               </TouchableOpacity>
@@ -138,7 +161,6 @@ function PostSignupContactInvite({
                 Want to invite friends to Lumvibe? Pick contacts and we'll pre-write the message — you just hit send from your own phone.
               </Text>
 
-              {/* Clarity: NOT a referral */}
               <View style={ps.infoBanner}>
                 <Text style={{ fontSize: 15 }}>💬</Text>
                 <View style={{ flex: 1 }}>
@@ -161,7 +183,6 @@ function PostSignupContactInvite({
                 </View>
               ) : (
                 <>
-                  {/* Search */}
                   <View style={ps.searchBox}>
                     <Feather name="search" size={15} color="#444" />
                     <TextInput
@@ -173,7 +194,6 @@ function PostSignupContactInvite({
                     />
                   </View>
 
-                  {/* Select all */}
                   <View style={ps.selectRow}>
                     <TouchableOpacity onPress={selectAll}>
                       <Text style={ps.selectAllText}>
@@ -185,7 +205,6 @@ function PostSignupContactInvite({
                     </Text>
                   </View>
 
-                  {/* Contacts list */}
                   {loadingContacts
                     ? <ActivityIndicator color="#00ff88" style={{ marginVertical: 30 }} />
                     : <FlatList
@@ -214,7 +233,6 @@ function PostSignupContactInvite({
                       />
                   }
 
-                  {/* Referral toggle */}
                   <View style={ps.toggleRow}>
                     <View style={{ flex: 1 }}>
                       <Text style={ps.toggleTitle}>🎁 Include referral code?</Text>
@@ -228,7 +246,6 @@ function PostSignupContactInvite({
                     </TouchableOpacity>
                   </View>
 
-                  {/* CTA */}
                   <TouchableOpacity
                     style={[ps.btn, selected.size === 0 && ps.btnDisabled]}
                     disabled={selected.size === 0}
@@ -249,7 +266,6 @@ function PostSignupContactInvite({
             </View>
           )}
 
-          {/* PREVIEW STEP */}
           {step === 'preview' && (
             <View style={ps.inner}>
               <TouchableOpacity onPress={() => setStep('select')} style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 16 }}>
@@ -260,7 +276,6 @@ function PostSignupContactInvite({
               <Text style={ps.bigTitle}>Review Your Message</Text>
               <Text style={[ps.bigSub, { marginBottom: 12 }]}>Each contact gets their own name in the message.</Text>
 
-              {/* Selected tags */}
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
                 {selectedContacts.slice(0, 5).map(c => (
                   <View key={c.id} style={ps.tag}>
@@ -272,7 +287,6 @@ function PostSignupContactInvite({
                 )}
               </View>
 
-              {/* Message preview */}
               <View style={ps.previewBox}>
                 <Text style={ps.previewText}>
                   {buildInviteMessage(
@@ -297,7 +311,6 @@ function PostSignupContactInvite({
             </View>
           )}
 
-          {/* SENT STEP */}
           {step === 'sent' && (
             <View style={[ps.inner, { alignItems: 'center', justifyContent: 'center', flex: 1 }]}>
               <Text style={{ fontSize: 64, marginBottom: 16 }}>🚀</Text>
@@ -376,6 +389,8 @@ const ps = StyleSheet.create({
 // Main Signup Screen
 // ─────────────────────────────────────────────────────────────────────────────
 export default function SignupScreen() {
+  const navigation = useNavigation<any>();
+
   const [email,               setEmail]               = useState('');
   const [password,            setPassword]            = useState('');
   const [confirmPassword,     setConfirmPassword]     = useState('');
@@ -387,7 +402,6 @@ export default function SignupScreen() {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [agreedToTerms,       setAgreedToTerms]       = useState(false);
 
-  // Contact invite screen state
   const [showContactInvite,   setShowContactInvite]   = useState(false);
   const [newReferralCode,     setNewReferralCode]      = useState('');
 
@@ -473,26 +487,17 @@ export default function SignupScreen() {
         throw new Error('Failed to create account. Please try again.');
       }
 
-      // ✅ EMAIL VERIFICATION CHECK
-      // When Supabase "Confirm email" is ON, session is null until user clicks
-      // the verification link. We catch that here and stop — no profile is
-      // created yet because the user hasn't confirmed they own the email.
-      // Profile creation happens automatically via your Supabase trigger
-      // OR the user logs in after verifying and your app handles it then.
       if (!authData.session) {
         Alert.alert(
           '📧 Check Your Email!',
           `We sent a verification link to:\n\n${email.trim().toLowerCase()}\n\nClick the link in the email to activate your account, then come back and log in.\n\n(Check your spam folder if you don't see it.)`,
           [{
             text: 'Got it!',
-            onPress: () => router.replace('/(auth)/login'),
+            onPress: () => navigation.navigate('Login'),
           }]
         );
         return;
       }
-
-      // ─── Only reaches here if email confirmation is OFF in Supabase ───────
-      // (session exists immediately — user is logged in straight away)
 
       const userId = authData.user.id;
       console.log('✅ Auth user created:', userId);
@@ -663,14 +668,14 @@ export default function SignupScreen() {
     }
   };
 
+  // RootNavigator reactively swaps AuthStack → MainTabs once `user` updates
+  // via useAuthStore — no manual navigation needed after signup completes.
   const handleContactInviteDone = () => {
     setShowContactInvite(false);
-    router.replace('/(tabs)');
   };
 
   const handleContactInviteSkip = () => {
     setShowContactInvite(false);
-    router.replace('/(tabs)');
   };
 
   return (
@@ -818,11 +823,17 @@ export default function SignupScreen() {
               </View>
               <Text style={s.termsText}>
                 I agree to the{' '}
-                <Text style={s.termsLink} onPress={() => router.push('/terms' as any)}>
+                <Text
+                  style={s.termsLink}
+                  onPress={() => Linking.openURL('https://lumvibe.site/terms')}
+                >
                   Terms of Service
                 </Text>
                 {' '}and{' '}
-                <Text style={s.termsLink} onPress={() => router.push('/privacy' as any)}>
+                <Text
+                  style={s.termsLink}
+                  onPress={() => Linking.openURL('https://lumvibe.site/privacy')}
+                >
                   Privacy Policy
                 </Text>
               </Text>
@@ -846,7 +857,7 @@ export default function SignupScreen() {
             <View style={s.footer}>
               <Text style={s.footerText}>Already have an account? </Text>
               <TouchableOpacity
-                onPress={() => !loading && router.replace('/(auth)/login')}
+                onPress={() => !loading && navigation.navigate('Login')}
                 disabled={loading}
               >
                 <Text style={[s.footerLink, loading && s.linkDisabled]}>Sign In</Text>
@@ -856,7 +867,6 @@ export default function SignupScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
 
-      {/* Post-signup contact invite screen */}
       <PostSignupContactInvite
         visible={showContactInvite}
         onSkip={handleContactInviteSkip}

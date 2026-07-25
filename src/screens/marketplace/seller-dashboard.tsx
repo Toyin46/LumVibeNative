@@ -10,7 +10,7 @@ import {
   ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useFocusEffect } from '@react-navigation/native';
 import { supabase } from '../../config/supabase'; 
 import { useAuthStore } from '../../store/authStore'; 
@@ -21,7 +21,7 @@ function toNGN(coins: number) {
 }
 
 export default function SellerDashboardScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user } = useAuthStore();
 
   const [loading,         setLoading]         = useState(true);
@@ -85,11 +85,11 @@ export default function SellerDashboardScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Seller Dashboard</Text>
-        <TouchableOpacity onPress={() => router.push('/(tabs)/marketplace/my-listings' as any)}>
+        <TouchableOpacity onPress={() => navigation.navigate('/(tabs)/marketplace/my-listings' as never)}>
           <Feather name="list" size={22} color="#00ff88" />
         </TouchableOpacity>
       </View>
@@ -120,7 +120,7 @@ export default function SellerDashboardScreen() {
           {/* Withdraw button */}
           <TouchableOpacity
             style={[s.withdrawBtn, availableCoins === 0 && { opacity: 0.4 }]}
-            onPress={() => router.push('/(tabs)/marketplace/withdraw' as any)}
+            onPress={() => navigation.navigate('/(tabs)/marketplace/withdraw' as never)}
             disabled={availableCoins === 0}
           >
             <Feather name="arrow-up-circle" size={18} color="#000" />
@@ -132,7 +132,7 @@ export default function SellerDashboardScreen() {
           {/* Buy coins shortcut */}
           <TouchableOpacity
             style={s.buyCoinsBtn}
-            onPress={() => router.push('/(tabs)/marketplace/buy-coins' as any)}
+            onPress={() => navigation.navigate('/(tabs)/marketplace/buy-coins' as never)}
           >
             <Feather name="plus-circle" size={16} color="#00ff88" />
             <Text style={s.buyCoinsText}>Top Up Marketplace Wallet</Text>
@@ -168,7 +168,7 @@ export default function SellerDashboardScreen() {
           <View style={s.section}>
             <View style={s.sectionHeader}>
               <Text style={s.sectionTitle}>Recent Orders</Text>
-              <TouchableOpacity onPress={() => router.push('/(tabs)/marketplace/orders' as any)}>
+              <TouchableOpacity onPress={() => navigation.navigate('/(tabs)/marketplace/orders' as never)}>
                 <Text style={s.sectionLink}>See all →</Text>
               </TouchableOpacity>
             </View>
@@ -176,7 +176,7 @@ export default function SellerDashboardScreen() {
               <TouchableOpacity
                 key={order.id}
                 style={s.orderRow}
-                onPress={() => router.push(`/(tabs)/marketplace/order/${order.id}` as any)}
+                onPress={() => navigation.navigate(`/(tabs)/marketplace/order/${order.id}` as never)}
               >
                 <View style={{ flex: 1 }}>
                   <Text style={s.orderTitle} numberOfLines={1}>{order.listing_title}</Text>
@@ -220,7 +220,7 @@ export default function SellerDashboardScreen() {
             <Text style={{ fontSize: 48 }}>💰</Text>
             <Text style={s.emptyTitle}>No earnings yet</Text>
             <Text style={s.emptySubtitle}>Create listings and complete orders to start earning</Text>
-            <TouchableOpacity style={s.createBtn} onPress={() => router.push('/(tabs)/marketplace/create-listing' as any)}>
+            <TouchableOpacity style={s.createBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/create-listing' as never)}>
               <Text style={s.createBtnText}>Create a Listing</Text>
             </TouchableOpacity>
           </View>

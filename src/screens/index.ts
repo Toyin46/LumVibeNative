@@ -13,4 +13,4 @@ export { default as VideosScreen }       from './videos';
 export { default as BuyCoinsScreen }     from '../buy-coins';
 
 // CreateScreen
-export { default as CreateScreen }       from './create/CreateScreen';
+export { default as CreateScreen }       from './create';

@@ -1,13 +1,18 @@
-// app/themes.tsx
+// src/themes.tsx
 // ✅ Translations added via useTranslation()
+//
+// ✅ CRITICAL FIX: `useNavigation()` was called at MODULE scope (outside
+//    any component) — same class of bug as signup.tsx. Moved inside
+//    ThemesScreen().
+// ✅ Removed unused `import { router } from 'expo-router'`.
 
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { router } from 'expo-router';
-import { useAuthStore } from './store/authStore'; 
-import { supabase } from './config/supabase'; 
-import { useTranslation } from './locales/LanguageContext'; 
+import { useAuthStore } from './store/authStore';
+import { supabase } from './config/supabase';
+import { useTranslation } from './locales/LanguageContext';
+import { useNavigation } from '@react-navigation/native';
 
 const THEMES = [
   { id: 'default', name: 'Default',       primary: '#00ff88', background: '#000',    card: '#111',    icon: '🌙' },
@@ -19,6 +24,7 @@ const THEMES = [
 ];
 
 export default function ThemesScreen() {
+  const navigation = useNavigation<any>();
   const { user } = useAuthStore();
   const { t }    = useTranslation();
   const [currentTheme, setCurrentTheme] = useState('default');
@@ -51,7 +57,7 @@ export default function ThemesScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>{t.settings.selectTheme}</Text>

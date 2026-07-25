@@ -1,4 +1,4 @@
-// app/(tabs)/marketplace/withdraw.tsx
+// src/screens/marketplace/withdraw.tsx
 // ✅ Flutterwave completely removed — Paystack ONLY
 // ✅ Automatic Paystack payout for NGN and GHS (via Supabase Edge Function)
 // ✅ Manual processing for all other currencies
@@ -11,6 +11,9 @@
 // ✅ Balance check before deduction — coins never lost
 // ✅ Automatic coin refund on any failure
 // ✅ withdrawalInProgress ref prevents double-submission
+//
+// ✅ Removed unused `import { useRouter } from "expo-router"` — never
+//    called anywhere in this file (useNavigation was already correct).
 
 import React, { useState, useEffect, useRef } from "react";
 import {
@@ -18,11 +21,10 @@ import {
   Alert, ActivityIndicator, TextInput,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
-import { supabase } from "../../config/supabase"; 
-import { useAuthStore } from "../../store/authStore"; 
+import { supabase } from "../../config/supabase";
+import { useAuthStore } from "../../store/authStore";
+import { useNavigation } from '@react-navigation/native';
 
-// ✅ SUPPORTED_COUNTRIES inline — no Flutterwave import needed
 const SUPPORTED_COUNTRIES = [
   { code: 'GH', name: 'Ghana',          flag: '🇬🇭', currency: 'GHS' },
   { code: 'KE', name: 'Kenya',          flag: '🇰🇪', currency: 'KES' },
@@ -36,15 +38,13 @@ const SUPPORTED_COUNTRIES = [
   { code: 'MA', name: 'Morocco',        flag: '🇲🇦', currency: 'MAD' },
 ];
 
-// ✅ Fetch banks from Paystack with hardcoded fallback — never crashes
 async function getPaystackBanks(countryCode: string = 'NG'): Promise<Array<{ name: string; code: string }>> {
-  if (countryCode !== 'NG') return []; // non-NG = manual entry only
+  if (countryCode !== 'NG') return [];
   try {
     const { data, error } = await supabase.functions.invoke('get-paystack-banks');
     if (error) throw error;
     return (data?.banks || []).map((b: any) => ({ name: b.name, code: b.code }));
   } catch {
-    // Hardcoded Nigerian bank fallback
     return [
       { name: 'Access Bank',               code: '044' },
       { name: 'First Bank of Nigeria',     code: '011' },
@@ -69,7 +69,6 @@ async function getPaystackBanks(countryCode: string = 'NG'): Promise<Array<{ nam
   }
 }
 
-// ✅ Verify account via Paystack edge function
 async function verifyPaystackAccount(accountNumber: string, bankCode: string): Promise<{ success: boolean; accountName?: string; message?: string }> {
   try {
     const { data, error } = await supabase.functions.invoke('verify-paystack-account', {
@@ -116,7 +115,7 @@ function detectCurrency() {
 }
 
 export default function WithdrawMarketplaceScreen() {
-  const router   = useRouter();
+  const navigation = useNavigation<any>();
   const { user } = useAuthStore();
   const currency = detectCurrency();
   const withdrawalInProgress = useRef(false);
@@ -130,14 +129,12 @@ export default function WithdrawMarketplaceScreen() {
   const [amount,             setAmount]             = useState("");
   const [history,            setHistory]            = useState<any[]>([]);
 
-  // Nigerian bank fields
   const [ngnBanks,           setNgnBanks]           = useState<Array<{ name: string; code: string }>>([]);
   const [selectedBank,       setSelectedBank]       = useState<{ name: string; code: string } | null>(null);
   const [accountNo,          setAccountNo]          = useState("");
   const [accountName,        setAccountName]        = useState("");
   const [showBankList,       setShowBankList]       = useState(false);
 
-  // Global bank fields
   const [selectedCountry,    setSelectedCountry]    = useState<any>(null);
   const [globalBanks,        setGlobalBanks]        = useState<Array<{ name: string; code: string }>>([]);
   const [selectedGlobalBank, setSelectedGlobalBank] = useState<{ name: string; code: string } | null>(null);
@@ -148,7 +145,6 @@ export default function WithdrawMarketplaceScreen() {
   const [showCountryList,    setShowCountryList]    = useState(false);
   const [showGlobalBankList, setShowGlobalBankList] = useState(false);
 
-  // Bank connection state
   const [bankConnected,      setBankConnected]      = useState(false);
   const [bankCountry,        setBankCountry]        = useState<"NG" | "global" | null>(null);
   const [savedBankName,      setSavedBankName]      = useState("");
@@ -199,7 +195,6 @@ export default function WithdrawMarketplaceScreen() {
     }
   };
 
-  // ✅ Load Nigerian banks via Paystack (with fallback)
   const loadNigerianBanks = async () => {
     if (ngnBanks.length > 0) return;
     setLoadingBanks(true);
@@ -213,7 +208,6 @@ export default function WithdrawMarketplaceScreen() {
     }
   };
 
-  // ✅ Verify account via Paystack
   const handleVerifyNigerianAccount = async () => {
     if (!accountNo || !selectedBank) {
       Alert.alert("Error", "Select a bank and enter your account number.");
@@ -269,7 +263,6 @@ export default function WithdrawMarketplaceScreen() {
     setShowCountryList(false);
     setSelectedGlobalBank(null);
     setGlobalBanks([]);
-    // For non-NG countries, getPaystackBanks returns [] so manual entry is used
     setLoadingBanks(true);
     try {
       const banks = await getPaystackBanks(country.code);
@@ -354,7 +347,6 @@ export default function WithdrawMarketplaceScreen() {
     let balanceBeforeDeduction: number | null = null;
 
     try {
-      // ── STEP 1: Fresh balance check ───────────────────────────────────
       const { data: fresh, error: freshErr } = await supabase
         .from("users")
         .select("marketplace_coins")
@@ -368,7 +360,6 @@ export default function WithdrawMarketplaceScreen() {
       }
       balanceBeforeDeduction = current;
 
-      // ── STEP 2: Deduct coins ──────────────────────────────────────────
       const { error: deductErr } = await supabase
         .from("users")
         .update({ marketplace_coins: current - coins })
@@ -376,7 +367,6 @@ export default function WithdrawMarketplaceScreen() {
       if (deductErr) throw new Error("Failed to deduct coins. Please try again.");
       setBalance(current - coins);
 
-      // ── STEP 3: Load full bank details from DB ────────────────────────
       const { data: userData } = await supabase
         .from('users')
         .select('bank_account_number, bank_account_name, bank_code, bank_name, withdrawal_country, withdrawal_currency')
@@ -390,7 +380,6 @@ export default function WithdrawMarketplaceScreen() {
       const finalCurrency    = userData?.withdrawal_currency  || currency.code;
       const isNgnOrGhs       = PAYSTACK_AUTO_CURRENCIES.includes(finalCurrency);
 
-      // ── STEP 4: Log withdrawal ────────────────────────────────────────
       const { data: newRow, error: logErr } = await supabase
         .from("marketplace_withdrawals")
         .insert({
@@ -412,7 +401,6 @@ export default function WithdrawMarketplaceScreen() {
       }
       withdrawalRowId = newRow.id;
 
-      // ── STEP 5: Automatic Paystack payout for NGN/GHS ────────────────
       if (isNgnOrGhs) {
         try {
           const { data: paystackResult, error: fnErr } = await supabase.functions.invoke('paystack-transfer', {
@@ -429,7 +417,6 @@ export default function WithdrawMarketplaceScreen() {
           });
 
           if (fnErr || !paystackResult?.success) {
-            // Downgrade to manual — don't refund coins
             await supabase
               .from("marketplace_withdrawals")
               .update({ status: 'pending', payout_method: 'manual', notes: paystackResult?.message || fnErr?.message })
@@ -442,7 +429,6 @@ export default function WithdrawMarketplaceScreen() {
               `Automatic payment could not be processed right now.\n\nYour request has been queued for manual review. You will be paid within 1-3 business days. 🙏`
             );
           } else {
-            // ✅ Paystack success
             await supabase
               .from("marketplace_withdrawals")
               .update({ status: 'completed', flw_reference: paystackResult.transferCode })
@@ -456,7 +442,6 @@ export default function WithdrawMarketplaceScreen() {
             );
           }
         } catch (paystackErr: any) {
-          // Network error — downgrade to manual, don't refund
           await supabase
             .from("marketplace_withdrawals")
             .update({ status: 'pending', payout_method: 'manual', notes: 'Paystack network error' })
@@ -470,7 +455,6 @@ export default function WithdrawMarketplaceScreen() {
           );
         }
       } else {
-        // ── Manual for international ──────────────────────────────────
         setAmount("");
         await loadData();
         Alert.alert(
@@ -524,7 +508,7 @@ export default function WithdrawMarketplaceScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} accessibilityLabel="Go back">
+        <TouchableOpacity onPress={() => navigation.goBack()} accessibilityLabel="Go back">
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle} numberOfLines={1}>Withdraw Earnings</Text>
@@ -533,7 +517,6 @@ export default function WithdrawMarketplaceScreen() {
 
       <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
 
-        {/* Balance Card */}
         <View style={s.balanceCard}>
           <Text style={s.balanceLabel}>Marketplace Wallet</Text>
           <Text style={s.balanceCoins}>{balance} coins</Text>
@@ -541,7 +524,6 @@ export default function WithdrawMarketplaceScreen() {
           <Text style={s.balanceMin}>Min withdrawal: {MIN_WITHDRAW} coins ({formatLocal(MIN_WITHDRAW)})</Text>
         </View>
 
-        {/* Payout method banner */}
         <View style={[s.methodBanner, isPaystackAuto ? s.methodBannerAuto : s.methodBannerManual]}>
           <Text style={s.methodBannerIcon}>{isPaystackAuto ? '⚡' : '📋'}</Text>
           <View style={{ flex: 1 }}>
@@ -556,7 +538,6 @@ export default function WithdrawMarketplaceScreen() {
           </View>
         </View>
 
-        {/* Bank connection status */}
         {bankConnected ? (
           <View style={s.bankConnected}>
             <Feather name="check-circle" size={18} color="#00ff88" />
@@ -581,7 +562,6 @@ export default function WithdrawMarketplaceScreen() {
           </TouchableOpacity>
         )}
 
-        {/* Bank setup form */}
         {showBankSetup && (
           <View style={s.bankForm}>
             <Text style={s.formTitle}>Connect Bank Account</Text>
@@ -808,7 +788,6 @@ export default function WithdrawMarketplaceScreen() {
           </View>
         )}
 
-        {/* Amount input */}
         <Text style={s.label}>Amount (coins)</Text>
         <View style={s.amountRow}>
           <View style={s.amountInput}>
@@ -829,7 +808,6 @@ export default function WithdrawMarketplaceScreen() {
           )}
         </View>
 
-        {/* Quick percentage buttons */}
         <View style={s.quickRow}>
           {[25, 50, 75, 100].map((pct, idx) => {
             const v = Math.floor(balance * pct / 100);
@@ -848,7 +826,6 @@ export default function WithdrawMarketplaceScreen() {
           })}
         </View>
 
-        {/* Fee breakdown */}
         {coins >= MIN_WITHDRAW && (
           <View style={s.summary}>
             <View style={s.summaryRow}>
@@ -872,7 +849,6 @@ export default function WithdrawMarketplaceScreen() {
           </View>
         )}
 
-        {/* Withdraw button */}
         <TouchableOpacity
           style={[s.submitBtn, (submitting || coins < MIN_WITHDRAW) && s.btnDisabled]}
           onPress={handleWithdraw}
@@ -897,7 +873,6 @@ export default function WithdrawMarketplaceScreen() {
           </Text>
         </View>
 
-        {/* Withdrawal history */}
         {history.length > 0 && (
           <View style={s.historySection}>
             <Text style={s.historyTitle}>Withdrawal History</Text>
@@ -910,7 +885,6 @@ export default function WithdrawMarketplaceScreen() {
                   <Text style={s.historyDate}>{new Date(tx.created_at).toLocaleDateString()}</Text>
                 </View>
                 <View style={{ alignItems: "flex-end" }}>
-                  {/* ✅ amount_ngn is already net — no double fee */}
                   <Text style={s.historyAmt}>
                     {currency.symbol}{((tx.amount_ngn / COIN_TO_NGN) * currency.ratePerCoin).toLocaleString()}
                   </Text>

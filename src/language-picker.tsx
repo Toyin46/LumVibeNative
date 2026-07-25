@@ -2,12 +2,12 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, StatusBar, SafeAreaView } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { LANGUAGES, SupportedLanguage } from './locales/translations'; 
 import { useLanguage } from './locales/LanguageContext'; 
 
 export default function LanguagePickerScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { language: currentLang, setLanguage } = useLanguage();
   const [saving,      setSaving]      = useState(false);
   const [pendingLang, setPendingLang] = useState<SupportedLanguage | null>(null);
@@ -20,10 +20,10 @@ export default function LanguagePickerScreen() {
     try {
       await setLanguage(code);
       console.log('🌍 Picker: done, going back');
-      router.back();
+      navigation.goBack();
     } catch (e: any) {
       console.warn('🌍 Picker error:', e?.message);
-      router.back();
+      navigation.goBack();
     } finally {
       setSaving(false);
       setPendingLang(null);
@@ -55,7 +55,7 @@ export default function LanguagePickerScreen() {
     <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} style={{ width: 40, height: 40, justifyContent: 'center' }}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={{ width: 40, height: 40, justifyContent: 'center' }}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.title}>Select Language</Text>

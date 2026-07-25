@@ -1,6 +1,15 @@
-// app/(tabs)/marketplace/order/[id].tsx
+// src/screens/marketplace/order/[id].tsx
 // ✅ File 404 FIXED — signed URLs always used
 // ✅ Translations added via useTranslation()
+//
+// ✅ Fixed: `const navigation = useNavigation<any>();` was declared TWICE —
+//    once at MODULE scope (a real crash bug, same class as signup.tsx),
+//    and again correctly inside OrderDetailScreen(). Removed the module-
+//    scope one entirely; the in-component one was already correct.
+// ✅ Removed dead `import { useRouter, useLocalSearchParams } from 'expo-router'`
+//    (useRouter was never even used).
+// ✅ Converted route param: `id` now comes from useRoute() against
+//    MarketplaceStackParamList's OrderDetail: { orderId: string }.
 
 import React, { useState, useEffect } from 'react';
 import {
@@ -8,14 +17,19 @@ import {
   Alert, ActivityIndicator, TextInput, Image, Linking,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { decode } from 'base64-arraybuffer';
-import { supabase } from '../../../config/supabase'; 
-import { useAuthStore } from '../../../store/authStore'; 
-import { useTranslation } from '../../../locales/LanguageContext'; 
+import { supabase } from '../../../config/supabase';
+import { useAuthStore } from '../../../store/authStore';
+import { useTranslation } from '../../../locales/LanguageContext';
+import type { MarketplaceStackParamList } from '../../../navigation/MarketplaceStackTypes';
+
+type OrderDetailRouteProp = RouteProp<MarketplaceStackParamList, 'OrderDetail'>;
+type NavProp = NativeStackNavigationProp<MarketplaceStackParamList>;
 
 const STATUS_CONFIG: Record<string, { color: string; label: string; emoji: string }> = {
   pending:   { color: '#ffd700', label: 'Waiting for seller to start', emoji: '⏳' },
@@ -56,8 +70,9 @@ function isImageFile(value: string): boolean {
 }
 
 export default function OrderDetailScreen() {
-  const router   = useRouter();
-  const { id }   = useLocalSearchParams<{ id: string }>();
+  const navigation = useNavigation<NavProp>();
+  const route       = useRoute<OrderDetailRouteProp>();
+  const id          = route.params?.orderId;
   const { user } = useAuthStore();
   const { t }    = useTranslation();
 
@@ -215,7 +230,10 @@ export default function OrderDetailScreen() {
             is_read: false,
           });
           Alert.alert('Order Complete! 🎉', `${payout} coins paid to seller.`, [
-            { text: t.common.ok, onPress: () => router.push('/(tabs)/marketplace/orders') },
+            // TODO: 'Orders' screen isn't converted/registered yet
+            // (see MarketplaceStack.tsx TODO). Falls back to popToTop
+            // until that screen exists.
+            { text: t.common.ok, onPress: () => navigation.popToTop() },
           ]);
         } catch (e: any) { Alert.alert(t.errors.generic, e.message); }
         finally { setActing(false); }
@@ -241,7 +259,7 @@ export default function OrderDetailScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}><Feather name="arrow-left" size={24} color="#fff" /></TouchableOpacity>
+        <TouchableOpacity onPress={() => navigation.goBack()}><Feather name="arrow-left" size={24} color="#fff" /></TouchableOpacity>
         <Text style={s.headerTitle}>Order Details</Text>
         <View style={{ width: 24 }} />
       </View>

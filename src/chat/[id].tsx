@@ -8,7 +8,6 @@ import {
   Platform, Modal, Alert, ActivityIndicator, Image,
   ScrollView, Dimensions, PermissionsAndroid,
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
 import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import { RealtimeChannel } from '@supabase/supabase-js';
@@ -16,6 +15,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+// FIX: this app uses @react-navigation, not expo-router. useRoute() replaces
+// expo-router's useLocalSearchParams(), and useNavigation() must be called
+// INSIDE the component (it was at module scope before, which is an invalid
+// hook call and crashes the screen the instant it mounts).
+import { useNavigation, useRoute } from '@react-navigation/native';
 
 // LiveKit replaces Agora completely
 // FIX: Room/RoomEvent/Track/ConnectionState are core classes from livekit-client.
@@ -23,6 +27,11 @@ import { useAuthStore } from '../store/authStore';
 import { Room, RoomEvent, Track, ConnectionState } from 'livekit-client';
 import { VideoView } from '@livekit/react-native';
 import Constants from 'expo-constants';
+
+// FIX: point this at whatever your navigator actually registered the
+// CoWatch screen as (e.g. <Stack.Screen name="Cowatch" component={CowatchScreen} />).
+// Keeping it as one constant means you only fix it in one place if it's wrong.
+const COWATCH_SCREEN = 'Cowatch';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const HEADER_H = Platform.OS === 'ios' ? 110 : 60;
@@ -627,13 +636,11 @@ function CallModal({
 }
 
 // ── MESSAGE BUBBLE ────────────────────────────────────────────
-// FIX: navigation removed from component — navigateToRoute callback passed as prop
-function MessageBubble({ message, isMe, onLongPress, onCowatch, onNavigate }: {
+function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
   message:     Message;
   isMe:        boolean;
   onLongPress: (msg: Message) => void;
   onCowatch?:  (msg: Message) => void;
-  onNavigate:  (route: string) => void;
 }) {
   const [isPlaying,  setIsPlaying]  = useState(false);
   const [imgError,   setImgError]   = useState(false);
@@ -794,9 +801,13 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, onNavigate }: {
 
 // ── MAIN SCREEN ───────────────────────────────────────────────
 export default function ChatScreen() {
-  const { id, otherUserId, otherName, otherPhoto } = useLocalSearchParams<{
-    id: string; otherUserId: string; otherName: string; otherPhoto: string;
-  }>();
+  // FIX: route params come from @react-navigation's useRoute(), not
+  // expo-router's useLocalSearchParams(). This screen is reached via
+  // navigation.navigate('Chat', { id, otherUserId, otherName, otherPhoto })
+  // from wherever the conversation list lives.
+  const route = useRoute<any>();
+  const navigation = useNavigation<any>();
+  const { id, otherUserId, otherName, otherPhoto } = route.params || {};
 
   const { user, userProfile } = useAuthStore();
   const flatRef = useRef<FlatList>(null);
@@ -912,10 +923,17 @@ export default function ChatScreen() {
     if (id) await toggleDisappearing(id, newVal);
   }, [vanishOn, id]);
 
-  // FIX: navigation callback passed down to MessageBubble components
-  const handleNavigate = useCallback((route: string) => {
-    router.push(route as any);
-  }, []);
+  // FIX: single place that opens CoWatch, using @react-navigation's
+  // navigate(screenName, params) signature — matches what cowatch.tsx
+  // reads via useRoute().params (conversationId / otherName / otherPhoto).
+  const openCowatch = useCallback((sessionId?: string) => {
+    navigation.navigate(COWATCH_SCREEN, {
+      conversationId: id,
+      otherName: otherName || '',
+      otherPhoto: otherPhoto || '',
+      ...(sessionId ? { existingSessionId: sessionId } : {}),
+    });
+  }, [navigation, id, otherName, otherPhoto]);
 
   if (loading) {
     return (
@@ -934,7 +952,7 @@ export default function ChatScreen() {
 
       {/* Header */}
       <View style={styles.chatHeader}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="chevron-back" size={22} color={C.white} />
         </TouchableOpacity>
         <TouchableOpacity style={{ position: 'relative' }}>
@@ -969,13 +987,7 @@ export default function ChatScreen() {
       <ScrollView horizontal showsHorizontalScrollIndicator={false}
         style={styles.featRow}
         contentContainerStyle={{ gap: 6, paddingHorizontal: 14, alignItems: 'center' }}>
-        <TouchableOpacity
-          style={styles.featChip}
-          onPress={() => router.push({
-            pathname: '/chat/cowatch',
-            params: { conversationId: id, otherName: otherName || '', otherPhoto: otherPhoto || '' },
-          } as any)}
-        >
+        <TouchableOpacity style={styles.featChip} onPress={() => openCowatch()}>
           <Ionicons name="film-outline" size={12} color={C.muted} />
           <Text style={styles.featChipText}>Co-Watch</Text>
         </TouchableOpacity>
@@ -1011,11 +1023,7 @@ export default function ChatScreen() {
               message={item}
               isMe={item.sender_id === user?.id}
               onLongPress={handleLongPress}
-              onNavigate={handleNavigate}
-              onCowatch={() => router.push({
-                pathname: '/chat/cowatch',
-                params: { conversationId: id, otherName: otherName || '', otherPhoto: otherPhoto || '' },
-              } as any)}
+              onCowatch={(msg) => openCowatch()}
             />
           )}
           contentContainerStyle={[styles.messagesList, { flexGrow: 1 }]}
@@ -1287,4 +1295,4 @@ const styles = StyleSheet.create({
   callCtrlActive:        { backgroundColor: 'rgba(0,230,118,0.12)', borderColor: C.green },
   callEndBtn:            { backgroundColor: C.red, borderColor: '#c62828', width: 68, height: 68, borderRadius: 34 },
   callCtrlLabel:         { fontSize: 11, color: '#666', fontWeight: '500', letterSpacing: 0.2 },
-}); 
+});

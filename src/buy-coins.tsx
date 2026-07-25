@@ -3,9 +3,14 @@
 // ✅ No WebView — redirects to lumvibe.site/buy-coins (no Apple/Google 30% fee)
 // ✅ email sourced from userProfile first, user fallback second
 // ✅ accessibilityLabel on all header buttons
-// ✅ transaction-history uses correct absolute Expo Router path
 // ✅ currency code shown alongside price on each card
 // ✅ support email: lumvibesupport@gmail.com
+//
+// ✅ FIXED: `navigation.goBack()()` had an extra trailing () — goBack()
+//    returns undefined, so calling undefined() would crash the moment
+//    this ran. Same bug appeared twice (Linking listener + header button).
+// ✅ Fixed: navigate('/transaction-history') → navigate('TransactionHistory')
+//    (matches RootStackParamList screen name exactly).
 
 import React, { useState, useEffect } from 'react';
 import {
@@ -13,10 +18,10 @@ import {
   Alert, ActivityIndicator, Linking,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { supabase } from './config/supabase'; 
-import { useAuthStore } from './store/authStore'; 
-import { detectCurrency, convertFromNgn, formatNgn } from './utils/currencyUtils'; 
+import { useNavigation } from '@react-navigation/native';
+import { supabase } from './config/supabase';
+import { useAuthStore } from './store/authStore';
+import { detectCurrency, convertFromNgn, formatNgn } from './utils/currencyUtils';
 
 const NGN_PER_COIN = 150;
 const WEB_BUY_URL  = 'https://lumvibe.site/buy-coins';
@@ -31,7 +36,7 @@ const COIN_PACKAGES = [
 ] as const;
 
 export default function BuyCoinsScreen() {
-  const router                = useRouter();
+  const navigation = useNavigation<any>();
   const { user, userProfile } = useAuthStore();
   const currency              = detectCurrency();
 
@@ -53,7 +58,7 @@ export default function BuyCoinsScreen() {
       if (url.includes('buy-coins') && url.includes('credited=true')) {
         loadBalance();
         Alert.alert('🎉 Coins Added!', 'Your coins have been credited to your wallet!', [
-          { text: 'Done', onPress: () => router.back() },
+          { text: 'Done', onPress: () => navigation.goBack() },
         ]);
       }
     });
@@ -120,7 +125,7 @@ export default function BuyCoinsScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} accessibilityLabel="Go back">
+        <TouchableOpacity onPress={() => navigation.goBack()} accessibilityLabel="Go back">
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Buy Coins</Text>
@@ -227,7 +232,7 @@ export default function BuyCoinsScreen() {
 
         <TouchableOpacity
           style={s.historyLink}
-          onPress={() => router.push('/transaction-history')}
+          onPress={() => navigation.navigate('TransactionHistory' as never)}
           accessibilityLabel="View purchase history"
         >
           <Feather name="clock" size={14} color="#555" />

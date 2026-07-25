@@ -1,4 +1,11 @@
-// app/chat/new-circle.tsx
+// src/chat/new-circle.tsx
+//
+// ✅ Removed dead `import { router } from 'expo-router'`.
+// ✅ CRITICAL FIX: `useNavigation()` was at MODULE scope. Moved inside
+//    NewCircleScreen().
+// ✅ Fixed navigate() call using expo-router's object-style syntax —
+//    converted to `navigate('Circle', { id: circle.id })`.
+
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
@@ -6,10 +13,14 @@ import {
   ActivityIndicator, Alert, ScrollView,
   KeyboardAvoidingView, Platform, Switch,
 } from 'react-native';
-import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../config/supabase'; 
-import { useAuthStore } from '../store/authStore'; 
+import { supabase } from '../config/supabase';
+import { useAuthStore } from '../store/authStore';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { ChatStackParamList } from '.././navigation/ChatStackTypes';
+
+type NavProp = NativeStackNavigationProp<ChatStackParamList>;
 
 const C = {
   black: '#000', card: '#1a1a1a', border: '#2a2a2a',
@@ -17,6 +28,7 @@ const C = {
 };
 
 export default function NewCircleScreen() {
+  const navigation = useNavigation<NavProp>();
   const { user } = useAuthStore();
   const [name,        setName]        = useState('');
   const [description, setDescription] = useState('');
@@ -42,7 +54,7 @@ export default function NewCircleScreen() {
       await supabase.from('circle_subscribers').insert({
         circle_id: circle.id, user_id: user.id,
       });
-      router.replace({ pathname: '/chat/circle/[id]', params: { id: circle.id } } as any);
+      navigation.navigate('Circle', { id: circle.id });
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to create Circle. Please try again.');
     } finally { setCreating(false); }
@@ -53,7 +65,7 @@ export default function NewCircleScreen() {
       <StatusBar barStyle="light-content" backgroundColor={C.black} />
 
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={s.backBtn}>
           <Ionicons name="chevron-back" size={22} color={C.white} />
         </TouchableOpacity>
         <Text style={s.title}>New Circle</Text>

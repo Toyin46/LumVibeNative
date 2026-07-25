@@ -8,10 +8,15 @@ import {
   Image, Alert, ActivityIndicator,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../../config/supabase'; 
 import { useAuthStore } from '../../../store/authStore';
 import { useTranslation } from '../../../locales/LanguageContext'; 
+import type { MarketplaceStackParamList } from '../../../navigation/MarketplaceStackTypes';
+
+type ListingDetailRouteProp = RouteProp<MarketplaceStackParamList, 'ListingDetail'>;
+type NavProp = NativeStackNavigationProp<MarketplaceStackParamList>;
 
 const COIN_TO_NGN = 150;
 function coinsToNGN(coins: number): string {
@@ -19,10 +24,17 @@ function coinsToNGN(coins: number): string {
 }
 
 export default function ListingDetailScreen() {
-  const router = useRouter();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const navigation = useNavigation<NavProp>();
+  const route = useRoute<ListingDetailRouteProp>();
+  const id = route.params?.listingId;
   const { user } = useAuthStore();
   const { t }    = useTranslation();
+
+  // #region agent log
+  React.useEffect(() => {
+    fetch('http://127.0.0.1:7733/ingest/2ce51378-5f1a-4782-9a65-c75641847f4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'46b743'},body:JSON.stringify({sessionId:'46b743',location:'listing/[id].tsx:mount',message:'ListingDetailScreen mounted with useRoute',data:{listingId:id ?? null},timestamp:Date.now(),hypothesisId:'A',runId:'post-fix'})}).catch(()=>{});
+  }, [id]);
+  // #endregion
 
   const [listing,     setListing]     = useState<any>(null);
   const [loading,     setLoading]     = useState(true);
@@ -61,7 +73,7 @@ export default function ListingDetailScreen() {
         `You need ${listing.price_coins} coins (${coinsToNGN(listing.price_coins)}) in your marketplace wallet.\n\nYou have: ${buyerWallet} coins (${coinsToNGN(buyerWallet)})\n\nTop up your marketplace wallet to continue.`,
         [
           { text: t.common.cancel, style: 'cancel' },
-          { text: 'Buy Coins Now', onPress: () => router.push('/(tabs)/marketplace/buy-coins' as any) },
+          { text: 'Buy Coins Now', onPress: () => navigation.navigate('BuyCoins') },
         ]
       );
       return;
@@ -116,7 +128,7 @@ export default function ListingDetailScreen() {
       });
 
       Alert.alert('Order Placed! 🎉', 'Your order has been placed. The seller will be notified.', [
-        { text: 'View Orders', onPress: () => router.push('/(tabs)/marketplace/orders' as any) },
+        { text: 'View Orders', onPress: () => navigation.navigate('Orders') },
       ]);
     } catch (e: any) {
       Alert.alert(t.errors.generic, e.message || 'Something went wrong. Please try again.');
@@ -130,7 +142,7 @@ export default function ListingDetailScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}><Feather name="arrow-left" size={24} color="#fff" /></TouchableOpacity>
+        <TouchableOpacity onPress={() => navigation.goBack()}><Feather name="arrow-left" size={24} color="#fff" /></TouchableOpacity>
         <Text style={s.headerTitle} numberOfLines={1}>{listing.title}</Text>
         <View style={{ width: 24 }} />
       </View>
@@ -158,7 +170,7 @@ export default function ListingDetailScreen() {
             <View style={s.stat}><Text style={s.statNum}>📦 {listing.orders_count || 0}</Text><Text style={s.statLabel}>Orders</Text></View>
           </View>
 
-          <TouchableOpacity style={s.sellerCard} onPress={() => router.push(`/user/${listing.seller_id}` as any)} activeOpacity={0.8}>
+          <TouchableOpacity style={s.sellerCard} onPress={() => navigation.getParent()?.navigate('UserProfile' as never, { userId: listing.seller_id } as never)} activeOpacity={0.8}>
             {listing.seller?.avatar_url
               ? <Image source={{ uri: listing.seller.avatar_url }} style={s.sellerAvatar} />
               : <View style={[s.sellerAvatar, s.avatarPh]}><Feather name="user" size={20} color="#00ff88" /></View>}
@@ -195,7 +207,7 @@ export default function ListingDetailScreen() {
       ) : (
         <View style={s.bottomBar}>
           <Text style={{ color: '#888', fontSize: 14 }}>This is your listing</Text>
-          <TouchableOpacity style={s.editBtn} onPress={() => router.push('/(tabs)/marketplace/my-listings' as any)}>
+          <TouchableOpacity style={s.editBtn} onPress={() => navigation.navigate('MyListings')}>
             <Text style={s.editBtnText}>Manage Listings</Text>
           </TouchableOpacity>
         </View>

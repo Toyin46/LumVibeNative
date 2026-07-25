@@ -8,6 +8,7 @@ import {
   View, Text, TouchableOpacity, StyleSheet, ScrollView,
   ActivityIndicator, Alert,
 } from 'react-native';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 
 import { useVUMeter }        from '../../hooks/useVUMeter';
 import { usePitchDetection } from '../../hooks/usePitchDetection';
@@ -17,7 +18,8 @@ import MetronomePanel        from './MetronomePanel';
 import VoiceEffectsPanel     from './VoiceEffectsPanel';
 import StudioEditPanel       from './StudioEditPanel';
 import AIVocalCoach          from '../coach/AIVocalCoach';
-import { bakeVoiceEffect }   from '../../utils/ffmpegHelpers';
+import BeatPicker from './BeatPicker';
+import { bakeVoiceEffect }   from '../../utils/dsp/bakeEngine';
 import { VOICE_EFFECTS }     from '../../utils/constants';
 import type { VoiceEffect, StudioEdit } from '../../utils/types';
 
@@ -50,9 +52,66 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
   const [bakedUri,       setBakedUri]       = useState<string | null>(null);
   const [takes,          setTakes]          = useState(0);
 
+  // WHY: FX/Edit changes no longer auto-bake on every change — they just
+  // flip this flag so the persistent "Apply Effects" bar shows up. The
+  // user decides when to actually re-process, instead of every slider
+  // drag firing a full render pass.
+  const [hasUnappliedChanges, setHasUnappliedChanges] = useState(false);
+
+  // WHY: hidden by default — Note/Freq/Cents reads like DAW software to a
+  // first-time user. "Advanced" reveals it for anyone who wants it.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // ─── BEAT (sing-over backing track) ──────────────────────
+  const [beatUri,    setBeatUri]    = useState<string | null>(null);
+  const [beatName,   setBeatName]   = useState<string | null>(null);
+  const [beatVolume, setBeatVolume] = useState(0.5);
+
   const vu    = useVUMeter();
   const rec   = useRecording();
   const pitch = usePitchDetection(vu.getBuffer);
+
+  // Same "create once, .replace() on change" pattern as the take preview
+  // player below — useAudioPlayer does not react to its argument changing.
+  const beatPlayer = useAudioPlayer(null);
+  useEffect(() => {
+    if (beatUri) {
+      try { beatPlayer.replace(beatUri); beatPlayer.loop = true; }
+      catch (err) { console.warn('[AudioStudioPanel] beatPlayer.replace failed:', err); }
+    }
+  }, [beatUri, beatPlayer]);
+
+  // ─── PLAYBACK PREVIEW ────────────────────────────────────
+  // WHY: useAudioPlayer only reads its argument ONCE on creation — it does
+  // NOT react to the uri changing later (confirmed via Expo's own source +
+  // a known open issue on this exact behavior). So we create the player
+  // once with a null source, then imperatively .replace() it whenever the
+  // playable uri changes, instead of passing the uri directly.
+  const playbackUri = bakedUri ?? rec.uri;
+  const player       = useAudioPlayer(null);
+  const playerStatus = useAudioPlayerStatus(player);
+
+  useEffect(() => {
+    if (playbackUri) {
+      try { player.replace(playbackUri); } catch (err) { console.warn('[AudioStudioPanel] player.replace failed:', err); }
+    }
+  }, [playbackUri, player]);
+
+  function handlePlayPreview() {
+    if (!playbackUri) return;
+    // expo-audio does NOT auto-reset position after playback finishes —
+    // seekTo(0) first so repeated preview taps always play from the start.
+    try {
+      player.seekTo(0);
+      player.play();
+    } catch (err) {
+      console.warn('[AudioStudioPanel] playback failed:', err);
+    }
+  }
+
+  function handleStopPreview() {
+    try { player.pause(); } catch { /* ignore */ }
+  }
 
   // WHY: Start VU + pitch when recording, stop otherwise
   // FIX: compare rec.state string directly — avoids boolean overlap error
@@ -69,16 +128,21 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
   async function handleRecord() {
     if (rec.state === 'idle' || rec.state === 'done') {
       setBakedUri(null);
+      setHasUnappliedChanges(false);
       await rec.start();
+      if (beatUri) { try { beatPlayer.seekTo(0); beatPlayer.play(); } catch { /* ignore */ } }
     } else if (rec.state === 'recording') {
       await rec.pause();
+      if (beatUri) { try { beatPlayer.pause(); } catch { /* ignore */ } }
     } else if (rec.state === 'paused') {
       await rec.resume();
+      if (beatUri) { try { beatPlayer.play(); } catch { /* ignore */ } }
     }
   }
 
   async function handleStop() {
     const uri = await rec.stop();
+    if (beatUri) { try { beatPlayer.pause(); } catch { /* ignore */ } }
     if (!uri) return;
     setTakes(t => t + 1);
     await handleBake(uri);
@@ -87,13 +151,19 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
   async function handleBake(rawUri: string) {
     setIsBaking(true);
     try {
-      const result = await bakeVoiceEffect(rawUri, selectedEffect, studioEdit);
+      const result = await bakeVoiceEffect(
+        rawUri, selectedEffect, studioEdit,
+        beatUri ? { uri: beatUri, volume: beatVolume } : null,
+      );
       if (result.error) {
         Alert.alert('Processing issue', `Used original audio. Error: ${result.error}`);
+      } else if (result.warning) {
+        Alert.alert('Heads up', result.warning);
       }
       setBakedUri(result.uri);
-    } catch {
-      Alert.alert('Error', 'Could not process audio. Using original.');
+      setHasUnappliedChanges(false);
+    } catch (err) {
+      Alert.alert('Processing issue', `Used original audio. Error: ${err instanceof Error ? err.message : String(err)}`);
       setBakedUri(rawUri);
     } finally {
       setIsBaking(false);
@@ -105,6 +175,15 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
     setBakedUri(null);
     pitch.stop();
     vu.stop();
+  }
+
+  function handleQuickFire() {
+    // Excludes 'none' (no effect, defeats the point) and 'autotune'
+    // (not baked yet — see bakeEngine.ts) — everything else is fair game.
+    const funEffects = VOICE_EFFECTS.filter(e => e.id !== 'none' && e.id !== 'autotune');
+    const pick = funEffects[Math.floor(Math.random() * funEffects.length)];
+    setSelectedEffect(pick);
+    setHasUnappliedChanges(true);
   }
 
   function handleDone() {
@@ -171,28 +250,51 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
               />
             </View>
 
-            <View style={styles.pitchRow}>
-              <View style={styles.pitchBox}>
-                <Text style={styles.pitchLabel}>Note</Text>
-                <Text style={styles.pitchValue}>{pitch.note}</Text>
+            {rec.state === 'idle' && (
+              <TouchableOpacity style={styles.quickFireBtn} onPress={handleQuickFire}>
+                <Text style={styles.quickFireText}>🔥 Quick Fire — surprise me with a fun voice</Text>
+              </TouchableOpacity>
+            )}
+
+            {showAdvanced ? (
+              <View style={styles.pitchRow}>
+                <View style={styles.pitchBox}>
+                  <Text style={styles.pitchLabel}>Note</Text>
+                  <Text style={styles.pitchValue}>{pitch.note}</Text>
+                </View>
+                <View style={styles.pitchBox}>
+                  <Text style={styles.pitchLabel}>Freq</Text>
+                  <Text style={styles.pitchValue}>
+                    {pitch.frequency > 0 ? `${Math.round(pitch.frequency)}Hz` : '—'}
+                  </Text>
+                </View>
+                <View style={styles.pitchBox}>
+                  <Text style={styles.pitchLabel}>Cents</Text>
+                  <Text style={[styles.pitchValue, { color: Math.abs(pitch.cents) < 15 ? '#00FF88' : '#FF6B35' }]}>
+                    {pitch.cents > 0 ? `+${pitch.cents}` : pitch.cents}
+                  </Text>
+                </View>
+                <View style={styles.pitchBox}>
+                  <Text style={styles.pitchLabel}>Takes</Text>
+                  <Text style={styles.pitchValue}>{takes}</Text>
+                </View>
               </View>
-              <View style={styles.pitchBox}>
-                <Text style={styles.pitchLabel}>Freq</Text>
-                <Text style={styles.pitchValue}>
-                  {pitch.frequency > 0 ? `${Math.round(pitch.frequency)}Hz` : '—'}
+            ) : (
+              <View style={styles.simpleRow}>
+                <Text style={styles.simpleTakes}>
+                  {takes > 0 ? `🎙 Take ${takes}` : '🎙 Ready to record'}
                 </Text>
               </View>
-              <View style={styles.pitchBox}>
-                <Text style={styles.pitchLabel}>Cents</Text>
-                <Text style={[styles.pitchValue, { color: Math.abs(pitch.cents) < 15 ? '#00FF88' : '#FF6B35' }]}>
-                  {pitch.cents > 0 ? `+${pitch.cents}` : pitch.cents}
-                </Text>
-              </View>
-              <View style={styles.pitchBox}>
-                <Text style={styles.pitchLabel}>Takes</Text>
-                <Text style={styles.pitchValue}>{takes}</Text>
-              </View>
-            </View>
+            )}
+
+            <TouchableOpacity
+              style={styles.advancedToggle}
+              onPress={() => setShowAdvanced(v => !v)}
+            >
+              <Text style={styles.advancedToggleText}>
+                {showAdvanced ? '▲ Hide advanced' : '▼ Advanced'}
+              </Text>
+            </TouchableOpacity>
 
             <Text style={styles.duration}>{formatDuration(rec.durationMs)}</Text>
 
@@ -216,7 +318,7 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
 
               {(rec.state === 'recording' || rec.state === 'paused') && (
                 <TouchableOpacity style={styles.stopBtn} onPress={handleStop}>
-                  <Text style={styles.stopBtnText}>⏹ Stop & Bake</Text>
+                  <Text style={styles.stopBtnText}>⏹ Done Recording</Text>
                 </TouchableOpacity>
               )}
 
@@ -242,6 +344,17 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
               </View>
             )}
 
+            {hasTake && rec.state === 'done' && !isBaking && (
+              <TouchableOpacity
+                style={styles.playBtn}
+                onPress={playerStatus?.playing ? handleStopPreview : handlePlayPreview}
+              >
+                <Text style={styles.playBtnText}>
+                  {playerStatus?.playing ? '⏸ Pause Preview' : '▶️ Play Take'}
+                </Text>
+              </TouchableOpacity>
+            )}
+
             {hasTake && !isBaking && (
               <TouchableOpacity style={styles.doneBtn} onPress={handleDone}>
                 <Text style={styles.doneBtnText}>✅ Use This Take</Text>
@@ -255,7 +368,7 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
             selectedId={selectedEffect.id}
             onSelect={effect => {
               setSelectedEffect(effect);
-              if (rec.uri) handleBake(rec.uri);
+              setHasUnappliedChanges(true);
             }}
           />
         )}
@@ -266,29 +379,62 @@ export default function AudioStudioPanel({ vibe, onComplete, onClose, username }
             duration={rec.durationMs / 1000}
             onChange={edit => {
               setStudioEdit(edit);
-              if (rec.uri) handleBake(rec.uri);
+              setHasUnappliedChanges(true);
             }}
           />
         )}
 
         {activeTab === 'metronome' && (
-          <MetronomePanel isVisible />
+          <>
+            <MetronomePanel isVisible />
+            <BeatPicker
+              beatUri={beatUri}
+              beatName={beatName}
+              beatVolume={beatVolume}
+              onSelect={(uri, name) => { setBeatUri(uri); setBeatName(name); }}
+              onRemove={() => {
+                setBeatUri(null);
+                setBeatName(null);
+                try { beatPlayer.pause(); } catch { /* ignore */ }
+              }}
+              onVolumeChange={setBeatVolume}
+            />
+          </>
         )}
 
-        {activeTab === 'coach' && (
-          <AIVocalCoach
-            isRecording={isRecording}
-            isVisible
-            frequency={pitch.frequency}
-            note={pitch.note}
-            vuLevel={vu.level}
-            vibe={vibe}
-            onPauseRequest={() => rec.pause()}
-            onResumeRequest={() => rec.resume()}
-            onClose={() => setActiveTab('record')}
-          />
-        )}
+        {/* AIVocalCoach is now ALWAYS mounted (not gated by activeTab) so it
+            keeps listening and speaking no matter which tab you're viewing.
+            isVisible now reflects the REAL tab state — it only controls
+            whether the visual panel renders; the coach engine itself
+            (pitch processing + speech) runs regardless. See AIVocalCoach.tsx
+            for the matching change to its internal effect guards. */}
+        <AIVocalCoach
+          isRecording={isRecording}
+          isVisible={activeTab === 'coach'}
+          frequency={pitch.frequency}
+          note={pitch.note}
+          vuLevel={vu.level}
+          vibe={vibe}
+          onPauseRequest={() => { rec.pause(); if (beatUri) { try { beatPlayer.pause(); } catch { /* ignore */ } } }}
+          onResumeRequest={() => { rec.resume(); if (beatUri) { try { beatPlayer.play(); } catch { /* ignore */ } } }}
+          onClose={() => setActiveTab('record')}
+        />
       </ScrollView>
+
+      {/* Persistent Apply bar — shows on ANY tab whenever FX/Edit changed
+          since the last bake, so the user never has to hunt for a way to
+          actually hear their new settings. */}
+      {hasUnappliedChanges && rec.uri && rec.state === 'done' && !isBaking && (
+        <View style={styles.applyBar}>
+          <Text style={styles.applyBarText}>🎛 You changed effects — apply to hear them</Text>
+          <TouchableOpacity
+            style={styles.applyBtn}
+            onPress={() => handleBake(rec.uri!)}
+          >
+            <Text style={styles.applyBtnText}>Apply Effects</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
@@ -327,4 +473,27 @@ const styles = StyleSheet.create({
   effectBadgeText:{ color: '#AAF', fontSize: 12, fontWeight: '600' },
   doneBtn:        { backgroundColor: '#00AA55', borderRadius: 14, paddingVertical: 16, alignItems: 'center', marginTop: 4 },
   doneBtnText:    { color: '#FFF', fontWeight: '800', fontSize: 16 },
-}); 
+
+  simpleRow:      { alignItems: 'center', paddingVertical: 6 },
+  simpleTakes:    { color: '#AAA', fontSize: 14, fontWeight: '600' },
+  advancedToggle: { alignSelf: 'center', paddingVertical: 4, paddingHorizontal: 10 },
+  advancedToggleText: { color: '#6B4FFF', fontSize: 12, fontWeight: '700' },
+
+  quickFireBtn: {
+    backgroundColor: '#2A1030', borderRadius: 20, paddingVertical: 12,
+    alignItems: 'center', borderWidth: 1, borderColor: '#FF6B35',
+  },
+  quickFireText: { color: '#FF9F5B', fontWeight: '700', fontSize: 13 },
+
+  playBtn:        { backgroundColor: '#1E1E3A', borderRadius: 14, paddingVertical: 14, alignItems: 'center', borderWidth: 1, borderColor: '#6B4FFF' },
+  playBtnText:    { color: '#FFF', fontWeight: '700', fontSize: 14 },
+
+  applyBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#1A1A3A', borderTopWidth: 1, borderTopColor: '#6B4FFF',
+    paddingHorizontal: 16, paddingVertical: 12, gap: 10,
+  },
+  applyBarText: { color: '#DDD', fontSize: 12, flex: 1 },
+  applyBtn:     { backgroundColor: '#6B4FFF', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10 },
+  applyBtnText: { color: '#FFF', fontWeight: '800', fontSize: 13 },
+});  

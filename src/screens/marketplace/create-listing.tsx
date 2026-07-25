@@ -1,20 +1,26 @@
-// FILE: app/(tabs)/marketplace/create-listing.tsx
+// src/screens/marketplace/create-listing.tsx
 // v3 — Fixed both errors:
 // ✅ FIX 1: Removed eager transform from image upload (causes 400 on free plan)
 // ✅ FIX 2: marketplace_listing_id column doesn't exist in posts table yet.
 //           Store listing link in caption instead — works with zero DB changes.
 //           The feed shows a "Shop Now" styled caption card automatically.
+//
+// ✅ Fixed: navigate('/(tabs)/marketplace') → popToTop() within the
+//    marketplace stack. MarketplaceHome screen isn't converted/registered
+//    yet (see MarketplaceStack.tsx TODO) — once it exists, swap this for
+//    navigation.navigate('MarketplaceHome').
+
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
   Alert, ActivityIndicator, Image,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { supabase } from '../../config/supabase'; 
-import { useAuthStore } from '../../store/authStore'; 
+import { supabase } from '../../config/supabase';
+import { useAuthStore } from '../../store/authStore';
 
 const CLOUDINARY_CLOUD_NAME    = 'dvllxm0wg';
 const CLOUDINARY_UPLOAD_PRESET = 'Kinsta_unsigned';
@@ -39,7 +45,6 @@ const REVISION_OPTIONS = [
   { value: 'unlimited', label: 'Unlimited' },
 ];
 
-// ─── Upload image — NO eager transform (free plan safe) ──
 async function uploadImageToCloudinary(uri: string): Promise<string> {
   const b64  = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
   const ext  = uri.split('.').pop()?.toLowerCase() || 'jpg';
@@ -47,7 +52,6 @@ async function uploadImageToCloudinary(uri: string): Promise<string> {
   const form = new FormData();
   form.append('file', `data:${mime};base64,${b64}`);
   form.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
-  // ✅ NO eager param — plain upload, works on all Cloudinary plans
   const res = await fetch(
     `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
     { method: 'POST', body: form }
@@ -61,7 +65,6 @@ async function uploadImageToCloudinary(uri: string): Promise<string> {
   return json.secure_url as string;
 }
 
-// ─── Upload video — NO eager transform (free plan safe) ──
 async function uploadVideoToCloudinary(
   uri: string,
   onProgress: (p: number) => void
@@ -71,7 +74,6 @@ async function uploadVideoToCloudinary(
     const fd  = new FormData();
     fd.append('file', { uri, type: 'video/mp4', name: `mkt_${Date.now()}.mp4` } as any);
     fd.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
-    // ✅ NO eager param — plain upload, works on all Cloudinary plans
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) onProgress(Math.round(e.loaded / e.total * 100));
     };
@@ -91,14 +93,6 @@ async function uploadVideoToCloudinary(
   });
 }
 
-// ─── Build caption with Shop Now info embedded ────────────
-// Since we don't add marketplace_listing_id to posts (avoids DB migration),
-// the listing info is carried in the caption itself.
-// Your index.tsx/videos.tsx already shows a "Shop Now" card for posts
-// where vibe_type === 'marketplace' — that card reads marketplace_title
-// and marketplace_price which we DO save as separate columns (they already
-// exist in most setups). If those columns also don't exist, the caption
-// alone carries everything the viewer needs.
 function buildCaption(params: {
   title: string; priceCoins: number; category: string; listingId: string;
 }): string {
@@ -112,7 +106,7 @@ function buildCaption(params: {
 }
 
 export default function CreateListingScreen() {
-  const router   = useRouter();
+  const navigation = useNavigation<any>();
   const { user } = useAuthStore();
 
   const [title,         setTitle]         = useState('');
@@ -153,7 +147,6 @@ export default function CreateListingScreen() {
     setUploadStage('Creating listing...');
 
     try {
-      // ── Step 1: Create the marketplace listing ───────────
       const { data: newListing, error: listingError } = await supabase
         .from('marketplace_listings')
         .insert({
@@ -176,7 +169,6 @@ export default function CreateListingScreen() {
       const caption   = buildCaption({ title: title.trim(), priceCoins: priceNum, category, listingId: newListing.id });
       const firstItem = portfolioUrls[0] ?? null;
 
-      // ── Step 2: Upload media + insert post ───────────────
       if (firstItem) {
         let mediaUrl  = '';
         let mediaType = firstItem.isVideo ? 'video' : 'image';
@@ -195,11 +187,6 @@ export default function CreateListingScreen() {
         setUploadStage('Posting to feed...');
         setUploadPct(88);
 
-        // ✅ Build the post insert — only use columns that exist in your posts table.
-        // marketplace_listing_id, marketplace_price, marketplace_title are optional:
-        // if they exist they power the Shop Now card in the feed.
-        // If they don't exist yet, the post still works perfectly — vibe_type
-        // 'marketplace' is enough for the feed to know this is a marketplace post.
         const postInsert: Record<string, any> = {
           user_id:              user!.id,
           caption,
@@ -215,13 +202,9 @@ export default function CreateListingScreen() {
           auto_optimized:       false,
           applied_filter:       'original',
           video_effect:         'none',
-          // ✅ Always set this so index.tsx Shop Now button works even without
-          // the marketplace_listing_id column (dual-path support)
           cloudinary_public_id: `marketplace_listing_${newListing.id}`,
         };
 
-        // Safely try to add marketplace columns — if they don't exist in DB,
-        // Supabase will throw and we catch below and retry without them
         postInsert.marketplace_listing_id = newListing.id;
         postInsert.marketplace_price      = priceNum.toString();
         postInsert.marketplace_title      = title.trim();
@@ -230,7 +213,6 @@ export default function CreateListingScreen() {
         const { error: e1 } = await supabase.from('posts').insert(postInsert);
         postError = e1;
 
-        // If marketplace columns don't exist, retry without them
         if (postError && postError.message?.includes('marketplace_listing_id')) {
           const fallbackInsert = { ...postInsert };
           delete fallbackInsert.marketplace_listing_id;
@@ -246,11 +228,10 @@ export default function CreateListingScreen() {
         Alert.alert(
           '🎉 Listed & Posted!',
           'Your service is live on the marketplace and posted to the feed!',
-          [{ text: 'View Marketplace', onPress: () => router.replace('/(tabs)/marketplace') }]
+          [{ text: 'View Marketplace', onPress: () => navigation.popToTop() }]
         );
 
       } else {
-        // No media — text post only
         setUploadStage('Posting to feed...');
         const postInsert: Record<string, any> = {
           user_id:              user!.id,
@@ -286,7 +267,7 @@ export default function CreateListingScreen() {
         Alert.alert(
           '🎉 Listing Created!',
           'Your service is live on the marketplace and posted to the feed!',
-          [{ text: 'View Marketplace', onPress: () => router.replace('/(tabs)/marketplace') }]
+          [{ text: 'View Marketplace', onPress: () => navigation.popToTop() }]
         );
       }
     } catch (e: any) {
@@ -301,7 +282,7 @@ export default function CreateListingScreen() {
   return (
     <View style={s.container}>
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Create Listing</Text>

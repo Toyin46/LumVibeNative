@@ -8,8 +8,29 @@
 // ═══════════════════════════════════════════════════════════
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { yinPitchDetect } from '../utils/audioHelpers'; 
-import { frequencyToNote } from '../utils/constants'; 
+import { yinPitchDetect } from '../utils/audioHelpers';
+import { frequencyToNote } from '../utils/constants';
+
+// Vocal fundamentals top out around 1200Hz (per yinPitchDetect's own docs),
+// so we don't need 44100Hz resolution to track them accurately. Averaging
+// every 4 samples into 1 (simple decimation) drops the effective rate to
+// ~11025Hz — Nyquist ~5512Hz, comfortably above 1200Hz with real margin —
+// while cutting YIN's O(n²) inner loop cost by ~16x (4 squared).
+const DOWNSAMPLE_FACTOR = 4;
+
+function downsample(buffer: Float32Array, factor: number): Float32Array {
+  const outLength = Math.floor(buffer.length / factor);
+  const out = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const base = i * factor;
+    let sum = 0;
+    for (let j = 0; j < factor; j++) sum += buffer[base + j];
+    // Averaging (not just picking every Nth sample) acts as a crude
+    // anti-alias filter, reducing noise from the decimation itself.
+    out[i] = sum / factor;
+  }
+  return out;
+}
 
 // ─── INTERFACE ─────────────────────────────────────────────
 // WHY: Exact names match AIVocalCoach.tsx and AudioStudioPanel.tsx callers
@@ -78,7 +99,11 @@ export function usePitchDetection(
         // WHY: If VUMeter is in fallback mode, buffer is null — skip silently
         if (!buffer || buffer.length === 0) return;
 
-        const freq = yinPitchDetect(buffer, sampleRate, 0.15);
+        const freq = yinPitchDetect(
+          downsample(buffer, DOWNSAMPLE_FACTOR),
+          sampleRate / DOWNSAMPLE_FACTOR,
+          0.15,
+        );
 
         // WHY: Only update if frequency changed by more than 2Hz — prevents jitter
         if (Math.abs(freq - lastFrequencyRef.current) <= 2) return;
@@ -112,4 +137,4 @@ export function usePitchDetection(
   }, [getBuffer, sampleRate]);
 
   return { frequency, note, cents, isActive, confidence, start, stop };
-} 
+}  

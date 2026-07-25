@@ -40,6 +40,7 @@ import {
   KeyboardAvoidingView, Platform, Image, Alert, Dimensions,
   Animated, Modal, Share, ScrollView, PermissionsAndroid,
   RefreshControl, PanResponder, GestureResponderEvent, Linking,
+  AppState, AppStateStatus,
 } from 'react-native';
 // FIX 3/19: react-native-video for feed video (same as videos.tsx — reliable in bare workflow)
 import RNVideo from 'react-native-video';
@@ -499,6 +500,10 @@ interface CowatchSession {
   started_by: string; created_at: string;
   is_active: boolean; is_playing: boolean;
   current_position: number;
+  // NEW: host-toggle — null means free-for-all (either person can scroll/drive,
+  // the old behavior). When set to a user id, only that user's scroll/play
+  // actions get written to the session; the other person becomes a follower.
+  host_id: string | null;
 }
 
 interface LiveMessage {
@@ -771,8 +776,16 @@ async function cancelAiMatchQueue(queueId: string): Promise<void> {
 
 // ─────────────────────────────────────────────────────────────
 // AI MATCH — attempt to match a waiting user
-// Finds another waiting user with overlapping vibe categories,
-// creates a shared cowatch_session, and updates both queue rows.
+//
+// FIX (race condition): matching used to happen client-side —
+// read candidates, pick the best one, then write. Two clients
+// polling at the same moment could both pick the same candidate
+// and both create a session for it, leaving duplicate/orphaned
+// rows behind. All of that now happens in a single atomic
+// Postgres function (attempt_ai_match, see atomic_ai_match.sql)
+// using `FOR UPDATE SKIP LOCKED`, so only one caller can ever
+// claim a given candidate — the database guarantees it, not
+// client-side timing.
 // ─────────────────────────────────────────────────────────────
 async function attemptAiMatch(
   myQueueId: string,
@@ -786,85 +799,31 @@ async function attemptAiMatch(
   partnerPhoto: string | null;
 }> {
   try {
-    const { data: candidates, error } = await supabase
-      .from('ai_match_queue')
-      .select('id, user_id, vibe_categories')
-      .eq('status', 'waiting')
-      .neq('user_id', myUserId)
-      .gt('expires_at', new Date().toISOString())
-      .order('created_at', { ascending: true })
-      .limit(20);
+    const { data, error } = await supabase.rpc('attempt_ai_match', {
+      p_queue_id: myQueueId,
+      p_user_id: myUserId,
+      p_vibes: myVibes,
+    });
 
-    if (error || !candidates || candidates.length === 0) {
+    if (error) {
+      console.error('attempt_ai_match RPC error:', error);
       return { matched: false, sessionId: null, partnerId: null, partnerName: null, partnerPhoto: null };
     }
 
-    let bestCandidate: any = null;
-    let bestScore = -1;
-    for (const c of candidates) {
-      const theirVibes: string[] = c.vibe_categories || [];
-      const overlap = myVibes.filter(v => theirVibes.includes(v)).length;
-      if (overlap > bestScore) { bestScore = overlap; bestCandidate = c; }
-    }
-
-    if (!bestCandidate) {
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row || !row.matched) {
       return { matched: false, sessionId: null, partnerId: null, partnerName: null, partnerPhoto: null };
     }
-
-    const partnerId: string = bestCandidate.user_id;
-    const sharedSessionId = `ai_match_${myUserId.slice(0, 8)}_${partnerId.slice(0, 8)}_${Date.now()}`;
-
-    const { data: sessionData, error: sessionError } = await supabase
-      .from('cowatch_sessions')
-      .insert({
-        conversation_id: sharedSessionId,
-        started_by: myUserId,
-        feed_type: 'video',
-        current_post_index: 0,
-        current_position: 0,
-        is_playing: false,
-        is_active: true,
-        video_id: 'feed',
-        video_title: 'AI Match Feed',
-        video_url: '',
-      })
-      .select('id')
-      .single();
-
-    if (sessionError || !sessionData) {
-      console.error('attemptAiMatch: session insert failed', sessionError);
-      return { matched: false, sessionId: null, partnerId: null, partnerName: null, partnerPhoto: null };
-    }
-
-    await supabase.from('ai_match_queue').update({
-      status: 'matched',
-      matched_with: partnerId,
-      session_id: sharedSessionId,
-      matched_at: new Date().toISOString(),
-    }).eq('id', myQueueId);
-
-    await supabase.from('ai_match_queue').update({
-      status: 'matched',
-      matched_with: myUserId,
-      session_id: sharedSessionId,
-      matched_at: new Date().toISOString(),
-    }).eq('id', bestCandidate.id);
-
-    const { data: partnerProfile } = await supabase
-      .from('users')
-      .select('display_name, username, avatar_url')
-      .eq('id', partnerId)
-      .single();
 
     return {
       matched: true,
-      sessionId: sharedSessionId,
-      partnerId,
-      partnerName: partnerProfile?.display_name || partnerProfile?.username || 'Vibe Match',
-      partnerPhoto: partnerProfile?.avatar_url || null,
+      sessionId: row.session_id,
+      partnerId: row.partner_id,
+      partnerName: row.partner_name || 'Vibe Match',
+      partnerPhoto: row.partner_photo || null,
     };
   } catch (e) {
-    console.error('attemptAiMatch error:', e);
+    console.error('attemptAiMatch unexpected error:', e);
     return { matched: false, sessionId: null, partnerId: null, partnerName: null, partnerPhoto: null };
   }
 }
@@ -879,7 +838,7 @@ async function startCowatchSession(
     const { data, error } = await supabase.from('cowatch_sessions').insert({
       conversation_id: conversationId, started_by: startedBy,
       feed_type: feedType, current_post_index: 0,
-      current_position: 0, is_playing: false, is_active: true,
+      current_position: 0, is_playing: false, is_active: true, host_id: null,
       video_id: 'feed', video_title: 'Feed', video_url: '',
     }).select().single();
     if (error) throw error;
@@ -902,6 +861,14 @@ async function syncFeedIndex(sessionId: string, postIndex: number, isPlaying: bo
       .update({ current_post_index: postIndex, is_playing: isPlaying, current_position: position })
       .eq('id', sessionId);
   } catch (e) { console.error('syncFeedIndex:', e); }
+}
+
+// NEW: claim or release "host" control of a session.
+// Pass null to release control back to free-for-all mode.
+async function setSessionHost(sessionId: string, hostId: string | null) {
+  try {
+    await supabase.from('cowatch_sessions').update({ host_id: hostId }).eq('id', sessionId);
+  } catch (e) { console.error('setSessionHost:', e); }
 }
 
 async function endCowatchSession(sessionId: string) {
@@ -1643,7 +1610,7 @@ const FeedPostCard = memo(function FeedPostCard({
       // 250ms update interval — smooth waveform progress on slow networks
       const isCloudinaryUrl = uri.includes('cloudinary.com');
       const sourceObj = isCloudinaryUrl ? { uri, overrideFileExtensionAndroid: 'm4a' } : { uri };
-      const player = createAudioPlayer(sourceObj,{updateInterval: 250});
+      const player = createAudioPlayer(sourceObj, );
       player.loop = loop;
       player.volume = loop ? 0.7 : 1.0;
       player.shouldCorrectPitch = false;
@@ -2339,7 +2306,22 @@ export default function CowatchScreen() {
   }, []);
 
   // FIX 4: useLiveKitCall replaces useAgoraCall completely
-  const livekitChannel = `cowatch_${conversationId}`;
+  //
+  // FIX (critical, security): this used to be `cowatch_${conversationId}`
+  // computed directly from the route param. For AI Match, conversationId
+  // arrives as '' and is never a state variable, so the derived channel
+  // name was the literal string "cowatch_" for every single AI-matched
+  // pair in the whole app — meaning every stranger pair using "AI
+  // Cowatch Me" at the same time landed in the exact same LiveKit room
+  // and could see/hear each other's camera and mic.
+  //
+  // Now liveConversationId starts empty for AI Match and is only set
+  // once a real, unique session id exists (see setupAiMatchSession and
+  // the poller branch below) — so livekitChannel stays '' (falsy, and
+  // useLiveKitCall's `if (!channelName) return;` guard correctly skips
+  // connecting) until there's an actual private room to join.
+  const [liveConversationId, setLiveConversationId] = useState(conversationId || '');
+  const livekitChannel = liveConversationId ? `cowatch_${liveConversationId}` : '';
   const displayName = userProfile?.display_name || userProfile?.username || 'LumVibe User';
   const {
     remoteConnected, callReady, micMuted, camMuted, speakerOn, permDenied,
@@ -2380,6 +2362,9 @@ export default function CowatchScreen() {
   const [otherUserActive,   setOtherUserActive]   = useState(false);
   const [chatExpanded,      setChatExpanded]      = useState(false);
   const [isSynced,          setIsSynced]          = useState(false);
+  // NEW: null = free-for-all (anyone can scroll/drive). A user id = only
+  // that person's scroll/play actions get synced; the other is a follower.
+  const [hostId,            setHostId]            = useState<string | null>(null);
   const [commentPost,       setCommentPost]       = useState<FeedPost | null>(null);
   const [giftPost,          setGiftPost]          = useState<FeedPost | null>(null);
   const [floatingReactions, setFloatingReactions] = useState<FloatingReaction[]>([]);
@@ -2394,6 +2379,33 @@ export default function CowatchScreen() {
   const [aiMatchPartnerPhoto, setAiMatchPartnerPhoto] = useState<string | null>(null);
   const aiMatchPollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const aiMatchMountedRef = useRef(true);
+
+  // ── Cleanup tracking refs ────────────────────────────────────
+  // useEffect cleanup functions and AppState callbacks close over
+  // whatever `session`/`aiMatchQueueId` were at the time the effect
+  // was set up (often null, on mount). These refs always hold the
+  // latest value so cleanup can actually find what needs closing.
+  const sessionRef       = useRef<CowatchSession | null>(null);
+  const aiMatchQueueIdRef = useRef<string | null>(null);
+  const sessionEndedRef  = useRef(false); // guards against double end_session writes
+  useEffect(() => { sessionRef.current = session; }, [session]);
+  useEffect(() => { aiMatchQueueIdRef.current = aiMatchQueueId; }, [aiMatchQueueId]);
+
+  // Ends the active session / abandons the AI-match queue exactly
+  // once, however the user leaves: End Call button, back gesture,
+  // hardware back button, or backgrounding the app mid-cowatch.
+  const cleanupCowatchState = useCallback(() => {
+    if (sessionEndedRef.current) return;
+    sessionEndedRef.current = true;
+    if (sessionRef.current) {
+      endCowatchSession(sessionRef.current.id).catch(() => {});
+    } else if (aiMatchQueueIdRef.current) {
+      // Only abandon the queue row if we never actually got matched —
+      // otherwise this would overwrite a valid 'matched' row back to
+      // 'expired' right after a successful match.
+      cancelAiMatchQueue(aiMatchQueueIdRef.current).catch(() => {});
+    }
+  }, []);
 
   useEffect(() => { feedTypeRef.current = feedType; }, [feedType]);
 
@@ -2419,6 +2431,18 @@ export default function CowatchScreen() {
     } else {
       setupSession();
     }
+
+    // FIX (orphaned sessions): if the app is backgrounded mid-cowatch
+    // (phone call, switching apps, locking the phone) end the session
+    // the same way the End Call button would. Without this, a session
+    // stayed is_active:true in the DB until someone came back and
+    // pressed End Call — or never did.
+    const appStateSub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      if (next === 'background' || next === 'inactive') {
+        cleanupCowatchState();
+      }
+    });
+
     return () => {
       aiMatchMountedRef.current = false;
       if (aiMatchPollRef.current) clearInterval(aiMatchPollRef.current);
@@ -2427,6 +2451,10 @@ export default function CowatchScreen() {
       if (postsChannelRef.current) supabase.removeChannel(postsChannelRef.current);
       // ✅ ADDED: stop audio on unmount
       globalAudioManager.stopCurrent();
+      // FIX (orphaned sessions): covers leaving via back gesture/hardware
+      // back button, not just the explicit End Call button.
+      cleanupCowatchState();
+      appStateSub.remove();
     };
   }, []);
 
@@ -2582,8 +2610,12 @@ export default function CowatchScreen() {
               const activeSession = await getActiveCowatchSession(result.sessionId!);
               if (!activeSession) { setIsLoading(false); return; }
               setSession(activeSession);
+              setHostId(activeSession.host_id ?? null);
               setFeedType('video'); feedTypeRef.current = 'video';
               setIsLoading(false);
+              // FIX: real, unique session id now exists — safe to open a
+              // private LiveKit room scoped to just these two users.
+              setLiveConversationId(result.sessionId!);
               syncChannelRef.current = subscribeCowatchSession(activeSession.id, handleRemoteSync);
               addSystemMessage(`🎯 AI matched you with ${result.partnerName}! Watch party started 🎬`);
             }, 1500);
@@ -2615,8 +2647,12 @@ export default function CowatchScreen() {
             const activeSession = await getActiveCowatchSession(row.session_id!);
             if (!activeSession) { setIsLoading(false); return; }
             setSession(activeSession);
+            setHostId(activeSession.host_id ?? null);
             setFeedType('video'); feedTypeRef.current = 'video';
             setIsLoading(false);
+            // FIX: same as above — only open the private room once we
+            // have the real session id, not before.
+            setLiveConversationId(row.session_id!);
             syncChannelRef.current = subscribeCowatchSession(activeSession.id, handleRemoteSync);
             addSystemMessage(`🎯 AI matched you with ${pName}! Watch party started 🎬`);
           }, 1500);
@@ -2648,6 +2684,7 @@ export default function CowatchScreen() {
       }
       if (!activeSession) { Alert.alert('Error', 'Could not start co-watch session.'); navigation.goBack(); return; }
       setSession(activeSession);
+      setHostId(activeSession.host_id ?? null);
       if (activeSession.feed_type) { setFeedType(activeSession.feed_type); feedTypeRef.current = activeSession.feed_type; }
       if (activeSession.current_post_index) setCurrentIndex(activeSession.current_post_index);
       setIsLoading(false);
@@ -2691,6 +2728,9 @@ export default function CowatchScreen() {
       setFeedType(updatedSession.feed_type);
       feedTypeRef.current = updatedSession.feed_type;
     }
+    // NEW: keep local host state in lockstep with the DB row so both
+    // phones agree on who's allowed to drive.
+    setHostId(updatedSession.host_id ?? null);
     setIsSynced(true);
     setTimeout(() => setIsSynced(false), 2000);
   }, []);
@@ -2840,9 +2880,12 @@ export default function CowatchScreen() {
     globalAudioManager.stopCurrent();
     // FIX 11: Disconnect LiveKit room before leaving screen
     await disconnectLiveKit();
-    if (session) await endCowatchSession(session.id);
+    // FIX (orphaned sessions): shared, guarded cleanup — same path the
+    // unmount effect and AppState listener use, so pressing End Call
+    // and then the screen unmounting a moment later can't double-fire.
+    cleanupCowatchState();
     navigation.goBack();
-  }, [session, disconnectLiveKit, navigation]);
+  }, [disconnectLiveKit, cleanupCowatchState, navigation]);
 
   // ── AI Match screens (shown before isLoading resolves) ──
   if (isAiMatch === 'true' && aiMatchStatus === 'searching') {
@@ -2926,6 +2969,26 @@ export default function CowatchScreen() {
   const currentPost = feedItems[currentIndex];
   const currentPostIsAd = currentPost ? isAd(currentPost) : false;
 
+  // NEW: host-toggle. No host set = free-for-all (either person can drive,
+  // matches old behavior). Host set = only that person's scroll/play writes
+  // to the session; the other person is a passive follower.
+  const amIHost = !hostId || hostId === user?.id;
+  const partnerIsHosting = !!hostId && hostId !== user?.id;
+
+  const toggleHostMode = () => {
+    if (!session || !user?.id) return;
+    if (partnerIsHosting) {
+      // Someone else already has control — don't let this tap steal it silently.
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      Alert.alert('Partner is hosting', `${otherName || 'Your partner'} currently has control. Ask them to release it first.`);
+      return;
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    const nextHost = hostId === user.id ? null : user.id;
+    setHostId(nextHost); // optimistic — handleRemoteSync will confirm
+    setSessionHost(session.id, nextHost);
+  };
+
   return (
     <SafeAreaView style={styles.root} edges={['left', 'right'] as any}>
       <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
@@ -2961,6 +3024,12 @@ export default function CowatchScreen() {
             onMomentumScrollEnd={(e) => {
               const idx = Math.round(e.nativeEvent.contentOffset.y / feedHeight);
               if (idx === currentIndex || !session) return;
+              // NEW: if a host is set and it's not me, my scroll doesn't drive
+              // the session — snap back to the synced position instead.
+              if (!amIHost) {
+                feedRef.current?.scrollToIndex({ index: currentIndex, animated: true });
+                return;
+              }
               // ✅ ADDED: stop audio when scrolling to new post
               globalAudioManager.stopCurrent();
               setCurrentIndex(idx);
@@ -2991,7 +3060,7 @@ export default function CowatchScreen() {
                   userId={user?.id || ''}
                   isOwnPost={(item as FeedPost).user_id === user?.id}
                   syncedIsPlaying={index === currentIndex ? syncedIsPlaying : undefined}
-                  onSyncPlayPause={index === currentIndex && session ? (playing: boolean) => {
+                  onSyncPlayPause={index === currentIndex && session && amIHost ? (playing: boolean) => {
                     // ✅ FIXED: user tapped play/pause — write to DB so partner syncs
                     isSyncingRef.current = true;
                     syncFeedIndex(session.id, currentIndex, playing, 0).finally(() => {
@@ -3065,6 +3134,25 @@ export default function CowatchScreen() {
           </View>
           <View style={styles.topBarRow2}>
             <FeedSelector activeFeed={feedType} onSelect={handleFeedTypeChange} />
+            <TouchableOpacity
+              style={[
+                styles.hostPill,
+                hostId ? (amIHost ? styles.hostPillMine : styles.hostPillTheirs) : styles.hostPillOff,
+              ]}
+              onPress={toggleHostMode}
+            >
+              <Ionicons
+                name={hostId ? 'lock-closed' : 'lock-open-outline'}
+                size={11}
+                color={hostId ? (amIHost ? '#000' : C.muted) : C.muted}
+              />
+              <Text style={[
+                styles.hostPillText,
+                hostId && amIHost && { color: '#000' },
+              ]}>
+                {!hostId ? 'Both can drive' : amIHost ? 'You\'re hosting' : `${otherName || 'Partner'} is hosting`}
+              </Text>
+            </TouchableOpacity>
             <View style={styles.postCounter}>
               <Text style={styles.postCounterText}>
                 {feedItems.length > 0 ? `${currentIndex + 1} / ${feedItems.length}` : '--'}
@@ -3076,6 +3164,14 @@ export default function CowatchScreen() {
         {/* Call controls — left side */}
         <CallControls micMuted={micMuted} camMuted={camMuted} speakerOn={speakerOn} onToggleMic={toggleMic} onToggleCam={toggleCam} onToggleSpeaker={toggleSpeaker} onEndCall={endCowatch} />
       </View>
+
+      {/* Follower lock notice — shown briefly so the non-host knows why their scroll snapped back */}
+      {partnerIsHosting && (
+        <View style={styles.followerNotice} pointerEvents="none">
+          <Ionicons name="lock-closed" size={11} color={C.white} />
+          <Text style={styles.followerNoticeText}>{otherName || 'Your partner'} is driving</Text>
+        </View>
+      )}
 
       {/* ── BOTTOM PANEL ── */}
       <KeyboardAvoidingView style={styles.bottomPanel} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -3355,6 +3451,13 @@ const styles = StyleSheet.create({
   topBarSub:   { fontSize: 10, color: 'rgba(255,255,255,0.5)', marginTop: 1 },
   syncBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.greenBg, borderWidth: 1, borderColor: C.green, borderRadius: 20, paddingVertical: 3, paddingHorizontal: 8 },
   syncBadgeText: { fontSize: 9.5, fontWeight: '700', color: C.green },
+  hostPill: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 20, paddingVertical: 4, paddingHorizontal: 9, borderWidth: 1 },
+  hostPillOff: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.15)' },
+  hostPillMine: { backgroundColor: C.green, borderColor: C.green },
+  hostPillTheirs: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.15)' },
+  hostPillText: { fontSize: 10.5, fontWeight: '700', color: C.muted },
+  followerNotice: { position: 'absolute', top: 118, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 14, paddingVertical: 5, paddingHorizontal: 12, zIndex: 5 },
+  followerNoticeText: { fontSize: 11, fontWeight: '600', color: C.white },
   liveBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.red, borderRadius: 20, paddingVertical: 4, paddingHorizontal: 10 },
   liveBadgeText: { fontSize: 9.5, fontWeight: '800', color: C.white, letterSpacing: 0.8 },
   postCounter: { backgroundColor: 'rgba(0,0,0,0.5)', paddingVertical: 3, paddingHorizontal: 10, borderRadius: 20 },

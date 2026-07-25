@@ -113,6 +113,12 @@ export interface PostInsertData {
   cloudinary_public_id?: string;
   status_background?: string;
   voice_duration?: number;
+  // WHY: dedicated column for a separately-recorded AudioStudio vocal
+  // take — distinct from media_url (the video/photo itself) and from
+  // music_url (the beat, synced at playback). Needs this Supabase
+  // migration before it'll actually persist:
+  //   alter table posts add column studio_audio_url text;
+  studio_audio_url?: string | null;
   location?: string;
   latitude?: number;
   longitude?: number;

@@ -9,7 +9,7 @@ import {
   ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { supabase } from './config/supabase'; 
 import { useAuthStore } from './store/authStore'; 
 
@@ -62,7 +62,7 @@ function formatDate(iso: string): string {
 }
 
 export default function TransactionHistoryScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user } = useAuthStore();
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -212,7 +212,7 @@ export default function TransactionHistoryScreen() {
     <View style={s.container}>
       {/* Header */}
       <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+      <TouchableOpacity onPress={() => navigation.goBack()}>
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Transaction History</Text>

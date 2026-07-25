@@ -9,9 +9,9 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useAuthStore } from '../../store/authStore';
-import { supabase } from '../../config/supabase';
-import { useRouter } from 'expo-router';
+import { useAuthStore } from '@/store/authStore'; 
+import { supabase } from '@/config/supabase'; 
+import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from '@/locales/LanguageContext';
 
 // ── Strict union type — catches typos at compile time ────────
@@ -74,7 +74,7 @@ function safeParseJSON<T = Record<string, any>>(
 export default function NotificationsScreen() {
   const { user }  = useAuthStore();
   const { t }     = useTranslation();
-  const router    = useRouter();
+  const navigation = useNavigation<any>();
 
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading,       setLoading]       = useState(true);
@@ -198,8 +198,8 @@ export default function NotificationsScreen() {
       case 'cowatch_invite': {
         // FIX: use metadata field, not message field
         if (meta.conversationId && meta.sessionId) {
-          router.push({
-            pathname: '/chat/cowatch',
+          navigation.navigate({
+            pathname: '/chat/cowatch' as never,
             params: {
               conversationId: meta.conversationId,
               sessionId:      meta.sessionId,
@@ -217,18 +217,18 @@ export default function NotificationsScreen() {
         // FIX: use metadata.conversationId consistently
         const conversationId = meta.conversationId || notification.post_id;
         if (conversationId) {
-          router.push(`/chat/${conversationId}` as any);
+          navigation.navigate(`/chat/${conversationId}` as never);
         }
         break;
       }
 
       case 'follow':
         if (notification.from_user_id)
-          router.push(`/user/${notification.from_user_id}` as any);
+          navigation.navigate(`/user/${notification.from_user_id}` as never);
         break;
 
       case 'marketplace':
-        router.push('/(tabs)/marketplace' as any);
+        navigation.navigate('/(tabs)/marketplace' as never);
         break;
 
       case 'like':
@@ -237,16 +237,16 @@ export default function NotificationsScreen() {
       case 'gift':
       case 'mention':
         if (notification.post_id)
-          router.push(`/post/${notification.post_id}` as any);
+          navigation.navigate(`/post/${notification.post_id}` as never);
         break;
 
       case 'referral_commission':
       case 'achievement':
-        router.push('/(tabs)/profile' as any);
+        navigation.navigate('/(tabs)/profile' as never);
         break;
 
       default:
-        router.push('/(tabs)/notification' as any);
+        navigation.navigate('/(tabs)/notification' as never);
         break;
     }
   };

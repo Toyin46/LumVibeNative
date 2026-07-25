@@ -10,7 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from './store/authStore'; 
 import { supabase } from './config/supabase'; 
 
@@ -22,8 +22,14 @@ interface ConnectedAccount {
 }
 
 export default function ConnectAccountsScreen() {
-  const router = useRouter();
+  const navigation = useNavigation();
   const { user } = useAuthStore();
+
+  // #region agent log
+  useEffect(() => {
+    fetch('http://127.0.0.1:7733/ingest/2ce51378-5f1a-4782-9a65-c75641847f4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'46b743'},body:JSON.stringify({sessionId:'46b743',location:'connect-accounts.tsx:mount',message:'ConnectAccountsScreen mounted with useNavigation.goBack',data:{hasNavigation:!!navigation},timestamp:Date.now(),hypothesisId:'C',runId:'post-fix'})}).catch(()=>{});
+  }, [navigation]);
+  // #endregion
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount[]>([]);
@@ -147,7 +153,7 @@ export default function ConnectAccountsScreen() {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Connect Accounts</Text>
