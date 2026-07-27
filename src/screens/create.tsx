@@ -48,6 +48,7 @@ import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { bakeVideo } from '../../modules/video-baker';
+import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
 
@@ -187,11 +188,12 @@ function freqToNote(freq: number): string {
 // cd ios && pod install
 import { useSkiaFrameProcessor } from 'react-native-vision-camera';
 import { Skia } from '@shopify/react-native-skia';
-// ⚠️ TEMPORARILY DISABLED — react-native-vision-camera-face-detector was built
-// against a different react-native-vision-camera version than the one
-// installed (4.6.1), causing cascading type errors ('CameraOutput' not
-// exported, 'landmarkMode' not a valid option, etc). Real face-tracked AR
-// is phase 2 — revisit with a deliberately matched package version then.
+// ⚠️ TEMPORARILY DISABLED — react-native-vision-camera-face-detector was
+// built against a different react-native-vision-camera version than the one
+// installed (4.6.1), causing cascading type errors and build failures.
+// AR/face-tracked effects are phase 2 — revisit with a deliberately matched
+// package version then. For now (phase 1: testing watermark baking),
+// this stays out entirely.
 // import { useFaceDetector } from 'react-native-vision-camera-face-detector';
 import { useSharedValue } from 'react-native-reanimated';
 
@@ -5101,40 +5103,47 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         const ok = await checkVideoSize(mediaUri);
         if (!ok) { setIsPosting(false); return; }
 
-        // WHY: the previous filter-baking (FFmpeg -vf) and watermark-baking
-        // (bakeWatermarkAndEndCard) steps here both went through
-        // ffmpeg-kit-react-native, which is dead (retired Jan 2025, no
-        // binaries, breaks EAS builds — this file's OWN comment on
-        // uploadVideoToCloudinary already says so). They were silently
-        // failing every time, which is why filters/watermark looked broken.
-        //
-        // FIX: video filters were never actually baked into the pixels
-        // anyway — resolvedTintForDb below already stores the correct tint,
-        // and the feed renders it as a UI overlay (same working approach
-        // your image path already uses). Watermark now uses the SAME
-        // Cloudinary eager-transform this file already built correctly for
-        // uploadVideoToCloudinary — it just needed to actually be called
-        // with the real addWatermark flag instead of a hardcoded `false`.
+        // ✅ Watermark is now baked in on-device via our native video-baker
+        // module (Kotlin, MediaCodec/MediaMuxer/OpenGL — no FFmpeg, no cost,
+        // no dependency on Cloudinary having a real logo asset uploaded).
+        // This REPLACES the old Cloudinary eager-transform watermark, which
+        // referenced a placeholder overlay ('lumvibe_logo') that was never
+        // actually uploaded to Cloudinary — that's what was causing the
+        // "Cloudinary 400" error. Baking locally first also sidesteps that
+        // entirely, since we now upload a plain (already-watermarked) file.
         //
         // LOST FEATURE, being upfront about it: the branded 3-second end
-        // card doesn't have a live equivalent here — it needed FFmpeg's
-        // concat step specifically. Removing dead-FFmpeg here means it's
-        // gone until we find a different mechanism for it (a real
-        // Cloudinary-based concat approach, if one exists on your plan).
+        // card isn't implemented in video-baker yet (it needed FFmpeg's
+        // concat step). Revisit with a proper native concat approach later.
         const videoUsername = user.user_metadata?.username || user.email?.split('@')[0] || 'LumVibe';
         const filterDefForBake = FILTERS.find(f => f.id === selectedFilter) || null;
 
+        let uriToUpload = mediaUri;
+
+        if (addWatermark) {
+          setUploadStage('Baking watermark into video...');
+          setUploadProgress(10);
+          try {
+            const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
+            await logoAsset.downloadAsync();
+            const logoLocalPath = logoAsset.localUri?.replace('file://', '');
+            uriToUpload = await bakeWatermarkAndEndCard(mediaUri, videoUsername, true, logoLocalPath);
+          } catch (e) {
+            console.warn('Native watermark bake failed, uploading original video instead:', e);
+            uriToUpload = mediaUri;
+          }
+        }
+
         setUploadStage('Uploading video to Cloudinary...');
         setUploadProgress(22);
-        const { url, publicId, watermarkedUrl } = await uploadVideoToCloudinary(
-          mediaUri,
+        const { url, publicId } = await uploadVideoToCloudinary(
+          uriToUpload,
           (p) => { setUploadProgress(22 + Math.round(p * 0.65)); },
           videoUsername,
-          addWatermark,
+          false, // watermark is already baked into the pixels — don't ask Cloudinary to add another one
           filterDefForBake,
         );
         finalMediaUrl = url;
-        if (watermarkedUrl) { postData_watermarkedUrl = watermarkedUrl; }
         cloudinaryPublicId = publicId;
         finalMediaType = 'video';
         setUploadProgress(88);

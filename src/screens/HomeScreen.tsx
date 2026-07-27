@@ -26,7 +26,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
 import { useAudioPlayer, useAudioPlayerStatus, AudioModule } from 'expo-audio';
-import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+//import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
 import NetInfo from '@react-native-community/netinfo';
 
@@ -108,7 +108,7 @@ async function getOwnerBadgeMultipliers(ownerId: string) {
   }
 }
 
-const BANNER_AD_UNIT_ID = __DEV__ ? TestIds.BANNER : 'ca-app-pub-8235065812461074/4176727692';
+//const BANNER_AD_UNIT_ID = __DEV__ ? TestIds.BANNER : 'ca-app-pub-8235065812461074/4176727692';
 
 const GIFT_PACKAGES = [
   { id: 'rose',        name: 'Rose',        icon: '🌹', coins: 10,    ngn: 1_500,   color: '#ff69b4' },
@@ -665,13 +665,7 @@ function NativeAdPost({ adIndex }: { adIndex: number }) {
       {/* ── ADMOB BANNER — clearly labelled, separated from all buttons ── */}
       <View style={feedAdStyles.bannerAdContainer}>
         <Text style={feedAdStyles.bannerAdLabel}>Advertisement</Text>
-        <BannerAd
-          unitId={BANNER_AD_UNIT_ID}
-          size={BannerAdSize.BANNER}
-          requestOptions={{ requestNonPersonalizedAdsOnly: false }}
-          onAdLoaded={() => {}}
-          onAdFailedToLoad={() => {}}
-        />
+      
       </View>
     </View>
   );

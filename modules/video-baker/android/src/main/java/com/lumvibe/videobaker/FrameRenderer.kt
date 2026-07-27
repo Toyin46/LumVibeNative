@@ -54,7 +54,13 @@ class FrameRenderer {
         varying vec2 vTexCoord;
         void main() {
             gl_Position = aPosition;
-            vTexCoord = aTexCoord.xy;
+            // Flip V: Android Bitmap texture uploads (GLUtils.texImage2D) put
+            // row 0 (top of the watermark image) at texture v=0, but this
+            // quad's vertex mapping treats v=0 as the bottom of the frame in
+            // GL clip space — without this flip the watermark/caption render
+            // upside-down. The video layer doesn't need this because it
+            // already gets a correcting transform matrix from the decoder.
+            vTexCoord = vec2(aTexCoord.x, 1.0 - aTexCoord.y);
         }
     """.trimIndent()
 

@@ -29,7 +29,7 @@ import NetInfo from '@react-native-community/netinfo';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
-import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+//import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
 
 const { width, height } = Dimensions.get('window');
@@ -129,7 +129,7 @@ function giftLocalPrice(ngnAmount: number): string {
   return `${cur.symbol}${localAmount.toLocaleString(undefined, { minimumFractionDigits: cur.decimals, maximumFractionDigits: cur.decimals })}`;
 }
 
-const BANNER_AD_UNIT_ID = __DEV__ ? TestIds.BANNER : 'ca-app-pub-8235065812461074/4176727692';
+//const BANNER_AD_UNIT_ID = __DEV__ ? TestIds.BANNER : 'ca-app-pub-8235065812461074/4176727692';
 
 const GIFT_PACKAGES = [
   { id: 'rose',        name: 'Rose',        icon: '🌹', coins: 10,    ngn: 1_500,   color: '#ff69b4' },
@@ -493,13 +493,7 @@ function NativeAdPost({ adIndex }: { adIndex: number }) {
       </View>
       <View style={nativeAdStyles.bannerAdContainer}>
         <Text style={nativeAdStyles.bannerAdLabel}>Advertisement</Text>
-        <BannerAd
-          unitId={BANNER_AD_UNIT_ID}
-          size={BannerAdSize.BANNER}
-          requestOptions={{ requestNonPersonalizedAdsOnly: false }}
-          onAdLoaded={() => { setAdLoaded(true); setAdError(false); }}
-          onAdFailedToLoad={() => setAdError(true)}
-        />
+        
         {adError && <Text style={nativeAdStyles.adErrorText}>Ad unavailable</Text>}
       </View>
       <View style={nativeAdStyles.sponsoredPill}>
@@ -690,7 +684,7 @@ const VideoPost = memo(function VideoPost({
             ref={videoRef}
             source={{ uri: item.media_url || '' }}
             style={videoStyle}
-            resizeMode="contain"
+            resizeMode="cover"
             repeat
             muted={isMuted}
             paused={!isPlaying}
