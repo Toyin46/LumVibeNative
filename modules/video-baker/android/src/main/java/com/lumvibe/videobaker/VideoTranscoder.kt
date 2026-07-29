@@ -14,6 +14,9 @@ import java.nio.ByteBuffer
 * and encodes a brand-new MP4 at [outputPath]. Audio is copied through untouched
 * (no re-encode needed since we're not changing it).
 *
+* The watermark logo bounces around the frame DVD-screensaver style; the
+* caption text (if any) stays in a fixed position at the bottom.
+*
 * This class only uses android.media.* and android.opengl.* — no FFmpeg, no
 * third-party binary, no network call, no cost.
 */
@@ -104,9 +107,19 @@ class VideoTranscoder {
         renderer.contrast = options.contrast
         renderer.saturation = options.saturation
 
-        val overlayTextureId = OverlayBuilder.build(
-            width, height, options.watermarkPngPath, options.captionText
-        )
+        val captionTextureId = OverlayBuilder.buildCaptionOverlay(width, height, options.captionText)
+        val logoTargetWidthPx = width * 0.18f
+        val logoTexture = OverlayBuilder.buildLogoTexture(options.watermarkPngPath, logoTargetWidthPx)
+
+        // Bouncing logo state (DVD-screensaver style). Speed scales with frame
+        // width so it feels consistent regardless of video resolution.
+        var logoPosX = 0f
+        var logoPosY = 0f
+        val logoVelX = width * 0.09f  // pixels/second
+        val logoVelY = width * 0.07f  // pixels/second
+        var logoDirX = 1f
+        var logoDirY = 1f
+        var lastPtsUs = -1L
 
         val decoderTextureId = GlUtil.createExternalTexture()
         val surfaceTexture = SurfaceTexture(decoderTextureId)
@@ -176,7 +189,33 @@ class VideoTranscoder {
 
                         eglCore.makeCurrent(windowSurface)
                         renderer.drawVideoFrame(decoderTextureId, texMatrix)
-                        renderer.drawOverlay(overlayTextureId)
+
+                        if (captionTextureId != null) {
+                            renderer.drawOverlay(captionTextureId)
+                        }
+
+                        if (logoTexture != null) {
+                            val nowUs = bufferInfo.presentationTimeUs
+                            val dt = if (lastPtsUs < 0) 0f else (nowUs - lastPtsUs).coerceAtLeast(0).toFloat() / 1_000_000f
+                            lastPtsUs = nowUs
+
+                            logoPosX += logoVelX * logoDirX * dt
+                            logoPosY += logoVelY * logoDirY * dt
+
+                            if (logoPosX < 0f) { logoPosX = 0f; logoDirX = 1f }
+                            if (logoPosX + logoTexture.widthPx > width) { logoPosX = width - logoTexture.widthPx; logoDirX = -1f }
+                            if (logoPosY < 0f) { logoPosY = 0f; logoDirY = 1f }
+                            if (logoPosY + logoTexture.heightPx > height) { logoPosY = height - logoTexture.heightPx; logoDirY = -1f }
+
+                            // Pixel position (top-left origin, Y-down) → GL clip space (-1..1, Y-up)
+                            val clipLeft = (logoPosX / width) * 2f - 1f
+                            val clipRight = ((logoPosX + logoTexture.widthPx) / width) * 2f - 1f
+                            val clipTop = 1f - (logoPosY / height) * 2f
+                            val clipBottom = 1f - ((logoPosY + logoTexture.heightPx) / height) * 2f
+
+                            renderer.drawOverlayAt(logoTexture.textureId, clipLeft, clipBottom, clipRight, clipTop)
+                        }
+
                         eglCore.setPresentationTime(windowSurface, bufferInfo.presentationTimeUs * 1000)
                         eglCore.swapBuffers(windowSurface)
                     }

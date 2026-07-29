@@ -151,7 +151,7 @@ export default function ListingDetailScreen() {
         {listing.portfolio_urls?.length > 0 ? (
           <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}>
             {listing.portfolio_urls.map((url: string, i: number) => (
-              <Image key={i} source={{ uri: url }} style={s.portfolioImg} resizeMode="cover" />
+              <Image key={i} source={{ uri: url }} style={s.portfolioImg} resizeMode="contain" />
             ))}
           </ScrollView>
         ) : (

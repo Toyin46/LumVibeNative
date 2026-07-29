@@ -744,6 +744,16 @@ const VideoPost = memo(function VideoPost({
         <Feather name="more-vertical" size={22} color="#fff" />
       </TouchableOpacity>
 
+      {/* ✅ NEW: standalone download button — always visible, single tap, no menu needed */}
+      <TouchableOpacity
+        style={styles.downloadBtn}
+        onPress={() => onSaveMedia(item)}
+        activeOpacity={0.8}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Feather name="download" size={20} color="#fff" />
+      </TouchableOpacity>
+
       {/* ✅ NEW: Three-dot menu modal */}
       <Modal
         visible={menuVisible}
@@ -1966,6 +1976,7 @@ const styles = StyleSheet.create({
   playButton:           { width: 80, height: 80, borderRadius: 40, backgroundColor: 'rgba(0,255,136,0.2)', justifyContent: 'center', alignItems: 'center', borderWidth: 3, borderColor: '#00ff88' },
   // ✅ NEW: three-dot menu button — top right, above vibe badge
   menuDotBtn:           { position: 'absolute', top: 12, right: 12, zIndex: 30, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  downloadBtn:          { position: 'absolute', top: 12, left: 12, zIndex: 30, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
   videoInfo:            { position: 'absolute', bottom: 68, left: 0, right: 80, paddingHorizontal: 16, zIndex: 6 },
   userInfoOverlay:      { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
   userInfoContent:      { flexDirection: 'row', alignItems: 'center', flex: 1 },
