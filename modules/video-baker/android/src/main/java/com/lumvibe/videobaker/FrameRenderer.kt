@@ -7,16 +7,19 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
-* Draws two layers, in order, into whichever GL surface is currently current:
-*   1. The decoded video frame (external OES texture) — with optional brightness/
-*      contrast/saturation adjustment (this is your "filter" extension point).
-*   2. The watermark/text/sticker overlay (normal 2D texture, alpha-blended on top).
+* Draws layers, in order, into whichever GL surface is currently current:
+*   1. The decoded video frame (external OES texture) — either the plain
+*      pass-through (with brightness/contrast/saturation), or, if a
+*      VisualEffect is selected, one of the shaders in EffectShaders.kt.
+*   2. The caption overlay (normal 2D texture, full-frame, alpha-blended, static position).
+*   3. The watermark logo (normal 2D texture, drawn at a POSITIONED sub-rectangle —
+*      see drawWatermarkAt — which is what makes bouncing possible).
 *
 * This is intentionally simple GL — no third-party rendering library required.
 */
 class FrameRenderer {
 
-    // ---- Video (external texture) shader ----
+    // ---- Video (external texture) shader — plain pass-through with color adjust ----
     private val videoVertexShader = """
         uniform mat4 uTexMatrix;
         attribute vec4 aPosition;
@@ -47,20 +50,15 @@ class FrameRenderer {
         }
     """.trimIndent()
 
-    // ---- Overlay (normal texture, alpha blended) shader ----
+    // ---- Overlay (normal texture, alpha blended) shader — used for BOTH caption
+    // (full-screen quad) and watermark (positioned sub-rectangle quad) ----
     private val overlayVertexShader = """
         attribute vec4 aPosition;
         attribute vec4 aTexCoord;
         varying vec2 vTexCoord;
         void main() {
             gl_Position = aPosition;
-            // Flip V: Android Bitmap texture uploads (GLUtils.texImage2D) put
-            // row 0 (top of the watermark image) at texture v=0, but this
-            // quad's vertex mapping treats v=0 as the bottom of the frame in
-            // GL clip space — without this flip the watermark/caption render
-            // upside-down. The video layer doesn't need this because it
-            // already gets a correcting transform matrix from the decoder.
-            vTexCoord = vec2(aTexCoord.x, 1.0 - aTexCoord.y);
+            vTexCoord = aTexCoord.xy;
         }
     """.trimIndent()
 
@@ -76,16 +74,36 @@ class FrameRenderer {
     private var videoProgram = 0
     private var overlayProgram = 0
 
-    // full-screen quad, position (x,y) + tex coord (s,t)
+    // Lazily-compiled effect programs, keyed by effect. Only the effect(s) actually
+    // used get compiled.
+    private val effectPrograms = mutableMapOf<VisualEffect, Int>()
+
+    // full-screen quad, position (x,y) + tex coord (s,t) — used for video/effect/caption
     private val vertexCoords = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
     private val textureCoords = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
 
     private val vertexBuffer: FloatBuffer = makeBuffer(vertexCoords)
     private val texCoordBuffer: FloatBuffer = makeBuffer(textureCoords)
 
+    // Separate, MUTABLE position buffer for the watermark — rewritten every frame
+    // with whatever rectangle WatermarkBounce.position() computes.
+    private val watermarkPositionBuffer: FloatBuffer = makeBuffer(FloatArray(8))
+
     var brightness: Float = 0f   // -1..1
     var contrast: Float = 1f     // 0..2
     var saturation: Float = 1f   // 0..2
+
+    // ---- Effect state ----
+    var currentEffect: VisualEffect = VisualEffect.NONE
+        private set
+    var effectIntensity: Float = 1f
+    var duotoneColorA: FloatArray = floatArrayOf(0.05f, 0.05f, 0.20f)
+    var duotoneColorB: FloatArray = floatArrayOf(1.00f, 0.35f, 0.15f)
+    var duotonePulseSpeed: Float = 0.35f
+    var neonGlowColor: FloatArray = floatArrayOf(0.10f, 1.00f, 0.85f)
+
+    private var frameWidth = 1
+    private var frameHeight = 1
 
     private fun makeBuffer(coords: FloatArray): FloatBuffer {
         val bb = ByteBuffer.allocateDirect(coords.size * 4)
@@ -101,7 +119,19 @@ class FrameRenderer {
         overlayProgram = GlUtil.createProgram(overlayVertexShader, overlayFragmentShader)
     }
 
-    /** Draws the decoded camera/video frame. texMatrix comes from SurfaceTexture.getTransformMatrix(). */
+    fun setFrameSize(width: Int, height: Int) {
+        frameWidth = width.coerceAtLeast(1)
+        frameHeight = height.coerceAtLeast(1)
+    }
+
+    fun setEffect(effect: VisualEffect) {
+        currentEffect = effect
+        if (effect == VisualEffect.NONE) return
+        if (effectPrograms.containsKey(effect)) return
+        val (vs, fs) = EffectShaders.source(effect)
+        effectPrograms[effect] = GlUtil.createProgram(vs, fs)
+    }
+
     fun drawVideoFrame(textureId: Int, texMatrix: FloatArray) {
         GLES20.glUseProgram(videoProgram)
         GlUtil.checkGlError("glUseProgram video")
@@ -123,22 +153,52 @@ class FrameRenderer {
         GLES20.glUniform1f(uContrast, contrast)
         GLES20.glUniform1f(uSaturation, saturation)
 
-        vertexBuffer.position(0)
-        GLES20.glEnableVertexAttribArray(aPosition)
-        GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
-
-        texCoordBuffer.position(0)
-        GLES20.glEnableVertexAttribArray(aTexCoord)
-        GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
-
-        GLES20.glDisable(GLES20.GL_BLEND)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-        GLES20.glDisableVertexAttribArray(aPosition)
-        GLES20.glDisableVertexAttribArray(aTexCoord)
+        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
     }
 
-    /** Draws the watermark/text/sticker overlay on top of whatever is already in the framebuffer. */
+    /**
+     * [elapsedSec] must come from the frame's presentation time (bufferInfo.presentationTimeUs
+     * / 1_000_000f), not wall-clock time — keeps time-based effects locked to the video's
+     * own timeline regardless of how fast the transcode pass runs.
+     */
+    fun drawEffectFrame(textureId: Int, texMatrix: FloatArray, elapsedSec: Float) {
+        val program = effectPrograms[currentEffect] ?: run {
+            drawVideoFrame(textureId, texMatrix)
+            return
+        }
+
+        GLES20.glUseProgram(program)
+        GlUtil.checkGlError("glUseProgram effect:$currentEffect")
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+
+        val aPosition = GLES20.glGetAttribLocation(program, "aPosition")
+        val aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
+        val uTexMatrix = GLES20.glGetUniformLocation(program, "uTexMatrix")
+        val uTexture = GLES20.glGetUniformLocation(program, "uTexture")
+        val uTime = GLES20.glGetUniformLocation(program, "uTime")
+        val uIntensity = GLES20.glGetUniformLocation(program, "uIntensity")
+        val uTexelSize = GLES20.glGetUniformLocation(program, "uTexelSize")
+        val uColorA = GLES20.glGetUniformLocation(program, "uColorA")
+        val uColorB = GLES20.glGetUniformLocation(program, "uColorB")
+        val uPulseSpeed = GLES20.glGetUniformLocation(program, "uPulseSpeed")
+        val uGlowColor = GLES20.glGetUniformLocation(program, "uGlowColor")
+
+        GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
+        GLES20.glUniform1i(uTexture, 0)
+        if (uTime >= 0) GLES20.glUniform1f(uTime, elapsedSec)
+        if (uIntensity >= 0) GLES20.glUniform1f(uIntensity, effectIntensity.coerceIn(0f, 1f))
+        if (uTexelSize >= 0) GLES20.glUniform2f(uTexelSize, 1f / frameWidth, 1f / frameHeight)
+        if (uColorA >= 0) GLES20.glUniform3fv(uColorA, 1, duotoneColorA, 0)
+        if (uColorB >= 0) GLES20.glUniform3fv(uColorB, 1, duotoneColorB, 0)
+        if (uPulseSpeed >= 0) GLES20.glUniform1f(uPulseSpeed, duotonePulseSpeed)
+        if (uGlowColor >= 0) GLES20.glUniform3fv(uGlowColor, 1, neonGlowColor, 0)
+
+        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
+    }
+
+    /** Full-frame overlay draw — used for the caption (static position every frame). */
     fun drawOverlay(textureId: Int) {
         GLES20.glUseProgram(overlayProgram)
         GlUtil.checkGlError("glUseProgram overlay")
@@ -151,21 +211,75 @@ class FrameRenderer {
         val uTexture = GLES20.glGetUniformLocation(overlayProgram, "uTexture")
         GLES20.glUniform1i(uTexture, 0)
 
-        vertexBuffer.position(0)
-        GLES20.glEnableVertexAttribArray(aPosition)
-        GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
-
-        texCoordBuffer.position(0)
-        GLES20.glEnableVertexAttribArray(aTexCoord)
-        GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
-
-        // Overlay bitmap has real transparent pixels, so use standard alpha blending.
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
         GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
+    /**
+     * Draws the watermark logo at a specific pixel rectangle instead of full-screen —
+     * this is what makes bouncing possible. (leftPx, topPx) is the rectangle's
+     * top-left corner, in pixels, origin at the top-left of the frame — exactly what
+     * WatermarkBounce.position() returns.
+     */
+    fun drawWatermarkAt(
+        textureId: Int,
+        leftPx: Float, topPx: Float,
+        widthPx: Float, heightPx: Float,
+        canvasWidth: Int, canvasHeight: Int
+    ) {
+        // Convert the pixel rectangle (origin top-left, y-down) into NDC (-1..1, y-up).
+        val x0 = (leftPx / canvasWidth) * 2f - 1f
+        val x1 = ((leftPx + widthPx) / canvasWidth) * 2f - 1f
+        val yTop = 1f - (topPx / canvasHeight) * 2f
+        val yBottom = 1f - ((topPx + heightPx) / canvasHeight) * 2f
+
+        // Same vertex order as the static full-screen quad (BL, BR, TL, TR) so it
+        // matches textureCoords without needing a second tex-coord buffer.
+        watermarkPositionBuffer.clear()
+        watermarkPositionBuffer.put(floatArrayOf(x0, yBottom, x1, yBottom, x0, yTop, x1, yTop))
+        watermarkPositionBuffer.position(0)
+
+        GLES20.glUseProgram(overlayProgram)
+        GlUtil.checkGlError("glUseProgram watermark")
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+
+        val aPosition = GLES20.glGetAttribLocation(overlayProgram, "aPosition")
+        val aTexCoord = GLES20.glGetAttribLocation(overlayProgram, "aTexCoord")
+        val uTexture = GLES20.glGetUniformLocation(overlayProgram, "uTexture")
+        GLES20.glUniform1i(uTexture, 0)
+
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        drawQuad(watermarkPositionBuffer, texCoordBuffer, aPosition, aTexCoord)
+        GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
+    private fun drawQuad(positions: FloatBuffer, texCoords: FloatBuffer, aPosition: Int, aTexCoord: Int) {
+        positions.position(0)
+        GLES20.glEnableVertexAttribArray(aPosition)
+        GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 0, positions)
+
+        texCoords.position(0)
+        GLES20.glEnableVertexAttribArray(aTexCoord)
+        GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, texCoords)
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
         GLES20.glDisableVertexAttribArray(aPosition)
         GLES20.glDisableVertexAttribArray(aTexCoord)
+    }
+
+    /** Deletes all compiled GL programs. Call once after the last frame is drawn. */
+    fun release() {
+        if (videoProgram != 0) GLES20.glDeleteProgram(videoProgram)
+        if (overlayProgram != 0) GLES20.glDeleteProgram(overlayProgram)
+        effectPrograms.values.forEach { GLES20.glDeleteProgram(it) }
+        effectPrograms.clear()
+        videoProgram = 0
+        overlayProgram = 0
     }
 } 

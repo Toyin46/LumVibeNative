@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.opengl.GLES20
 import android.view.Surface
 import java.nio.ByteBuffer
 
@@ -13,9 +14,6 @@ import java.nio.ByteBuffer
 * Decodes [inputPath], draws watermark/caption/filter on every frame via OpenGL,
 * and encodes a brand-new MP4 at [outputPath]. Audio is copied through untouched
 * (no re-encode needed since we're not changing it).
-*
-* The watermark logo bounces around the frame DVD-screensaver style; the
-* caption text (if any) stays in a fixed position at the bottom.
 *
 * This class only uses android.media.* and android.opengl.* — no FFmpeg, no
 * third-party binary, no network call, no cost.
@@ -49,10 +47,17 @@ class VideoTranscoder {
 
     data class Options(
         val watermarkPngPath: String? = null,
+        val watermarkBounce: Boolean = true,          // false = static bottom-right, like before
+        val watermarkWidthFraction: Float = 0.18f,     // watermark width as a fraction of video width
+        val watermarkSpeedXPxPerSec: Float = 90f,
+        val watermarkSpeedYPxPerSec: Float = 65f,
         val captionText: String? = null,
         val brightness: Float = 0f,
         val contrast: Float = 1f,
         val saturation: Float = 1f,
+        // "vintage_flicker" | "neon_edge" | "duotone_pulse" | "liquid_chrome" | "ink_wash" | null
+        val effect: String? = null,
+        val effectIntensity: Float = 1f, // 0..1
         val videoBitRate: Int = -1 // -1 = auto (width*height*4)
     )
 
@@ -103,23 +108,22 @@ class VideoTranscoder {
 
         val renderer = FrameRenderer()
         renderer.setup()
+        renderer.setFrameSize(width, height)
         renderer.brightness = options.brightness
         renderer.contrast = options.contrast
         renderer.saturation = options.saturation
+        renderer.effectIntensity = options.effectIntensity
+        renderer.setEffect(VisualEffect.fromKey(options.effect))
 
-        val captionTextureId = OverlayBuilder.buildCaptionOverlay(width, height, options.captionText)
-        val logoTargetWidthPx = width * 0.18f
-        val logoTexture = OverlayBuilder.buildLogoTexture(options.watermarkPngPath, logoTargetWidthPx)
-
-        // Bouncing logo state (DVD-screensaver style). Speed scales with frame
-        // width so it feels consistent regardless of video resolution.
-        var logoPosX = 0f
-        var logoPosY = 0f
-        val logoVelX = width * 0.09f  // pixels/second
-        val logoVelY = width * 0.07f  // pixels/second
-        var logoDirX = 1f
-        var logoDirY = 1f
-        var lastPtsUs = -1L
+        val captionTextureId = OverlayBuilder.buildCaptionTexture(width, height, options.captionText)
+        val logoTexture = OverlayBuilder.buildWatermarkLogo(
+            options.watermarkPngPath, width * options.watermarkWidthFraction
+        )
+        // Fixed fallback position (bottom-right, same spot as the old static watermark)
+        // used when watermarkBounce is false.
+        val staticMarginPx = 24f
+        val staticLeft = logoTexture?.let { width - it.widthPx - staticMarginPx } ?: 0f
+        val staticTop = logoTexture?.let { height - it.heightPx - staticMarginPx } ?: 0f
 
         val decoderTextureId = GlUtil.createExternalTexture()
         val surfaceTexture = SurfaceTexture(decoderTextureId)
@@ -157,6 +161,7 @@ class VideoTranscoder {
         var decoderDone = false
         var encoderDone = false
         val texMatrix = FloatArray(16)
+        val hasEffect = VisualEffect.fromKey(options.effect) != VisualEffect.NONE
 
         while (!encoderDone) {
             // 1) Feed the decoder from the extractor.
@@ -176,7 +181,7 @@ class VideoTranscoder {
                 }
             }
 
-            // 2) Pull decoded frames, draw them (+overlay) into the encoder's input surface.
+            // 2) Pull decoded frames, draw them (+overlays) into the encoder's input surface.
             if (!decoderDone) {
                 val outIndex = decoder.dequeueOutputBuffer(bufferInfo, timeoutUs)
                 if (outIndex >= 0) {
@@ -188,32 +193,41 @@ class VideoTranscoder {
                         surfaceTexture.getTransformMatrix(texMatrix)
 
                         eglCore.makeCurrent(windowSurface)
-                        renderer.drawVideoFrame(decoderTextureId, texMatrix)
+
+                        // Presentation time, not wall-clock — keeps every time-based thing
+                        // (shader effects AND the watermark bounce) locked to the video's
+                        // own timeline, reproducible regardless of how fast this loop runs.
+                        val elapsedSec = bufferInfo.presentationTimeUs / 1_000_000f
+
+                        if (hasEffect) {
+                            renderer.drawEffectFrame(decoderTextureId, texMatrix, elapsedSec)
+                        } else {
+                            renderer.drawVideoFrame(decoderTextureId, texMatrix)
+                        }
 
                         if (captionTextureId != null) {
                             renderer.drawOverlay(captionTextureId)
                         }
 
                         if (logoTexture != null) {
-                            val nowUs = bufferInfo.presentationTimeUs
-                            val dt = if (lastPtsUs < 0) 0f else (nowUs - lastPtsUs).coerceAtLeast(0).toFloat() / 1_000_000f
-                            lastPtsUs = nowUs
-
-                            logoPosX += logoVelX * logoDirX * dt
-                            logoPosY += logoVelY * logoDirY * dt
-
-                            if (logoPosX < 0f) { logoPosX = 0f; logoDirX = 1f }
-                            if (logoPosX + logoTexture.widthPx > width) { logoPosX = width - logoTexture.widthPx; logoDirX = -1f }
-                            if (logoPosY < 0f) { logoPosY = 0f; logoDirY = 1f }
-                            if (logoPosY + logoTexture.heightPx > height) { logoPosY = height - logoTexture.heightPx; logoDirY = -1f }
-
-                            // Pixel position (top-left origin, Y-down) → GL clip space (-1..1, Y-up)
-                            val clipLeft = (logoPosX / width) * 2f - 1f
-                            val clipRight = ((logoPosX + logoTexture.widthPx) / width) * 2f - 1f
-                            val clipTop = 1f - (logoPosY / height) * 2f
-                            val clipBottom = 1f - ((logoPosY + logoTexture.heightPx) / height) * 2f
-
-                            renderer.drawOverlayAt(logoTexture.textureId, clipLeft, clipBottom, clipRight, clipTop)
+                            val (left, top) = if (options.watermarkBounce) {
+                                WatermarkBounce.position(
+                                    elapsedSec = elapsedSec,
+                                    canvasWidth = width,
+                                    canvasHeight = height,
+                                    logoWidthPx = logoTexture.widthPx,
+                                    logoHeightPx = logoTexture.heightPx,
+                                    speedXPxPerSec = options.watermarkSpeedXPxPerSec,
+                                    speedYPxPerSec = options.watermarkSpeedYPxPerSec
+                                )
+                            } else {
+                                staticLeft to staticTop
+                            }
+                            renderer.drawWatermarkAt(
+                                logoTexture.textureId, left, top,
+                                logoTexture.widthPx, logoTexture.heightPx,
+                                width, height
+                            )
                         }
 
                         eglCore.setPresentationTime(windowSurface, bufferInfo.presentationTimeUs * 1000)
@@ -271,6 +285,15 @@ class VideoTranscoder {
             audioExtractor.release()
         }
 
+        // ---- GL texture cleanup (caption + watermark) — do this while the EGL
+        // context is still current, before eglCore.release() tears it down. ----
+        val texturesToDelete = mutableListOf<Int>()
+        captionTextureId?.let { texturesToDelete.add(it) }
+        logoTexture?.let { texturesToDelete.add(it.textureId) }
+        if (texturesToDelete.isNotEmpty()) {
+            GLES20.glDeleteTextures(texturesToDelete.size, texturesToDelete.toIntArray(), 0)
+        }
+
         // ---- Cleanup ----
         try {
             muxer.stop()
@@ -281,6 +304,7 @@ class VideoTranscoder {
         muxer.release()
         decoder.stop(); decoder.release()
         encoder.stop(); encoder.release()
+        renderer.release()
         eglCore.releaseSurface(windowSurface)
         eglCore.release()
         surfaceTexture.release()

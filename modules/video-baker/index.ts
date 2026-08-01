@@ -1,15 +1,35 @@
 import { requireNativeModule, EventEmitter } from "expo-modules-core";
 
+export type VisualEffectKey =
+  | "vintage_flicker"
+  | "neon_edge"
+  | "duotone_pulse"
+  | "liquid_chrome"
+  | "ink_wash";
+
 type VideoBakerOptions = {
   watermarkPngPath?: string; // absolute file path, e.g. from expo-asset / a bundled PNG copied to cache
+  watermarkBounce?: boolean; // default true — false = static bottom-right, like before
+  watermarkWidthFraction?: number; // watermark width as a fraction of video width, default 0.18
+  watermarkSpeedXPxPerSec?: number; // default 90
+  watermarkSpeedYPxPerSec?: number; // default 65 — different from X on purpose, see WatermarkBounce.kt
   captionText?: string;
   brightness?: number; // -1..1, default 0
   contrast?: number; // 0..2, default 1
   saturation?: number; // 0..2, default 1
+  effect?: VisualEffectKey; // omit for no effect
+  effectIntensity?: number; // 0..1, default 1
+};
+
+// Tells EventEmitter which events exist and what shape each payload is.
+// Without this, TypeScript falls back to a default where the event-name
+// parameter is typed as `never` — which is exactly the ts(2345) error this fixes.
+type VideoBakerEvents = {
+  onProgress: (event: { progress: number }) => void;
 };
 
 const NativeVideoBaker = requireNativeModule("VideoBaker");
-const emitter = new EventEmitter(NativeVideoBaker);
+const emitter = new EventEmitter<VideoBakerEvents>(NativeVideoBaker);
 
 /**
 * Decodes inputPath, draws watermark/caption/filter on every frame, and writes

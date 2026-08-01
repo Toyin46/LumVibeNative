@@ -40,7 +40,7 @@ yarn-error.*
 node_modules
 android/.gradle
 android/build
-android/app/build
+android/app/builde
 /android
 ios/build
 *.log
