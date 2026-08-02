@@ -9,8 +9,10 @@ export type VisualEffectKey =
 
 type VideoBakerOptions = {
   watermarkPngPath?: string; // absolute file path, e.g. from expo-asset / a bundled PNG copied to cache
+  watermarkUsername?: string; // if set (with watermarkPngPath), bakes the branded "logo + LumVibe + @username" card
   watermarkBounce?: boolean; // default true — false = static bottom-right, like before
-  watermarkWidthFraction?: number; // watermark width as a fraction of video width, default 0.18
+  watermarkWidthFraction?: number; // plain-logo width as a fraction of video width, default 0.18 (no username)
+  watermarkCardWidthFraction?: number; // branded-card width as a fraction of video width, default 0.42
   watermarkSpeedXPxPerSec?: number; // default 90
   watermarkSpeedYPxPerSec?: number; // default 65 — different from X on purpose, see WatermarkBounce.kt
   captionText?: string;

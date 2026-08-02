@@ -315,6 +315,7 @@ interface VoiceEffect {
 interface FxEffect {
   id: string; name: string; emoji: string; category: string; desc: string;
   brightness: number; contrast: number; saturation: number;
+  glShaderEffect?: string;
 }
 interface FilterDef {
   id: string; name: string; emoji: string;
@@ -571,6 +572,15 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_pop_art',        name:'Pop Art',       emoji:'🎨',category:'creative',  desc:'Bold pop art colours',     brightness:1.0,  contrast:1.5,  saturation:2.5 },
   {id:'fx_cross_process',  name:'Cross Process', emoji:'🌀',category:'retro',     desc:'Cross-processed film',     brightness:1.0,  contrast:1.2,  saturation:1.4 },
   {id:'fx_aura',           name:'Aura Glow',     emoji:'✨',category:'creative',  desc:'Soft purple aura',         brightness:1.02, contrast:1.05, saturation:1.2 },
+  // ✅ Baked-in GL shader effects — run through the native video-baker, not the
+  // brightness/contrast/saturation path. The in-app preview can't render the real
+  // look (that needs actual GL rendering), so desc says "baked in" to set the
+  // right expectation — visible after posting, not before.
+  {id:'fx_gl_vintage_flicker', name:'Old Film',      emoji:'🎞️',category:'retro',    desc:'Grain, flicker & light leak — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'vintage_flicker'},
+  {id:'fx_gl_neon_edge',       name:'Neon Trace',     emoji:'💡',category:'creative', desc:'Glowing edge outline — baked in',        brightness:1,contrast:1,saturation:1, glShaderEffect:'neon_edge'},
+  {id:'fx_gl_duotone_pulse',   name:'Duo Pulse',      emoji:'🔵',category:'creative', desc:'Two-tone colour pulse — baked in',       brightness:1,contrast:1,saturation:1, glShaderEffect:'duotone_pulse'},
+  {id:'fx_gl_liquid_chrome',   name:'Liquid Chrome',  emoji:'🌊',category:'creative', desc:'Molten-metal ripple — baked in',         brightness:1,contrast:1,saturation:1, glShaderEffect:'liquid_chrome'},
+  {id:'fx_gl_ink_wash',        name:'Ink Wash',       emoji:'🖌️',category:'editorial',desc:'Hand-drawn ink strokes — baked in',      brightness:1,contrast:1,saturation:1, glShaderEffect:'ink_wash'}, 
 ];
 const FX_CATEGORIES = [
   {id:'all',name:'All',emoji:'🎛️'},{id:'mood',name:'Mood',emoji:'🌈'},
@@ -588,6 +598,8 @@ const FX_OVERLAY_TINTS: Record<string,string> = {
   fx_pastel:'rgba(255,200,220,0.28)', fx_midnight:'rgba(10,10,60,0.45)',
   fx_chrome:'rgba(180,180,180,0.30)', fx_pop_art:'rgba(255,0,120,0.30)',
   fx_cross_process:'rgba(0,200,100,0.25)', fx_aura:'rgba(180,100,255,0.25)',
+  fx_gl_vintage_flicker:'transparent', fx_gl_neon_edge:'transparent', fx_gl_duotone_pulse:'transparent',
+  fx_gl_liquid_chrome:'transparent', fx_gl_ink_wash:'transparent', 
 };
 
 // ─── FILTERS ──────────────────────────────────────────────
@@ -5115,24 +5127,52 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         // LOST FEATURE, being upfront about it: the branded 3-second end
         // card isn't implemented in video-baker yet (it needed FFmpeg's
         // concat step). Revisit with a proper native concat approach later.
+        // ✅ Single native bake pass handles watermark + caption + FX/shader-effect
+        // together — one decode/encode cycle instead of two. This is what connects
+        // the FX picker (both brightness/contrast/saturation FX and the 5 GL shader
+        // effects) to the actual video pixels — previously bakeVideoFilter() existed
+        // but was never called, so FX picks had zero effect on the uploaded video.
         const videoUsername = user.user_metadata?.username || user.email?.split('@')[0] || 'LumVibe';
         const filterDefForBake = FILTERS.find(f => f.id === selectedFilter) || null;
+        const fxEffect = FX_EFFECTS.find(f => f.id === selectedFx);
+        const needsBake = addWatermark || (!!fxEffect && selectedFx !== 'fx_none');
 
         let uriToUpload = mediaUri;
 
-        if (addWatermark) {
-          setUploadStage('Baking watermark into video...');
+        if (needsBake) {
+          setUploadStage(addWatermark ? 'Baking watermark + effects into video...' : 'Baking effects into video...');
           setUploadProgress(10);
           try {
-            const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
-            await logoAsset.downloadAsync();
-            const logoLocalPath = logoAsset.localUri?.replace('file://', '');
-            uriToUpload = await bakeWatermarkAndEndCard(mediaUri, videoUsername, true, logoLocalPath);
+            const bakeOptions: Record<string, any> = {};
+
+            if (addWatermark) {
+              const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
+              await logoAsset.downloadAsync();
+              bakeOptions.watermarkPngPath = logoAsset.localUri?.replace('file://', '');
+              const safeUser = videoUsername.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
+              bakeOptions.watermarkUsername = safeUser;
+            }
+
+            if (fxEffect && selectedFx !== 'fx_none') {
+              if (fxEffect.glShaderEffect) {
+                bakeOptions.effect = fxEffect.glShaderEffect;
+                bakeOptions.effectIntensity = 1;
+              } else {
+                bakeOptions.brightness = fxEffect.brightness - 1;
+                bakeOptions.contrast = fxEffect.contrast;
+                bakeOptions.saturation = fxEffect.saturation;
+              }
+            }
+
+            const outputPath = `${FileSystem.cacheDirectory}baked_${Date.now()}.mp4`.replace('file://', '');
+            const cleanInput = mediaUri.replace('file://', '');
+            const finalPath = await bakeVideo(cleanInput, outputPath, bakeOptions);
+            uriToUpload = `file://${finalPath}`;
           } catch (e) {
-            console.warn('Native watermark bake failed, uploading original video instead:', e);
+            console.warn('Native video bake failed, uploading original video instead:', e);
             uriToUpload = mediaUri;
           }
-        }
+        } 
 
         setUploadStage('Uploading video to Cloudinary...');
         setUploadProgress(22);

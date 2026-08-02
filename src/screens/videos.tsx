@@ -23,7 +23,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import Video from 'react-native-video';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
 import { useAuthStore } from '../store/authStore';
@@ -684,7 +684,7 @@ const VideoPost = memo(function VideoPost({
             ref={videoRef}
             source={{ uri: item.media_url || '' }}
             style={videoStyle}
-            resizeMode="cover"
+            resizeMode="contain"
             repeat
             muted={isMuted}
             paused={!isPlaying}
