@@ -1,5 +1,6 @@
 package com.lumvibe.videobaker
 
+import android.content.Context
 import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -47,8 +48,11 @@ class VideoTranscoder {
 
     data class Options(
         val watermarkPngPath: String? = null,
+        val watermarkUsername: String? = null,         // if set (with watermarkPngPath), bakes the branded
+                                                        // "logo + LumVibe + @username" card instead of a plain logo
         val watermarkBounce: Boolean = true,          // false = static bottom-right, like before
-        val watermarkWidthFraction: Float = 0.18f,     // watermark width as a fraction of video width
+        val watermarkWidthFraction: Float = 0.18f,     // plain-logo width as a fraction of video width (no username)
+        val watermarkCardWidthFraction: Float = 0.42f, // branded-card width as a fraction of video width
         val watermarkSpeedXPxPerSec: Float = 90f,
         val watermarkSpeedYPxPerSec: Float = 65f,
         val captionText: String? = null,
@@ -62,6 +66,7 @@ class VideoTranscoder {
     )
 
     fun transcode(
+        context: Context,
         inputPath: String,
         outputPath: String,
         options: Options,
@@ -116,9 +121,15 @@ class VideoTranscoder {
         renderer.setEffect(VisualEffect.fromKey(options.effect))
 
         val captionTextureId = OverlayBuilder.buildCaptionTexture(width, height, options.captionText)
-        val logoTexture = OverlayBuilder.buildWatermarkLogo(
-            options.watermarkPngPath, width * options.watermarkWidthFraction
-        )
+        val logoTexture = if (options.watermarkPngPath != null && options.watermarkUsername != null) {
+            OverlayBuilder.buildWatermarkCard(
+                options.watermarkPngPath, options.watermarkUsername, width * options.watermarkCardWidthFraction
+            )
+        } else {
+            OverlayBuilder.buildWatermarkLogo(
+                options.watermarkPngPath, width * options.watermarkWidthFraction
+            )
+        }
         // Fixed fallback position (bottom-right, same spot as the old static watermark)
         // used when watermarkBounce is false.
         val staticMarginPx = 24f
@@ -163,6 +174,10 @@ class VideoTranscoder {
         val texMatrix = FloatArray(16)
         val hasEffect = VisualEffect.fromKey(options.effect) != VisualEffect.NONE
 
+        // Phase 2 — only pay the MediaPipe init/model-load cost when actually needed.
+        val faceTracker: FaceTracker? =
+            if (VisualEffect.fromKey(options.effect) == VisualEffect.MOOD_RING) FaceTracker(context) else null
+
         while (!encoderDone) {
             // 1) Feed the decoder from the extractor.
             if (!inputDone) {
@@ -200,7 +215,34 @@ class VideoTranscoder {
                         val elapsedSec = bufferInfo.presentationTimeUs / 1_000_000f
 
                         if (hasEffect) {
-                            renderer.drawEffectFrame(decoderTextureId, texMatrix, elapsedSec)
+                            if (renderer.currentEffect == VisualEffect.MOOD_RING && faceTracker != null) {
+                                // Face tracking needs a plain-rendered Bitmap of THIS frame
+                                // first — draw plain, read back, detect, THEN redraw with
+                                // the hue-shift shader using the score just found. This
+                                // means mood_ring renders each frame twice — a real,
+                                // known extra cost versus the Phase 1 shader-only effects,
+                                // which never leave the GPU.
+                                renderer.drawVideoFrame(decoderTextureId, texMatrix)
+                                val frameBitmap = GlUtil.readPixelsAsBitmap(width, height)
+                                val timestampMs = bufferInfo.presentationTimeUs / 1000
+                                val result = faceTracker.detect(frameBitmap, timestampMs)
+                                val smileScore = if (result != null) {
+                                    maxOf(
+                                        faceTracker.blendshapeScore(result, "mouthSmileLeft"),
+                                        faceTracker.blendshapeScore(result, "mouthSmileRight")
+                                    )
+                                } else 0f
+                                frameBitmap.recycle()
+
+                                // Repurposes effectIntensity to carry the live smile score
+                                // (0..1) instead of a static user-set strength for this
+                                // effect specifically — options.effectIntensity is not
+                                // used for mood_ring as a result, by design.
+                                renderer.effectIntensity = smileScore
+                                renderer.drawEffectFrame(decoderTextureId, texMatrix, elapsedSec)
+                            } else {
+                                renderer.drawEffectFrame(decoderTextureId, texMatrix, elapsedSec)
+                            }
                         } else {
                             renderer.drawVideoFrame(decoderTextureId, texMatrix)
                         }
@@ -305,6 +347,7 @@ class VideoTranscoder {
         decoder.stop(); decoder.release()
         encoder.stop(); encoder.release()
         renderer.release()
+        faceTracker?.close()
         eglCore.releaseSurface(windowSurface)
         eglCore.release()
         surfaceTexture.release()

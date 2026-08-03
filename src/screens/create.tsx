@@ -581,6 +581,7 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_duotone_pulse',   name:'Duo Pulse',      emoji:'🔵',category:'creative', desc:'Two-tone colour pulse — baked in',       brightness:1,contrast:1,saturation:1, glShaderEffect:'duotone_pulse'},
   {id:'fx_gl_liquid_chrome',   name:'Liquid Chrome',  emoji:'🌊',category:'creative', desc:'Molten-metal ripple — baked in',         brightness:1,contrast:1,saturation:1, glShaderEffect:'liquid_chrome'},
   {id:'fx_gl_ink_wash',        name:'Ink Wash',       emoji:'🖌️',category:'editorial',desc:'Hand-drawn ink strokes — baked in',      brightness:1,contrast:1,saturation:1, glShaderEffect:'ink_wash'}, 
+  {id:'fx_gl_mood_ring', name:'Mood Ring', emoji:'🙂', category:'creative', desc:'Hue shifts with your smile — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mood_ring'}, 
 ];
 const FX_CATEGORIES = [
   {id:'all',name:'All',emoji:'🎛️'},{id:'mood',name:'Mood',emoji:'🌈'},

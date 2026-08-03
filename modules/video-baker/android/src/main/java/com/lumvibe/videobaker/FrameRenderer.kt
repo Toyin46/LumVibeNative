@@ -85,6 +85,17 @@ class FrameRenderer {
     private val vertexBuffer: FloatBuffer = makeBuffer(vertexCoords)
     private val texCoordBuffer: FloatBuffer = makeBuffer(textureCoords)
 
+    // Caption/watermark textures come from an Android Canvas Bitmap uploaded via
+    // GLUtils.texImage2D, which uploads row 0 (the TOP of the bitmap) as texture
+    // row 0 — but OpenGL's (s,t) convention treats t=0 as the BOTTOM of the image.
+    // The video/effect texture doesn't have this problem because SurfaceTexture's
+    // own transform matrix (uTexMatrix) already corrects for it — Canvas bitmaps
+    // get no such correction, so without this flipped buffer, anything drawn via
+    // drawOverlay/drawWatermarkAt renders upside down. This buffer is ONLY used
+    // for overlay/watermark draws — texCoordBuffer above stays untouched so the
+    // video/effect path (which is already correct) isn't affected.
+    private val overlayTexCoordBuffer: FloatBuffer = makeBuffer(floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f))
+
     // Separate, MUTABLE position buffer for the watermark — rewritten every frame
     // with whatever rectangle WatermarkBounce.position() computes.
     private val watermarkPositionBuffer: FloatBuffer = makeBuffer(FloatArray(8))
@@ -213,7 +224,7 @@ class FrameRenderer {
 
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
+        drawQuad(vertexBuffer, overlayTexCoordBuffer, aPosition, aTexCoord)
         GLES20.glDisable(GLES20.GL_BLEND)
     }
 
@@ -254,7 +265,7 @@ class FrameRenderer {
 
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        drawQuad(watermarkPositionBuffer, texCoordBuffer, aPosition, aTexCoord)
+        drawQuad(watermarkPositionBuffer, overlayTexCoordBuffer, aPosition, aTexCoord)
         GLES20.glDisable(GLES20.GL_BLEND)
     }
 

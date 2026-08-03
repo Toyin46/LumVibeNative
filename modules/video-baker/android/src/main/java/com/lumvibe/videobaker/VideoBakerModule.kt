@@ -2,7 +2,8 @@ package com.lumvibe.videobaker
 
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import expo.modules.kotlin.Promise
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class VideoBakerModule : Module() {
 
@@ -13,29 +14,34 @@ class VideoBakerModule : Module() {
 
         // inputPath / outputPath are plain filesystem paths (strip any "file://" prefix
         // before calling this from JS — expo-file-system gives you paths like that).
-        //
-        // Uses a plain background Thread + Promise instead of Kotlin coroutines —
-        // avoids any dependency on expo-modules-kotlin's suspend-function support,
-        // which varies across versions and was causing compile errors.
-        AsyncFunction("bakeVideo") { inputPath: String, outputPath: String, options: Map<String, Any?>, promise: Promise ->
-            Thread {
-                try {
-                    val transcoder = VideoTranscoder()
-                    val opts = VideoTranscoder.Options(
-                        watermarkPngPath = options["watermarkPngPath"] as? String,
-                        captionText = options["captionText"] as? String,
-                        brightness = (options["brightness"] as? Number)?.toFloat() ?: 0f,
-                        contrast = (options["contrast"] as? Number)?.toFloat() ?: 1f,
-                        saturation = (options["saturation"] as? Number)?.toFloat() ?: 1f
-                    )
-                    transcoder.transcode(inputPath, outputPath, opts) { progress: Float ->
-                        sendEvent("onProgress", mapOf("progress" to progress))
-                    }
-                    promise.resolve(outputPath)
-                } catch (e: Exception) {
-                    promise.reject("ERR_BAKE_VIDEO", e.message ?: "Unknown error baking video", e)
+        AsyncFunction("bakeVideo") { inputPath: String, outputPath: String, options: Map<String, Any?> ->
+            withContext(Dispatchers.Default) {
+                val transcoder = VideoTranscoder()
+                val opts = VideoTranscoder.Options(
+                    watermarkPngPath = options["watermarkPngPath"] as? String,
+                    watermarkUsername = options["watermarkUsername"] as? String,
+                    watermarkBounce = (options["watermarkBounce"] as? Boolean) ?: true,
+                    watermarkWidthFraction = (options["watermarkWidthFraction"] as? Number)?.toFloat() ?: 0.18f,
+                    watermarkCardWidthFraction = (options["watermarkCardWidthFraction"] as? Number)?.toFloat() ?: 0.42f,
+                    watermarkSpeedXPxPerSec = (options["watermarkSpeedXPxPerSec"] as? Number)?.toFloat() ?: 90f,
+                    watermarkSpeedYPxPerSec = (options["watermarkSpeedYPxPerSec"] as? Number)?.toFloat() ?: 65f,
+                    captionText = options["captionText"] as? String,
+                    brightness = (options["brightness"] as? Number)?.toFloat() ?: 0f,
+                    contrast = (options["contrast"] as? Number)?.toFloat() ?: 1f,
+                    saturation = (options["saturation"] as? Number)?.toFloat() ?: 1f,
+                    effect = options["effect"] as? String,
+                    effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f
+                )
+                // Phase 2 (mood_ring) needs a real Context to load the MediaPipe model —
+                // appContext.reactContext is the standard way to get one inside an Expo
+                // Kotlin module.
+                val context = appContext.reactContext
+                    ?: throw IllegalStateException("No Android context available for video baking")
+                transcoder.transcode(context, inputPath, outputPath, opts) { progress ->
+                    sendEvent("onProgress", mapOf("progress" to progress))
                 }
-            }.start()
+                outputPath
+            }
         }
     }
 } 
