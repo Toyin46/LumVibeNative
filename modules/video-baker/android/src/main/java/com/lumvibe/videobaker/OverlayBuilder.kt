@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.opengl.GLES20
 import android.opengl.GLUtils
+import android.util.Log
 
 /**
 * Caption and watermark are now two SEPARATE textures instead of one flattened
@@ -57,7 +58,10 @@ object OverlayBuilder {
      */
     fun buildWatermarkLogo(watermarkPngPath: String?, targetWidthPx: Float): LogoTexture? {
         if (watermarkPngPath == null) return null
-        val src = BitmapFactory.decodeFile(watermarkPngPath) ?: return null
+        val src = BitmapFactory.decodeFile(watermarkPngPath) ?: run {
+            Log.w("OverlayBuilder", "buildWatermarkLogo: BitmapFactory.decodeFile returned null for path: $watermarkPngPath (not a plain filesystem path, or file missing?)")
+            return null
+        }
 
         val scale = targetWidthPx / src.width
         val targetW = targetWidthPx.toInt().coerceAtLeast(1)
@@ -73,6 +77,74 @@ object OverlayBuilder {
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, scaledBitmap, 0)
         val result = LogoTexture(textureId, targetW.toFloat(), targetH.toFloat())
         scaledBitmap.recycle()
+        return result
+    }
+
+    /**
+     * A branded watermark "card" — dark rounded background, small logo on the left,
+     * "LumVibe" + "@username" text on the right — matching the videos.tsx
+     * watermarkOverlay component's design (rgba(0,0,0,0.7) background, 8px radius,
+     * row layout, logo + two-line text) so the baked-in version looks the same as
+     * the in-app UI overlay, instead of the plain text that was baked before.
+     *
+     * Returns the whole card as ONE texture, so WatermarkBounce moves the logo and
+     * text together as a single unit — same as the Animated.View wrapping both in
+     * the RN component.
+     */
+    fun buildWatermarkCard(logoPngPath: String?, username: String, cardWidthPx: Float): LogoTexture? {
+        if (logoPngPath == null) return null
+        val logoSrc = BitmapFactory.decodeFile(logoPngPath) ?: run {
+            Log.w("OverlayBuilder", "buildWatermarkCard: BitmapFactory.decodeFile returned null for path: $logoPngPath (not a plain filesystem path, or file missing?)")
+            return null
+        }
+
+        // Scale factor relative to a 220px-wide reference design, so padding/text/icon
+        // size stay proportional whatever cardWidthPx ends up being.
+        val density = cardWidthPx / 220f
+        val paddingPx = 10f * density
+        val gapPx = 6f * density
+        val iconSizePx = 40f * density
+        val cornerRadiusPx = 8f * density
+        val titleSizePx = 15f * density
+        val usernameSizePx = 12f * density
+        val cardHeightPx = iconSizePx + paddingPx * 2
+
+        val cardW = cardWidthPx.toInt().coerceAtLeast(1)
+        val cardH = cardHeightPx.toInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(cardW, cardH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        // Dark rounded background — same rgba(0,0,0,0.7) as watermarkOverlay's style.
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(178, 0, 0, 0) }
+        canvas.drawRoundRect(RectF(0f, 0f, cardW.toFloat(), cardH.toFloat()), cornerRadiusPx, cornerRadiusPx, bgPaint)
+
+        // Logo icon, left-aligned, vertically centered in the card.
+        val logoDest = RectF(paddingPx, paddingPx, paddingPx + iconSizePx, paddingPx + iconSizePx)
+        canvas.drawBitmap(logoSrc, null, logoDest, null)
+        logoSrc.recycle()
+
+        // "LumVibe" (bold white) + "@username" (smaller light grey), stacked to the
+        // right of the logo — same two-line structure as the RN component.
+        val textX = paddingPx + iconSizePx + gapPx
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = titleSizePx
+            isFakeBoldText = true
+            textAlign = Paint.Align.LEFT
+        }
+        val usernamePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(255, 190, 190, 190)
+            textSize = usernameSizePx
+            textAlign = Paint.Align.LEFT
+        }
+        canvas.drawText("LumVibe", textX, cardH / 2f - 4f * density, titlePaint)
+        canvas.drawText("@$username", textX, cardH / 2f + usernameSizePx, usernamePaint)
+
+        val textureId = GlUtil.createTexture2D()
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        val result = LogoTexture(textureId, cardW.toFloat(), cardH.toFloat())
+        bitmap.recycle()
         return result
     }
 } 

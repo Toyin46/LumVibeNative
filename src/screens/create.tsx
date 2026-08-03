@@ -5147,10 +5147,40 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
             if (addWatermark) {
               const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
-              await logoAsset.downloadAsync();
-              bakeOptions.watermarkPngPath = logoAsset.localUri?.replace('file://', '');
-              const safeUser = videoUsername.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
-              bakeOptions.watermarkUsername = safeUser;
+              if (!logoAsset.downloaded) {
+                await logoAsset.downloadAsync();
+              }
+
+              // Bundled assets can resolve to a non-plain-filesystem URI that native
+              // Kotlin's BitmapFactory.decodeFile() can't read (it silently returns
+              // null instead of throwing). Copying to a known cache path guarantees
+              // a real file:// path every time, regardless of how the bundler
+              // resolved the original asset.
+              const logoDestPath = `${FileSystem.cacheDirectory}watermark_logo.png`;
+              let logoPath: string | undefined;
+              try {
+                await FileSystem.copyAsync({
+                  from: logoAsset.localUri || logoAsset.uri,
+                  to: logoDestPath,
+                });
+                logoPath = logoDestPath.replace('file://', '');
+              } catch (copyErr) {
+                console.warn('Watermark logo copy failed:', copyErr);
+              }
+
+              if (!logoPath) {
+                console.warn('Watermark skipped: could not resolve a readable logo file path', {
+                  uri: logoAsset.uri, localUri: logoAsset.localUri,
+                });
+                Alert.alert(
+                  'Watermark debug',
+                  `Could not resolve logo path.\nuri=${logoAsset.uri}\nlocalUri=${logoAsset.localUri}`
+                );
+              } else {
+                bakeOptions.watermarkPngPath = logoPath;
+                const safeUser = videoUsername.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
+                bakeOptions.watermarkUsername = safeUser;
+              }
             }
 
             if (fxEffect && selectedFx !== 'fx_none') {
