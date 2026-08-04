@@ -86,15 +86,16 @@ class FrameRenderer {
     private val texCoordBuffer: FloatBuffer = makeBuffer(textureCoords)
 
     // Caption/watermark textures come from an Android Canvas Bitmap uploaded via
-    // GLUtils.texImage2D, which uploads row 0 (the TOP of the bitmap) as texture
-    // row 0 — but OpenGL's (s,t) convention treats t=0 as the BOTTOM of the image.
-    // The video/effect texture doesn't have this problem because SurfaceTexture's
-    // own transform matrix (uTexMatrix) already corrects for it — Canvas bitmaps
-    // get no such correction, so without this flipped buffer, anything drawn via
-    // drawOverlay/drawWatermarkAt renders upside down. This buffer is ONLY used
-    // for overlay/watermark draws — texCoordBuffer above stays untouched so the
-    // video/effect path (which is already correct) isn't affected.
-    private val overlayTexCoordBuffer: FloatBuffer = makeBuffer(floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f))
+    // GLUtils.texImage2D, drawn onto a fixed, un-rotated quad. The video/effect
+    // layer gets automatic orientation correction from SurfaceTexture's own
+    // transform matrix (uTexMatrix) — the overlay quad has no such matrix, so if
+    // the recording needs a rotation correction (common, e.g. front-camera
+    // recordings), the overlay ends up fully upside-down AND mirrored relative to
+    // the correctly-oriented video underneath — a 180° rotation, not just a
+    // vertical flip. This buffer rotates the overlay's UVs 180° (u,v)->(1-u,1-v)
+    // to counter that. Used ONLY for overlay/watermark draws — texCoordBuffer
+    // above stays untouched so the already-correct video/effect path isn't affected.
+    private val overlayTexCoordBuffer: FloatBuffer = makeBuffer(floatArrayOf(1f, 1f, 0f, 1f, 1f, 0f, 0f, 0f))
 
     // Separate, MUTABLE position buffer for the watermark — rewritten every frame
     // with whatever rectangle WatermarkBounce.position() computes.

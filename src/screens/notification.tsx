@@ -399,7 +399,7 @@ export default function NotificationsScreen() {
           <Image
             source={{ uri: item.post_image_url }}
             style={styles.postThumbnail}
-            resizeMode="cover"
+            resizeMode="contain"
           />
         )}
 

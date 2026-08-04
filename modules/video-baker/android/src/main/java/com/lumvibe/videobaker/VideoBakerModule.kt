@@ -4,8 +4,17 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.content.Context
 
 class VideoBakerModule : Module() {
+
+    // Class-level property, not inline inside the function — matches Expo's own
+    // documented pattern for this exact "get context or throw" case. Keeping this
+    // out of the AsyncFunction body entirely, since having it inside (even before
+    // withContext) was still the likely cause of the previous compile failure.
+    private val videoBakerContext: Context
+        get() = appContext.reactContext
+            ?: throw IllegalStateException("No Android context available for video baking")
 
     override fun definition() = ModuleDefinition {
         Name("VideoBaker")
@@ -15,13 +24,6 @@ class VideoBakerModule : Module() {
         // inputPath / outputPath are plain filesystem paths (strip any "file://" prefix
         // before calling this from JS — expo-file-system gives you paths like that).
         AsyncFunction("bakeVideo") { inputPath: String, outputPath: String, options: Map<String, Any?> ->
-            // Read appContext BEFORE entering withContext, not inside it — every build that
-            // ever compiled had withContext as the sole top-level statement in this lambda;
-            // nesting the context lookup inside it was the one structural difference in the
-            // version that just failed. Restoring that shape rather than debugging the exact
-            // inference quirk further.
-            val context = appContext.reactContext
-                ?: throw IllegalStateException("No Android context available for video baking")
             withContext(Dispatchers.Default) {
                 val transcoder = VideoTranscoder()
                 val opts = VideoTranscoder.Options(
@@ -39,7 +41,7 @@ class VideoBakerModule : Module() {
                     effect = options["effect"] as? String,
                     effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f
                 )
-                transcoder.transcode(context, inputPath, outputPath, opts) { progress ->
+                transcoder.transcode(videoBakerContext, inputPath, outputPath, opts) { progress ->
                     sendEvent("onProgress", mapOf("progress" to progress))
                 }
                 outputPath

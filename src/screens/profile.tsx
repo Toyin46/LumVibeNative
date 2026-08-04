@@ -416,7 +416,7 @@ const LazyPostThumb = memo(({ post, onPress }: { post: Post; onPress: () => void
             <Image
               source={{ uri: post.media_url }}
               style={s.postThumbImg}
-              resizeMode="cover"
+              resizeMode="contain"
             />
           )
           : <View style={s.postThumbVideoBg} />
