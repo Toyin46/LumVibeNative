@@ -19,7 +19,8 @@ enum class VisualEffect {
     NEON_EDGE,
     DUOTONE_PULSE,
     LIQUID_CHROME,
-    INK_WASH;
+    INK_WASH,
+    MOOD_RING; // Phase 2 — needs FaceTracker; see VideoTranscoder for the wiring
 
     companion object {
         /** Maps the JS-facing string (e.g. "neon_edge") to an enum value. Unknown/null -> NONE. */
@@ -29,6 +30,7 @@ enum class VisualEffect {
             "duotone_pulse" -> DUOTONE_PULSE
             "liquid_chrome" -> LIQUID_CHROME
             "ink_wash" -> INK_WASH
+            "mood_ring" -> MOOD_RING
             else -> NONE
         }
     }
@@ -213,6 +215,46 @@ object EffectShaders {
         }
     """.trimIndent()
 
+    // Phase 2, simplified first version: a global hue rotation driven by live smile
+    // score, not restricted to just the skin/face region. The original pitch was
+    // "skin-tone area only" — that needs a face-contour mask built from landmark
+    // points, which is a real follow-on step once this base pipeline (readback ->
+    // FaceTracker -> per-frame score -> shader) is confirmed working end to end.
+    // uIntensity is repurposed here to carry the live smile score (0..1) each frame,
+    // set by VideoTranscoder right before this draw call — same uniform, no new
+    // plumbing needed.
+    private val moodRing = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform float uIntensity; // repurposed: live smile score 0..1, not a static strength
+
+        vec3 hueShift(vec3 color, float hueAdjust) {
+            const vec3 kRGBToYPrime = vec3(0.299, 0.587, 0.114);
+            const vec3 kRGBToI = vec3(0.596, -0.275, -0.321);
+            const vec3 kRGBToQ = vec3(0.212, -0.523, 0.311);
+            const vec3 kYIQToR = vec3(1.0, 0.956, 0.621);
+            const vec3 kYIQToG = vec3(1.0, -0.272, -0.647);
+            const vec3 kYIQToB = vec3(1.0, -1.107, 1.704);
+
+            float yPrime = dot(color, kRGBToYPrime);
+            float i = dot(color, kRGBToI);
+            float q = dot(color, kRGBToQ);
+            float hue = atan(q, i) + hueAdjust;
+            float chroma = sqrt(i * i + q * q);
+            i = chroma * cos(hue);
+            q = chroma * sin(hue);
+            vec3 yiq = vec3(yPrime, i, q);
+            return vec3(dot(yiq, kYIQToR), dot(yiq, kYIQToG), dot(yiq, kYIQToB));
+        }
+
+        void main() {
+            vec4 src = texture2D(uTexture, vTexCoord);
+            // 0 = no shift, 1 = quarter-turn hue rotation at full smile
+            vec3 shifted = hueShift(src.rgb, uIntensity * 1.5708);
+            gl_FragColor = vec4(shifted, src.a);
+        }
+    """.trimIndent()
+
     /** Returns (vertexShaderSrc, fragmentShaderSrc) for the given effect. Do not call with NONE. */
     fun source(effect: VisualEffect): Pair<String, String> = when (effect) {
         VisualEffect.VINTAGE_FLICKER -> effectVertexShader to vintageFlicker
@@ -220,6 +262,7 @@ object EffectShaders {
         VisualEffect.DUOTONE_PULSE -> effectVertexShader to duotonePulse
         VisualEffect.LIQUID_CHROME -> effectVertexShader to liquidChrome
         VisualEffect.INK_WASH -> effectVertexShader to inkWash
+        VisualEffect.MOOD_RING -> effectVertexShader to moodRing
         VisualEffect.NONE -> throw IllegalArgumentException("VisualEffect.NONE has no shader")
     }
 } 
