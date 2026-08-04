@@ -15,6 +15,13 @@ class VideoBakerModule : Module() {
         // inputPath / outputPath are plain filesystem paths (strip any "file://" prefix
         // before calling this from JS — expo-file-system gives you paths like that).
         AsyncFunction("bakeVideo") { inputPath: String, outputPath: String, options: Map<String, Any?> ->
+            // Read appContext BEFORE entering withContext, not inside it — every build that
+            // ever compiled had withContext as the sole top-level statement in this lambda;
+            // nesting the context lookup inside it was the one structural difference in the
+            // version that just failed. Restoring that shape rather than debugging the exact
+            // inference quirk further.
+            val context = appContext.reactContext
+                ?: throw IllegalStateException("No Android context available for video baking")
             withContext(Dispatchers.Default) {
                 val transcoder = VideoTranscoder()
                 val opts = VideoTranscoder.Options(
@@ -32,11 +39,6 @@ class VideoBakerModule : Module() {
                     effect = options["effect"] as? String,
                     effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f
                 )
-                // Phase 2 (mood_ring) needs a real Context to load the MediaPipe model —
-                // appContext.reactContext is the standard way to get one inside an Expo
-                // Kotlin module.
-                val context = appContext.reactContext
-                    ?: throw IllegalStateException("No Android context available for video baking")
                 transcoder.transcode(context, inputPath, outputPath, opts) { progress ->
                     sendEvent("onProgress", mapOf("progress" to progress))
                 }
