@@ -2,7 +2,10 @@ package com.lumvibe.videobaker
 
 import android.opengl.GLES20
 import android.opengl.GLES11Ext
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.util.Log
+import java.nio.ByteBuffer
 
 /**
 * Small collection of OpenGL ES 2.0 helpers used by the transcoder.
@@ -91,5 +94,26 @@ object GlUtil {
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
         return texId
+    }
+
+    /**
+     * NEW — Phase 2 only. Reads back the currently-bound framebuffer as a Bitmap, so it
+     * can be fed into MediaPipe's Face Landmarker (which needs a Bitmap/MPImage, not a
+     * GL texture). Real cost, being upfront: this is a GPU→CPU pixel readback, done once
+     * per frame for any face-tracking effect — meaningfully more expensive than the
+     * Phase 1 shader-only effects, which never leave the GPU. Expect baking to be
+     * noticeably slower when a face-tracking effect is active.
+     */
+    fun readPixelsAsBitmap(width: Int, height: Int): Bitmap {
+        val buffer = ByteBuffer.allocateDirect(width * height * 4)
+        GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
+        checkGlError("glReadPixels")
+        buffer.rewind()
+        val raw = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        raw.copyPixelsFromBuffer(buffer)
+        // glReadPixels reads bottom-to-top (OpenGL convention); Bitmap/MediaPipe expect
+        // top-to-bottom, so flip vertically before handing it off.
+        val flip = Matrix().apply { postScale(1f, -1f) }
+        return Bitmap.createBitmap(raw, 0, 0, width, height, flip, true)
     }
 } 
