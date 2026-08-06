@@ -116,4 +116,4 @@ object GlUtil {
         val flip = Matrix().apply { postScale(1f, -1f) }
         return Bitmap.createBitmap(raw, 0, 0, width, height, flip, true)
     }
-} 
+}  

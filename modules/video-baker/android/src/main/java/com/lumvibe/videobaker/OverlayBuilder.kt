@@ -147,4 +147,25 @@ object OverlayBuilder {
         bitmap.recycle()
         return result
     }
-} 
+
+    /**
+     * Decodes the HAND_PORTAL scene image from disk, scaled to a square
+     * [targetSize] px bitmap (the portal shader samples it with UVs remapped to
+     * 0..1 within the circle, so a square source avoids stretching). Returns null
+     * if no path given or the file can't be decoded — VideoTranscoder should skip
+     * drawing HAND_PORTAL's effect (fall back to plain video) in that case rather
+     * than crash, same policy as buildWatermarkLogo above.
+     */
+    fun loadPortalSceneBitmap(portalScenePngPath: String?, targetSize: Int = 512): Bitmap? {
+        if (portalScenePngPath == null) return null
+        val src = BitmapFactory.decodeFile(portalScenePngPath) ?: run {
+            Log.w("OverlayBuilder", "loadPortalSceneBitmap: BitmapFactory.decodeFile returned null for path: $portalScenePngPath")
+            return null
+        }
+        val scaled = Bitmap.createBitmap(targetSize, targetSize, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(scaled)
+        canvas.drawBitmap(src, null, RectF(0f, 0f, targetSize.toFloat(), targetSize.toFloat()), null)
+        src.recycle()
+        return scaled
+    }
+}  

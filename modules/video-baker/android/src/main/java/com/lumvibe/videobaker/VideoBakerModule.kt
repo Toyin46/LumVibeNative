@@ -39,7 +39,8 @@ class VideoBakerModule : Module() {
                     contrast = (options["contrast"] as? Number)?.toFloat() ?: 1f,
                     saturation = (options["saturation"] as? Number)?.toFloat() ?: 1f,
                     effect = options["effect"] as? String,
-                    effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f
+                    effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f,
+                    portalScenePngPath = options["portalScenePngPath"] as? String
                 )
                 transcoder.transcode(videoBakerContext, inputPath, outputPath, opts) { progress ->
                     sendEvent("onProgress", mapOf("progress" to progress))
@@ -48,4 +49,4 @@ class VideoBakerModule : Module() {
             }
         }
     }
-} 
+}  

@@ -113,6 +113,69 @@ class FrameRenderer {
     var duotoneColorB: FloatArray = floatArrayOf(1.00f, 0.35f, 0.15f)
     var duotonePulseSpeed: Float = 0.35f
     var neonGlowColor: FloatArray = floatArrayOf(0.10f, 1.00f, 0.85f)
+    // WINK_SPARK's fixed screen-space anchor point — see EffectShaders.winkSpark doc
+    // for why this isn't a tracked eye position. (0.62, 0.4) sits upper-right of
+    // center, a reasonable default for a front-camera selfie framing; expose as a
+    // var so it can be tuned per-effect-config from the JS side later if needed.
+    var sparkOrigin: FloatArray = floatArrayOf(0.62f, 0.40f)
+    // HEAD_TILT_ZOOM's current zoom/pan, computed in VideoTranscoder from
+    // FaceTracker.headPoseDegrees() each frame and written here right before draw.
+    var headTiltZoom: Float = 1f
+    var headTiltPan: FloatArray = floatArrayOf(0f, 0f)
+    // VOICE_HALO's face box, written from FaceTracker.faceBoundingBox() each frame.
+    // Defaults to a centered box so the ring has somewhere sensible to sit on a
+    // frame where no face was detected, rather than snapping to (0,0,0,0).
+    var faceBox: FloatArray = floatArrayOf(0.35f, 0.25f, 0.65f, 0.75f)
+    // HAND_PORTAL's circle, normalized screen space, written from HandTracker.palmCenter().
+    var portalCenter: FloatArray = floatArrayOf(0.5f, 0.5f)
+    var portalRadius: Float = 0.18f
+    // FIST_BUMP_BOOM's trigger point + decaying energy (1.0 = just punched, decays to 0).
+    var boomCenter: FloatArray = floatArrayOf(0.5f, 0.5f)
+    var boomEnergy: Float = 0f
+    // TWO_HAND_FRAME's rectangle (left, top, right, bottom), from both palm positions.
+    var frameRect: FloatArray = floatArrayOf(0.3f, 0.3f, 0.7f, 0.7f)
+    // GAZE_TRAIL's position history — VideoTranscoder owns the actual history array
+    // and writes it here each frame. gazePoints is flattened (x0,y0,x1,y1,...);
+    // gazeCount says how many of the (up to 8) slots are valid this frame.
+    var gazePoints: FloatArray = FloatArray(16) // 8 points * 2 floats
+    var gazeAges: FloatArray = FloatArray(8)
+    var gazeCount: Int = 0
+    // DOUBLE_TAKE's turn direction, -1..1 — see EffectShaders.doubleTake doc.
+    var doubleTakeDirection: Float = 0f
+
+    // BLINK_FREEZE's captured-frame texture — separate from secondaryTextureId
+    // above because it needs to coexist with a segmentation mask or portal image
+    // in theory (not in practice today, since no effect combines them, but kept
+    // as its own slot rather than aliased, to avoid a subtle future bug if that
+    // ever changes). Filled via captureFreezeFrame(), read via drawFrozenFrame().
+    private var frozenTextureId = 0
+    private var freezeProgram = 0
+
+    fun ensureFrozenTexture() {
+        if (frozenTextureId == 0) frozenTextureId = GlUtil.createTexture2D()
+    }
+
+    // Shared "secondary" texture slot (GL_TEXTURE1) for whichever effect needs a
+    // second image this frame: SegmentationTracker's per-frame mask (DEPTH_BLOOM,
+    // SPLIT_PRISM — re-uploaded every frame, see uploadDynamicTexture) or
+    // HAND_PORTAL's static scene image (uploaded once, see OverlayBuilder). Only
+    // one of these effects is ever active at a time, so sharing one texture id
+    // instead of allocating three is a deliberate simplification, not an oversight.
+    private var secondaryTextureId = 0
+
+    /** Creates the secondary texture id once. Call after setup(), before the render loop. */
+    fun ensureSecondaryTexture() {
+        if (secondaryTextureId == 0) secondaryTextureId = GlUtil.createTexture2D()
+    }
+
+    /** Re-uploads [bitmap] into the secondary texture slot — call every frame for
+     *  DEPTH_BLOOM/SPLIT_PRISM (a fresh segmentation mask each frame). For
+     *  HAND_PORTAL's static scene image, call this ONCE instead, before the loop. */
+    fun uploadSecondaryTexture(bitmap: android.graphics.Bitmap) {
+        ensureSecondaryTexture()
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, secondaryTextureId)
+        android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+    }
 
     private var frameWidth = 1
     private var frameHeight = 1
@@ -129,6 +192,13 @@ class FrameRenderer {
     fun setup() {
         videoProgram = GlUtil.createProgram(videoVertexShader, videoFragmentShader)
         overlayProgram = GlUtil.createProgram(overlayVertexShader, overlayFragmentShader)
+        // Compiled unconditionally (like video/overlay above) since it's small and
+        // effect-independent — only actually used when BLINK_FREEZE is selected,
+        // via captureFreezeFrame()/drawFrozenFrame() below, not through the normal
+        // effectPrograms map (this program takes no external-OES texture at all,
+        // so it doesn't fit the generic drawEffectFrame() path).
+        val (freezeVs, freezeFs) = EffectShaders.source(VisualEffect.BLINK_FREEZE)
+        freezeProgram = GlUtil.createProgram(freezeVs, freezeFs)
     }
 
     fun setFrameSize(width: Int, height: Int) {
@@ -196,6 +266,21 @@ class FrameRenderer {
         val uColorB = GLES20.glGetUniformLocation(program, "uColorB")
         val uPulseSpeed = GLES20.glGetUniformLocation(program, "uPulseSpeed")
         val uGlowColor = GLES20.glGetUniformLocation(program, "uGlowColor")
+        val uSparkOrigin = GLES20.glGetUniformLocation(program, "uSparkOrigin")
+        val uZoom = GLES20.glGetUniformLocation(program, "uZoom")
+        val uPan = GLES20.glGetUniformLocation(program, "uPan")
+        val uFaceBox = GLES20.glGetUniformLocation(program, "uFaceBox")
+        val uMaskTexture = GLES20.glGetUniformLocation(program, "uMaskTexture")
+        val uPortalTexture = GLES20.glGetUniformLocation(program, "uPortalTexture")
+        val uPortalCenter = GLES20.glGetUniformLocation(program, "uPortalCenter")
+        val uPortalRadius = GLES20.glGetUniformLocation(program, "uPortalRadius")
+        val uBoomCenter = GLES20.glGetUniformLocation(program, "uBoomCenter")
+        val uBoomEnergy = GLES20.glGetUniformLocation(program, "uBoomEnergy")
+        val uFrameRect = GLES20.glGetUniformLocation(program, "uFrameRect")
+        val uGazePoints = GLES20.glGetUniformLocation(program, "uGazePoints")
+        val uGazeAges = GLES20.glGetUniformLocation(program, "uGazeAges")
+        val uGazeCount = GLES20.glGetUniformLocation(program, "uGazeCount")
+        val uDirection = GLES20.glGetUniformLocation(program, "uDirection")
 
         GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
         GLES20.glUniform1i(uTexture, 0)
@@ -206,7 +291,71 @@ class FrameRenderer {
         if (uColorB >= 0) GLES20.glUniform3fv(uColorB, 1, duotoneColorB, 0)
         if (uPulseSpeed >= 0) GLES20.glUniform1f(uPulseSpeed, duotonePulseSpeed)
         if (uGlowColor >= 0) GLES20.glUniform3fv(uGlowColor, 1, neonGlowColor, 0)
+        if (uSparkOrigin >= 0) GLES20.glUniform2fv(uSparkOrigin, 1, sparkOrigin, 0)
+        if (uZoom >= 0) GLES20.glUniform1f(uZoom, headTiltZoom.coerceAtLeast(1f))
+        if (uPan >= 0) GLES20.glUniform2fv(uPan, 1, headTiltPan, 0)
+        if (uFaceBox >= 0) GLES20.glUniform4fv(uFaceBox, 1, faceBox, 0)
+        if (uBoomCenter >= 0) GLES20.glUniform2fv(uBoomCenter, 1, boomCenter, 0)
+        if (uBoomEnergy >= 0) GLES20.glUniform1f(uBoomEnergy, boomEnergy.coerceIn(0f, 1f))
+        if (uFrameRect >= 0) GLES20.glUniform4fv(uFrameRect, 1, frameRect, 0)
+        if (uPortalCenter >= 0) GLES20.glUniform2fv(uPortalCenter, 1, portalCenter, 0)
+        if (uPortalRadius >= 0) GLES20.glUniform1f(uPortalRadius, portalRadius)
+        if (uGazePoints >= 0) GLES20.glUniform2fv(uGazePoints, 8, gazePoints, 0)
+        if (uGazeAges >= 0) GLES20.glUniform1fv(uGazeAges, 8, gazeAges, 0)
+        if (uGazeCount >= 0) GLES20.glUniform1i(uGazeCount, gazeCount.coerceIn(0, 8))
+        if (uDirection >= 0) GLES20.glUniform1f(uDirection, doubleTakeDirection.coerceIn(-1f, 1f))
+        // Secondary texture (mask or portal scene) goes on unit 1 — only bind it
+        // when this program actually declares one of the two samplers that use it.
+        if (uMaskTexture >= 0 || uPortalTexture >= 0) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, secondaryTextureId)
+            if (uMaskTexture >= 0) GLES20.glUniform1i(uMaskTexture, 1)
+            if (uPortalTexture >= 0) GLES20.glUniform1i(uPortalTexture, 1)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0) // restore, so the next draw's unit-0 bind isn't stale
+        }
 
+        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
+    }
+
+    /**
+     * Snapshots whatever is CURRENTLY rendered on the bound framebuffer into the
+     * frozen-capture texture, via glCopyTexImage2D. Call this immediately after
+     * drawVideoFrame() (plain, no effect shader) so what gets frozen is the clean
+     * video frame — not a half-composited overlay/effect frame. VideoTranscoder
+     * calls this exactly once, on the frame a blink is first detected.
+     */
+    fun captureFreezeFrame() {
+        ensureFrozenTexture()
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, frozenTextureId)
+        GLES20.glCopyTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 0, 0, frameWidth, frameHeight, 0)
+        GlUtil.checkGlError("captureFreezeFrame glCopyTexImage2D")
+    }
+
+    /**
+     * Draws the previously-captured frozen frame with a zoom punch. [zoom] should
+     * animate 1.0 -> ~1.15 -> 1.0 across the freeze's ~0.3s hold (VideoTranscoder
+     * computes the curve; this just draws whatever zoom value it's given).
+     */
+    fun drawFrozenFrame(zoom: Float) {
+        GLES20.glUseProgram(freezeProgram)
+        GlUtil.checkGlError("glUseProgram freeze")
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, frozenTextureId)
+
+        val aPosition = GLES20.glGetAttribLocation(freezeProgram, "aPosition")
+        val aTexCoord = GLES20.glGetAttribLocation(freezeProgram, "aTexCoord")
+        val uZoom = GLES20.glGetUniformLocation(freezeProgram, "uZoom")
+        val uFrozenTexture = GLES20.glGetUniformLocation(freezeProgram, "uFrozenTexture")
+
+        if (uZoom >= 0) GLES20.glUniform1f(uZoom, zoom.coerceAtLeast(1f))
+        if (uFrozenTexture >= 0) GLES20.glUniform1i(uFrozenTexture, 0)
+
+        // NOTE: frozen capture is a normal 2D texture with (0,0) at a different
+        // corner convention than the decoder's SurfaceTexture in some GL
+        // implementations — if the frozen frame appears upside-down or mirrored
+        // on-device, that's a texcoord/V-flip issue to fix in this draw call
+        // (flip texCoordBuffer's V here), not a sign your capture failed.
         drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
     }
 
@@ -293,5 +442,14 @@ class FrameRenderer {
         effectPrograms.clear()
         videoProgram = 0
         overlayProgram = 0
+        if (freezeProgram != 0) { GLES20.glDeleteProgram(freezeProgram); freezeProgram = 0 }
+        if (frozenTextureId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(frozenTextureId), 0)
+            frozenTextureId = 0
+        }
+        if (secondaryTextureId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(secondaryTextureId), 0)
+            secondaryTextureId = 0
+        }
     }
-} 
+}  

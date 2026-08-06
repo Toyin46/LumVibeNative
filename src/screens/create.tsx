@@ -580,8 +580,36 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_neon_edge',       name:'Neon Trace',     emoji:'💡',category:'creative', desc:'Glowing edge outline — baked in',        brightness:1,contrast:1,saturation:1, glShaderEffect:'neon_edge'},
   {id:'fx_gl_duotone_pulse',   name:'Duo Pulse',      emoji:'🔵',category:'creative', desc:'Two-tone colour pulse — baked in',       brightness:1,contrast:1,saturation:1, glShaderEffect:'duotone_pulse'},
   {id:'fx_gl_liquid_chrome',   name:'Liquid Chrome',  emoji:'🌊',category:'creative', desc:'Molten-metal ripple — baked in',         brightness:1,contrast:1,saturation:1, glShaderEffect:'liquid_chrome'},
-  {id:'fx_gl_ink_wash',        name:'Ink Wash',       emoji:'🖌️',category:'editorial',desc:'Hand-drawn ink strokes — baked in',      brightness:1,contrast:1,saturation:1, glShaderEffect:'ink_wash'}, 
-  {id:'fx_gl_mood_ring', name:'Mood Ring', emoji:'🙂', category:'creative', desc:'Hue shifts with your smile — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mood_ring'}, 
+  {id:'fx_gl_ink_wash',        name:'Ink Wash',       emoji:'🖌️',category:'editorial',desc:'Hand-drawn ink strokes — baked in',      brightness:1,contrast:1,saturation:1, glShaderEffect:'ink_wash'},
+  // ✅ Phase 2-7 GL shader effects — face/hand/audio/segmentation-reactive, all
+  // baked via the same native video-baker path as the five above. See each
+  // Kotlin file's own doc comments for exactly what's tracked and any
+  // on-device-verify caveats (head-pose sign, 468 vs 478 landmark count, etc) —
+  // this array just needs the glShaderEffect key to match VisualEffect.fromKey
+  // in EffectShaders.kt exactly, letter for letter.
+  {id:'fx_gl_mood_ring',       name:'Mood Ring',      emoji:'💍',category:'creative', desc:'Skin hue shifts with your smile — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mood_ring'},
+  {id:'fx_gl_wink_spark',      name:'Wink Spark',     emoji:'✨',category:'creative', desc:'Wink triggers a spark burst — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'wink_spark'},
+  {id:'fx_gl_smile_shatter',   name:'Smile Shatter',  emoji:'💥',category:'creative', desc:'Smile cracks the screen — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'smile_shatter'},
+  {id:'fx_gl_head_tilt_zoom',  name:'Tilt Zoom',      emoji:'🎯',category:'creative', desc:'Head tilt drives a dynamic zoom — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'head_tilt_zoom'},
+  {id:'fx_gl_aura_glow',       name:'Aura Glow (GL)', emoji:'🌟',category:'creative', desc:'Glowing outline, reacts to audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'aura_glow'},
+  {id:'fx_gl_color_drain',     name:'Color Drain',    emoji:'🩶',category:'mood',     desc:'Desaturates the longer you hold still — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'color_drain'},
+  {id:'fx_gl_silence_ripple',  name:'Silence Ripple',  emoji:'🔵',category:'mood',    desc:'Ripples out when audio goes quiet — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'silence_ripple'},
+  {id:'fx_gl_voice_halo',      name:'Voice Halo',     emoji:'⭕',category:'creative', desc:'Glow ring around your face, reacts to voice — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'voice_halo'},
+  {id:'fx_gl_thermal_pulse',   name:'Thermal Pulse',  emoji:'🌡️',category:'creative', desc:'Heat-map skin tone, pulses with audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'thermal_pulse'},
+  {id:'fx_gl_depth_bloom',     name:'Depth Bloom',    emoji:'🌫️',category:'mood',    desc:'Background blooms with audio, you stay sharp — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'depth_bloom'},
+  {id:'fx_gl_split_prism',     name:'Split Prism',    emoji:'🔺',category:'creative', desc:'Background splits into RGB layers on motion — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'split_prism'},
+  // ⚠️ Requires a portal scene image picked at bake time — see pickPortalScene()
+  // and the bakeOptions.portalScenePngPath wiring below. If none is picked, the
+  // native side throws and the existing catch-all falls back to the unedited
+  // video (see the try/catch around bakeVideo further down) — it won't crash
+  // the app, but the user also won't get the effect they picked, so nudging
+  // them to pick a scene image up front (done in the onPress below) matters.
+  {id:'fx_gl_hand_portal',     name:'Hand Portal',    emoji:'🌀',category:'creative', desc:'Circle your hand — opens a portal — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'hand_portal'},
+  {id:'fx_gl_fist_bump_boom',  name:'Fist Bump Boom', emoji:'👊',category:'creative', desc:'Closed fist triggers a screen-shake burst — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fist_bump_boom'},
+  {id:'fx_gl_two_hand_frame',  name:'Two-Hand Frame', emoji:'🖼️',category:'creative', desc:'Frame gesture with both hands — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'two_hand_frame'},
+  {id:'fx_gl_gaze_trail',      name:'Gaze Trail',     emoji:'👀',category:'creative', desc:'Particles trail where you look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gaze_trail'},
+  {id:'fx_gl_double_take',     name:'Double Take',    emoji:'👥',category:'creative', desc:'Fast head turn leaves a ghost streak — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'double_take'},
+  {id:'fx_gl_blink_freeze',    name:'Blink Freeze',   emoji:'📸',category:'creative', desc:'Blink freezes the frame + zoom punch — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'blink_freeze'},
 ];
 const FX_CATEGORIES = [
   {id:'all',name:'All',emoji:'🎛️'},{id:'mood',name:'Mood',emoji:'🌈'},
@@ -600,7 +628,13 @@ const FX_OVERLAY_TINTS: Record<string,string> = {
   fx_chrome:'rgba(180,180,180,0.30)', fx_pop_art:'rgba(255,0,120,0.30)',
   fx_cross_process:'rgba(0,200,100,0.25)', fx_aura:'rgba(180,100,255,0.25)',
   fx_gl_vintage_flicker:'transparent', fx_gl_neon_edge:'transparent', fx_gl_duotone_pulse:'transparent',
-  fx_gl_liquid_chrome:'transparent', fx_gl_ink_wash:'transparent', 
+  fx_gl_liquid_chrome:'transparent', fx_gl_ink_wash:'transparent',
+  fx_gl_mood_ring:'transparent', fx_gl_wink_spark:'transparent', fx_gl_smile_shatter:'transparent',
+  fx_gl_head_tilt_zoom:'transparent', fx_gl_aura_glow:'transparent', fx_gl_color_drain:'transparent',
+  fx_gl_silence_ripple:'transparent', fx_gl_voice_halo:'transparent', fx_gl_thermal_pulse:'transparent',
+  fx_gl_depth_bloom:'transparent', fx_gl_split_prism:'transparent', fx_gl_hand_portal:'transparent',
+  fx_gl_fist_bump_boom:'transparent', fx_gl_two_hand_frame:'transparent', fx_gl_gaze_trail:'transparent',
+  fx_gl_double_take:'transparent', fx_gl_blink_freeze:'transparent',
 };
 
 // ─── FILTERS ──────────────────────────────────────────────
@@ -4444,11 +4478,38 @@ export default function CreateScreen() {
   // ─── Filter / FX / effect state ───────────────────────
   const [selectedFilter, setSelectedFilter] = useState('original');
   const [selectedFx, setSelectedFx]     = useState('fx_none');
+  // HAND_PORTAL's scene image — picked by the user, not bundled, so a missing
+  // asset can never break the Metro build (a require()'d bundled asset that
+  // doesn't exist yet would fail the build, not just this one effect).
+  const [portalSceneUri, setPortalSceneUri] = useState<string | null>(null);
   const [selectedSpeed, setSelectedSpeed] = useState('normal');
   const [selectedVibe, setSelectedVibe] = useState<string | null>(null);
   const [blurEnabled, setBlurEnabled]   = useState(false);
   const [addWatermark, setAddWatermark] = useState(true);
   const [autoOptimize, setAutoOptimize] = useState(true);
+
+  // Lets the user pick an image for HAND_PORTAL's portal-scene. Called from the
+  // FX card's onPress (below) so picking happens right when they select the
+  // effect, not silently at bake time — if they cancel, selectedFx stays set
+  // but portalSceneUri stays null, and the existing try/catch around bakeVideo
+  // already handles that gracefully (falls back to the unedited video).
+  const pickPortalScene = useCallback(async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission needed', 'Photo library access is needed to pick a portal scene image.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      // MediaTypeOptions is deprecated as of recent expo-image-picker versions —
+      // your package.json shows ~55.0.21, which is new enough that the array
+      // form below is the current documented API, not MediaTypeOptions.Images.
+      mediaTypes: ['images'],
+      quality: 0.9,
+    });
+    if (!result.canceled && result.assets?.[0]?.uri) {
+      setPortalSceneUri(result.assets[0].uri);
+    }
+  }, []);
 
   // ─── Status state ─────────────────────────────────────
   const [statusContent, setStatusContent] = useState('');
@@ -5188,6 +5249,25 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               if (fxEffect.glShaderEffect) {
                 bakeOptions.effect = fxEffect.glShaderEffect;
                 bakeOptions.effectIntensity = 1;
+
+                // HAND_PORTAL needs a real filesystem path, same reasoning as the
+                // watermark logo above (a content:// picker URI isn't guaranteed
+                // readable by Kotlin's BitmapFactory.decodeFile()) — copy it to a
+                // known cache path first. If the user never picked a scene image
+                // (portalSceneUri is null), we deliberately DON'T set
+                // portalScenePngPath — VideoTranscoder.kt throws a clear error in
+                // that case, which the try/catch around bakeVideo below already
+                // catches and falls back to the unedited video, so this can't
+                // crash the app; it just means the effect silently doesn't apply.
+                if (fxEffect.glShaderEffect === 'hand_portal' && portalSceneUri) {
+                  try {
+                    const portalDestPath = `${FileSystem.cacheDirectory}portal_scene_${Date.now()}.png`;
+                    await FileSystem.copyAsync({ from: portalSceneUri, to: portalDestPath });
+                    bakeOptions.portalScenePngPath = portalDestPath.replace('file://', '');
+                  } catch (copyErr) {
+                    console.warn('Portal scene copy failed, HAND_PORTAL will be skipped:', copyErr);
+                  }
+                }
               } else {
                 bakeOptions.brightness = fxEffect.brightness - 1;
                 bakeOptions.contrast = fxEffect.contrast;
@@ -6240,7 +6320,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               <TouchableOpacity
                 key={fx.id}
                 style={[ms.fxCard, selectedFx === fx.id && ms.fxCardActive]}
-                onPress={() => { setSelectedFx(fx.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+                onPress={() => {
+                  setSelectedFx(fx.id);
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  if (fx.glShaderEffect === 'hand_portal') pickPortalScene();
+                }}
               >
                 <Text style={{ fontSize: 22 }}>{fx.emoji}</Text>
                 <Text style={[ms.fxCardName, selectedFx === fx.id && { color: '#00ff88' }]}>{fx.name}</Text>

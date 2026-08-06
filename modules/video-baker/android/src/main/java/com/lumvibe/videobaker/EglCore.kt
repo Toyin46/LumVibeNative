@@ -86,4 +86,4 @@ class EglCore {
         eglDisplay = EGL14.EGL_NO_DISPLAY
         eglContext = EGL14.EGL_NO_CONTEXT
     }
-} 
+}  

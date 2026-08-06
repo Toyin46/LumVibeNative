@@ -30,6 +30,10 @@ class FaceTracker(context: Context) {
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.VIDEO)
             .setOutputFaceBlendshapes(true)
+            // NEW: needed for HEAD_TILT_ZOOM / DOUBLE_TAKE — gives us a 4x4 head-pose
+            // matrix per frame, which we decompose into roll/pitch/yaw below. Without
+            // this flag the matrix list in the result is always empty.
+            .setOutputFacialTransformationMatrixes(true)
             .setNumFaces(1)
             .build()
         FaceLandmarker.createFromOptions(context, options)
@@ -61,8 +65,79 @@ class FaceTracker(context: Context) {
         return shapes.firstOrNull { it.categoryName() == name }?.score() ?: 0f
     }
 
+    /**
+     * Head pose angles in degrees, decomposed from the facial transformation matrix.
+     * roll = head tilt left/right (ear toward shoulder) — drives HEAD_TILT_ZOOM.
+     * yaw = head turn left/right — drives DOUBLE_TAKE (compare against the previous
+     * frame's yaw in VideoTranscoder to detect a "fast turn").
+     * pitch = head nod up/down — exposed for completeness, unused by current effects.
+     *
+     * Returns null if no transformation matrix is present (shouldn't happen once
+     * setOutputFacialTransformationMatrixes(true) is set above, but MediaPipe's own
+     * docs list this as Optional<> so we treat absence as "skip this frame," same
+     * policy as a missing face).
+     *
+     * NOTE ON UNITS: MediaPipe's matrix is column-major, same convention as
+     * android.opengl.Matrix — do not transpose it before reading rotation terms.
+     *
+     * FLAG THIS FOR ON-DEVICE VERIFICATION: the sign of roll/yaw here depends on
+     * MediaPipe's exact axis convention for this matrix, which is easy to get backwards
+     * from documentation alone. First time you wire HEAD_TILT_ZOOM or DOUBLE_TAKE in,
+     * log headPoseDegrees() while deliberately tilting/turning your head on a test clip
+     * and confirm the sign matches the direction you actually moved — flip the sign in
+     * VideoTranscoder's usage (not here) if it's inverted, rather than guessing twice.
+     */
+    fun headPoseDegrees(result: FaceLandmarkerResult): FloatArray? {
+        val matrices = result.facialTransformationMatrixes().orElse(null)
+        val m = matrices?.firstOrNull() ?: return null
+        // m is column-major 4x4: m[col*4 + row]
+        val yaw = Math.toDegrees(kotlin.math.atan2((-m[8]).toDouble(), m[0].toDouble())).toFloat()
+        val pitch = Math.toDegrees(kotlin.math.asin(m[9].toDouble().coerceIn(-1.0, 1.0))).toFloat()
+        val roll = Math.toDegrees(kotlin.math.atan2(m[1].toDouble(), m[5].toDouble())).toFloat()
+        return floatArrayOf(roll, pitch, yaw)
+    }
+
+    /**
+     * Normalized (0..1) bounding box of the detected face — (minX, minY, maxX, maxY) —
+     * computed as the min/max of all 478 face-mesh landmark points. Used by
+     * VOICE_HALO to position/size the glow ring around the head. This is a real
+     * mesh-derived box, not an approximation like WINK_SPARK's fixed anchor point,
+     * since face landmark positions (unlike blendshapes) ARE available here.
+     */
+    fun faceBoundingBox(result: FaceLandmarkerResult): FloatArray? {
+        val points = result.faceLandmarks().firstOrNull() ?: return null
+        if (points.isEmpty()) return null
+        var minX = 1f; var minY = 1f; var maxX = 0f; var maxY = 0f
+        for (p in points) {
+            if (p.x() < minX) minX = p.x()
+            if (p.y() < minY) minY = p.y()
+            if (p.x() > maxX) maxX = p.x()
+            if (p.y() > maxY) maxY = p.y()
+        }
+        return floatArrayOf(minX, minY, maxX, maxY)
+    }
+
+    /**
+     * Normalized (0..1) midpoint between the two iris centers, for GAZE_TRAIL.
+     *
+     * FLAG THIS FOR ON-DEVICE VERIFICATION: indices 468 (left iris center) and 473
+     * (right iris center) are only present if your face_landmarker.task outputs the
+     * full 478-point refined mesh (which includes irises). The base 468-point mesh
+     * does NOT include them. Before relying on this, log
+     * result.faceLandmarks()[0].size on-device and confirm it's 478, not 468 — if
+     * it's 468, this returns null rather than indexing out of bounds, but the
+     * effect will simply never fire, which is worth noticing during testing.
+     */
+    fun irisCenter(result: FaceLandmarkerResult): Pair<Float, Float>? {
+        val points = result.faceLandmarks().firstOrNull() ?: return null
+        if (points.size <= 473) return null // guards the exact failure mode described above
+        val left = points[468]
+        val right = points[473]
+        return ((left.x() + right.x()) / 2f) to ((left.y() + right.y()) / 2f)
+    }
+
     /** Call once when done baking — releases the model's native resources. */
     fun close() {
         faceLandmarker.close()
     }
-} 
+}  

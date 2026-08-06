@@ -49,4 +49,4 @@ object WatermarkBounce {
         if (m < 0f) m += period
         return if (m <= range) m else period - m
     }
-} 
+}  
