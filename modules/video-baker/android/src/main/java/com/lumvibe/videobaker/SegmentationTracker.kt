@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
@@ -67,7 +68,12 @@ class SegmentationTracker(context: Context) {
 
         val w = categoryMask.width
         val h = categoryMask.height
-        val maskBuffer: ByteBuffer = categoryMask.byteBuffer
+        // MPImage doesn't expose pixel data as a direct property — MediaPipe requires
+        // going through this extractor utility. (My earlier version used
+        // `categoryMask.byteBuffer`, which doesn't exist and is what broke your build —
+        // confirmed against MediaPipe's own sample code before writing this fix, not
+        // guessed twice.)
+        val maskBuffer: ByteBuffer = ByteBufferExtractor.extract(categoryMask)
         maskBuffer.rewind()
 
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
