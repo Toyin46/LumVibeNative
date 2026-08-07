@@ -86,15 +86,16 @@ class FrameRenderer {
     private val texCoordBuffer: FloatBuffer = makeBuffer(textureCoords)
 
     // Caption/watermark textures come from an Android Canvas Bitmap uploaded via
-    // GLUtils.texImage2D, drawn onto a fixed, un-rotated quad. The video/effect
-    // layer gets automatic orientation correction from SurfaceTexture's own
-    // transform matrix (uTexMatrix) — the overlay quad has no such matrix, so if
-    // the recording needs a rotation correction (common, e.g. front-camera
-    // recordings), the overlay ends up fully upside-down AND mirrored relative to
-    // the correctly-oriented video underneath — a 180° rotation, not just a
-    // vertical flip. This buffer rotates the overlay's UVs 180° (u,v)->(1-u,1-v)
-    // to counter that. Used ONLY for overlay/watermark draws — texCoordBuffer
-    // above stays untouched so the already-correct video/effect path isn't affected.
+    // GLUtils.texImage2D, drawn onto a fixed, un-rotated quad — they're already in
+    // correct upright screen orientation and should be drawn with the plain
+    // texCoordBuffer, same as everything else. overlayTexCoordBuffer below is a
+    // 180°-flipped UV set that USED to be applied here as a "fix" for a front-camera
+    // rotation issue — it was fixing the wrong layer, and instead mirrored every
+    // caption/watermark on every video regardless of camera or source (see
+    // drawOverlay/drawWatermarkAt fix). Kept unused for now in case a genuine
+    // overlay-orientation bug shows up on a specific device/pipeline and this is
+    // needed again — but don't wire it back in without confirming the actual
+    // symptom first, the same mistake is easy to repeat.
     private val overlayTexCoordBuffer: FloatBuffer = makeBuffer(floatArrayOf(1f, 1f, 0f, 1f, 1f, 0f, 0f, 0f))
 
     // Separate, MUTABLE position buffer for the watermark — rewritten every frame
@@ -374,7 +375,13 @@ class FrameRenderer {
 
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        drawQuad(vertexBuffer, overlayTexCoordBuffer, aPosition, aTexCoord)
+        // FIX: caption/watermark textures come from an upright Android Canvas
+        // Bitmap, not from the camera's SurfaceTexture — they never needed the
+        // 180° correction overlayTexCoordBuffer applies. That flip was written
+        // for a different symptom and got applied here too, which is why text
+        // (TikTok logo, LumVibe badge, captions) was rendering mirrored on
+        // saved/posted videos. Use the plain, un-flipped texCoordBuffer instead.
+        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
         GLES20.glDisable(GLES20.GL_BLEND)
     }
 
@@ -415,7 +422,8 @@ class FrameRenderer {
 
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        drawQuad(watermarkPositionBuffer, overlayTexCoordBuffer, aPosition, aTexCoord)
+        // Same fix as drawOverlay above — plain texCoordBuffer, no flip.
+        drawQuad(watermarkPositionBuffer, texCoordBuffer, aPosition, aTexCoord)
         GLES20.glDisable(GLES20.GL_BLEND)
     }
 
@@ -452,4 +460,4 @@ class FrameRenderer {
             secondaryTextureId = 0
         }
     }
-}  
+}   

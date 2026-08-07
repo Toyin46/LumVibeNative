@@ -1,3 +1,4 @@
+//src/screens/index.ts
 // HomeScreen — default export
 import HomeScreenDefault from './HomeScreen';
 export const HomeScreen = HomeScreenDefault;

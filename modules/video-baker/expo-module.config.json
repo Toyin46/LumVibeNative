@@ -1,6 +1,9 @@
 {
   "platforms": ["android"],
   "android": {
-    "modules": ["com.lumvibe.videobaker.VideoBakerModule"]
+    "modules": [
+      "com.lumvibe.videobaker.VideoBakerModule",
+      "com.lumvibe.videobaker.LiveEffectPreviewModule"
+    ]
   }
 } 

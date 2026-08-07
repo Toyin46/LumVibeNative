@@ -21,6 +21,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { ChatStackParamList } from './ChatStackTypes';
 
 import { MessagesScreen } from '../screens';
+import CowatchScreen from '@/chat/cowatch';
 import ChatDMScreen     from '../chat/[id]';
 import NewChatScreen    from '../chat/new';
 import NewGroupScreen   from '../chat/new-group';
@@ -54,6 +55,7 @@ export function ChatStack() {
       <Stack.Screen name="NewCircle"    component={NewCircleScreen} />
       <Stack.Screen name="GroupChat"    component={GroupChatScreen} />
       <Stack.Screen name="Circle"       component={CircleScreen} />
+      <Stack.Screen name='Cowatch'      component={CowatchScreen} />
       {/* TEMP DISABLED — see import comment above */}
       {/* <Stack.Screen name="Cowatch"      component={CowatchScreen} /> */}
       {/* TODO: <Stack.Screen name="GroupInfo" component={GroupInfoScreen} /> */}

@@ -48,6 +48,7 @@ import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { bakeVideo } from '../../modules/video-baker';
+import { LiveEffectPreview } from "../../modules/video-baker/LiveEffectPreview"
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -4441,6 +4442,14 @@ export default function CreateScreen() {
   const [facing, setFacing]             = useState<'back' | 'front'>('back');
   const [flash, setFlash]               = useState<'off' | 'on'>('off');
   const [cameraMode, setCameraMode]     = useState<CameraMode>('video');
+  // Visual-only for now — doesn't yet crop the actual preview/output to these
+  // ratios, just labels intent. Wiring real crop is a separate follow-up.
+  const [aspectRatio, setAspectRatio]   = useState<'9:16' | '1:1' | '16:9'>('9:16');
+  const [showAspectMenu, setShowAspectMenu] = useState(false);
+  // 'post' = normal feed post (current behaviour). 'story' / 'live' are UI-only
+  // placeholders here — they don't yet route to different posting logic.
+  const [postMode, setPostMode]         = useState<'post' | 'story' | 'live'>('post');
+  const [showCamSettings, setShowCamSettings] = useState(false);
   const [isRecording, setIsRecording]   = useState(false);
   const [recordingDur, setRecordingDur] = useState(0);
   const [cameraFeature, setCameraFeature] = useState<CameraFeature>('normal');
@@ -4864,6 +4873,13 @@ export default function CreateScreen() {
   // ─── Filter preview (tint overlay) — TASK 7: useMemo ──
   const activeFilter = useMemo(() => FILTERS.find(f => f.id === selectedFilter), [selectedFilter]);
   const activeFxTint = useMemo(() => FX_OVERLAY_TINTS[selectedFx] || 'transparent', [selectedFx]);
+  // The actual fx object for the current selection — needed for its
+  // glShaderEffect key, which LiveEffectPreview passes straight through to
+  // VisualEffect.fromKey() on the native side. Distinct from activeFxTint
+  // (the flat-color approximation used everywhere else) — this is what
+  // switches the camera area over to the real live GL renderer instead.
+  const activeFx = useMemo(() => FX_EFFECTS.find(f => f.id === selectedFx), [selectedFx]);
+  const hasLiveGLEffect = !!activeFx?.glShaderEffect;
 
   // ─── Save draft ───────────────────────────────────────
   const handleSaveDraft = useCallback(async () => {
@@ -5488,7 +5504,21 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
       <View style={ms.camScreen}>
         {/* Camera area */}
         <View style={[ms.camBox, { height: cH }]}>
-          {cameraFeature === 'dualcam' ? (
+          {hasLiveGLEffect ? (
+            // A GL shader effect is selected (Mood Ring, Gaze Trail, etc.) —
+            // switch from the normal camera views to the live GL renderer so
+            // the effect is actually visible now, not just after posting.
+            // NOTE: this opens its own Camera2 session — DualCameraView/
+            // DeepARCameraView below must NOT be mounted at the same time or
+            // you'll get a "camera in use" conflict. This ternary already
+            // guarantees only one is mounted at once; if you later add a
+            // background-camera-warm-up feature, revisit this.
+            <LiveEffectPreview
+              effect={activeFx?.glShaderEffect ?? null}
+              facing={facing}
+              style={StyleSheet.absoluteFill}
+            />
+          ) : cameraFeature === 'dualcam' ? (
             <DualCameraView facing={facing} flash={flash} isRecording={isRecording} onToggleFacing={() => setFacing(f => f === 'back' ? 'front' : 'back')} />
           ) : (
             <DeepARCameraView
@@ -5561,13 +5591,30 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               <Ionicons name="close" size={24} color="#fff" />
             </TouchableOpacity>
             <View style={ms.camTopCenter}>
+              <TouchableOpacity style={ms.aspectDropdown} onPress={() => setShowAspectMenu(v => !v)}>
+                <Text style={ms.aspectDropdownTxt}>{aspectRatio}</Text>
+                <Feather name="chevron-down" size={13} color="#fff" />
+              </TouchableOpacity>
               {selectedFilter !== 'original' && (
-                <View style={ms.activeBadge}><Text style={ms.activeBadgeTxt}>{activeFilter?.emoji} {activeFilter?.name}</Text></View>
+                <View style={[ms.activeBadge, { marginTop: 4 }]}><Text style={ms.activeBadgeTxt}>{activeFilter?.emoji} {activeFilter?.name}</Text></View>
+              )}
+              {showAspectMenu && (
+                <View style={ms.aspectMenu}>
+                  {(['9:16', '1:1', '16:9'] as const).map(r => (
+                    <TouchableOpacity key={r} style={ms.aspectMenuItem} onPress={() => { setAspectRatio(r); setShowAspectMenu(false); }}>
+                      <Text style={[ms.aspectMenuItemTxt, aspectRatio === r && { color: '#00ff88' }]}>{r}</Text>
+                      {aspectRatio === r && <Feather name="check" size={12} color="#00ff88" />}
+                    </TouchableOpacity>
+                  ))}
+                </View>
               )}
             </View>
             <TouchableOpacity style={ms.camIconBtn} onPress={() => setScreenView('drafts')}>
               <Ionicons name="document-text-outline" size={22} color="#fff" />
               {drafts.length > 0 && <View style={ms.draftBadge}><Text style={ms.draftBadgeTxt}>{drafts.length}</Text></View>}
+            </TouchableOpacity>
+            <TouchableOpacity style={ms.camIconBtn} onPress={() => setShowCamSettings(true)}>
+              <Ionicons name="settings-outline" size={22} color="#fff" />
             </TouchableOpacity>
           </View>
 
@@ -5774,20 +5821,64 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           )}
 
-          {/* Filter quick strip */}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }} contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}>
+          {/* Filter thumbnail strip — square cards with checkmark, matching the
+              reference layout. Uses a flat colour swatch (derived from each
+              filter's tintColor) as the thumbnail until real preview images are
+              dropped into assets/images/filters/ — see filterThumbSource() below. */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }} contentContainerStyle={{ gap: 10, paddingHorizontal: 12 }}>
             {FILTERS.map(f => (
               <TouchableOpacity
                 key={f.id}
-                style={[ms.filterChip, selectedFilter === f.id && ms.filterChipActive]}
+                style={ms.filterThumbWrap}
                 onPress={() => setSelectedFilter(f.id)}
               >
-                <Text style={{ fontSize: 14 }}>{f.emoji}</Text>
-                <Text style={[ms.filterChipTxt, selectedFilter === f.id && { color: '#00ff88' }]}>{f.name}</Text>
+                <View style={[ms.filterThumb, selectedFilter === f.id && ms.filterThumbActive, { backgroundColor: f.tintColor ? f.tintColor.replace(/,[\d.]+\)/, ',1)') : '#222' }]}>
+                  {selectedFilter === f.id && (
+                    <View style={ms.filterThumbCheck}><Feather name="check" size={11} color="#000" /></View>
+                  )}
+                </View>
+                <Text style={[ms.filterThumbTxt, selectedFilter === f.id && { color: '#00ff88' }]}>{f.name}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
+
+          {/* Post / Story / Live tabs — UI-only mode switch for now; postMode
+              isn't yet wired into executePost's branching logic. Flag this to
+              Toyin before shipping if Story/Live need different upload paths. */}
+          <View style={ms.postModeRow}>
+            {(['post', 'story', 'live'] as const).map(m => (
+              <TouchableOpacity key={m} onPress={() => setPostMode(m)}>
+                <Text style={[ms.postModeTxt, postMode === m && ms.postModeTxtActive]}>{m.toUpperCase()}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
+
+        {/* Aspect ratio backdrop — closes the dropdown on outside tap */}
+        {showAspectMenu && (
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setShowAspectMenu(false)} />
+        )}
+
+        {/* Camera settings panel */}
+        <Modal visible={showCamSettings} transparent animationType="slide" onRequestClose={() => setShowCamSettings(false)}>
+          <TouchableOpacity style={ms.settingsBackdrop} activeOpacity={1} onPress={() => setShowCamSettings(false)}>
+            <View style={ms.settingsSheet}>
+              <Text style={ms.settingsSheetTitle}>Camera Settings</Text>
+              <View style={ms.settingItem}>
+                <Text style={ms.settingLabel}>Add LumVibe Watermark</Text>
+                <Switch value={addWatermark} onValueChange={setAddWatermark} trackColor={{ true: '#00ff88' }} />
+              </View>
+              <View style={ms.settingItem}>
+                <Text style={ms.settingLabel}>Auto-optimize Upload</Text>
+                <Switch value={autoOptimize} onValueChange={setAutoOptimize} trackColor={{ true: '#00ff88' }} />
+              </View>
+              <View style={ms.settingItem}>
+                <Text style={ms.settingLabel}>Flash</Text>
+                <Switch value={flash === 'on'} onValueChange={v => setFlash(v ? 'on' : 'off')} trackColor={{ true: '#00ff88' }} />
+              </View>
+            </View>
+          </TouchableOpacity>
+        </Modal>
 
         {/* ✅ NEW: AI Edit modal */}
         <AIEditPanel
@@ -6329,6 +6420,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 <Text style={{ fontSize: 22 }}>{fx.emoji}</Text>
                 <Text style={[ms.fxCardName, selectedFx === fx.id && { color: '#00ff88' }]}>{fx.name}</Text>
                 <Text style={ms.fxCardDesc} numberOfLines={1}>{fx.desc}</Text>
+                {/* Now that LiveEffectPreview handles GL shader effects, selecting one
+                    switches the camera area over to the real live renderer — see
+                    hasLiveGLEffect above. Badge just labels that clearly instead of
+                    warning it won't show (that warning is no longer true). */}
+                {fx.glShaderEffect && (
+                  <View style={ms.fxNoPreviewBadge}>
+                    <Text style={ms.fxNoPreviewTxt}>Live</Text>
+                  </View>
+                )}
                 {selectedFx === fx.id && <View style={ms.fxCheck}><Feather name="check" size={9} color="#000" /></View>}
               </TouchableOpacity>
             ))}
@@ -6677,6 +6777,30 @@ const ms = StyleSheet.create({
   activeBadgeTxt: { color: '#00ff88', fontSize: 11, fontWeight: '700' },
   draftBadge: { position: 'absolute', top: -2, right: -2, width: 16, height: 16, borderRadius: 8, backgroundColor: '#ff4444', alignItems: 'center', justifyContent: 'center' },
   draftBadgeTxt: { color: '#fff', fontSize: 8, fontWeight: '800' },
+
+  // Aspect ratio dropdown (top row)
+  aspectDropdown: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5 },
+  aspectDropdownTxt: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  aspectMenu: { position: 'absolute', top: 34, backgroundColor: '#111', borderRadius: 10, borderWidth: 1, borderColor: '#1a1a1a', paddingVertical: 4, minWidth: 90, zIndex: 30 },
+  aspectMenuItem: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 8 },
+  aspectMenuItemTxt: { color: '#ccc', fontSize: 12, fontWeight: '600' },
+
+  // Filter thumbnail strip (camera screen bottom carousel)
+  filterThumbWrap: { alignItems: 'center', width: 62 },
+  filterThumb: { width: 58, height: 58, borderRadius: 12, borderWidth: 2, borderColor: '#1a1a1a', alignItems: 'flex-end', justifyContent: 'flex-start', padding: 4 },
+  filterThumbActive: { borderColor: '#00ff88' },
+  filterThumbCheck: { width: 16, height: 16, borderRadius: 8, backgroundColor: '#00ff88', alignItems: 'center', justifyContent: 'center' },
+  filterThumbTxt: { color: '#888', fontSize: 10, fontWeight: '600', marginTop: 4, textAlign: 'center' },
+
+  // Post / Story / Live mode tabs
+  postModeRow: { flexDirection: 'row', justifyContent: 'center', gap: 22, marginTop: 12, paddingBottom: 6 },
+  postModeTxt: { color: '#888', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },
+  postModeTxtActive: { color: '#00ff88' },
+
+  // Camera settings sheet
+  settingsBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  settingsSheet: { backgroundColor: '#0a0a0a', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, gap: 12, borderWidth: 1, borderColor: '#1a1a1a', borderBottomWidth: 0 },
+  settingsSheetTitle: { color: '#fff', fontSize: 16, fontWeight: '800', marginBottom: 6 },
   rightTools: { position: 'absolute', right: 10, top: SH * 0.1, gap: 6, zIndex: 20 },
   toolBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
   toolBtnActive: { backgroundColor: 'rgba(0,255,136,0.2)', borderColor: '#00ff88' },
@@ -6753,6 +6877,8 @@ const ms = StyleSheet.create({
   fxCardName: { color: '#fff', fontSize: 10, fontWeight: '700', marginTop: 4, textAlign: 'center' },
   fxCardDesc: { color: '#555', fontSize: 8, textAlign: 'center', marginTop: 2 },
   fxCheck: { position: 'absolute', top: 4, right: 4, width: 15, height: 15, borderRadius: 8, backgroundColor: '#00ff88', alignItems: 'center', justifyContent: 'center' },
+  fxNoPreviewBadge: { marginTop: 3, backgroundColor: 'rgba(0,255,136,0.15)', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1.5, borderWidth: 1, borderColor: 'rgba(0,255,136,0.35)' },
+  fxNoPreviewTxt: { color: '#00ff88', fontSize: 7, fontWeight: '700' },
 
   // Music section
   musicSection: { marginHorizontal: 12, marginBottom: 8, backgroundColor: '#0d0d0d', borderRadius: 16, padding: 14, borderWidth: 1, borderColor: '#1a1a1a' },

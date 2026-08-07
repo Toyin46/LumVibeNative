@@ -54,7 +54,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
 import Constants from 'expo-constants';
-import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
+//import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
@@ -106,9 +106,9 @@ if (__DEV__ && !LIVEKIT_URL) {
 }
 
 // ── AdMob ─────────────────────────────────────────────────────
-const BANNER_AD_UNIT_ID = __DEV__
-  ? TestIds.BANNER
-  : 'ca-app-pub-8235065812461074/4176727692';
+//const BANNER_AD_UNIT_ID = __DEV__
+ // ? TestIds.BANNER
+ // : 'ca-app-pub-8235065812461074/4176727692';
 
 // ─────────────────────────────────────────────────────────────
 // LIVEKIT PERMISSIONS (camera + mic for both platforms)
@@ -643,19 +643,6 @@ const NativeAdCard = memo(function NativeAdCard({ adIndex, itemHeight = SH }: { 
       <View style={adStyles.watermark}>
         <MaterialCommunityIcons name="shield-check" size={13} color={slot.accentColor} />
         <Text style={[adStyles.watermarkText, { color: slot.accentColor }]}>LumVibe</Text>
-      </View>
-
-      {/* ✅ FIXED: BannerAd is now VISIBLE at the bottom of the card */}
-      {/* Previously hidden with opacity:0 which violates AdMob policy */}
-      <View style={adStyles.bannerAdContainer}>
-        <Text style={adStyles.bannerAdLabel}>Advertisement</Text>
-        <BannerAd
-          unitId={BANNER_AD_UNIT_ID}
-          size={BannerAdSize.BANNER}
-          requestOptions={{ requestNonPersonalizedAdsOnly: false }}
-          onAdLoaded={() => {}}
-          onAdFailedToLoad={() => {}}
-        />
       </View>
     </View>
   );
@@ -1814,7 +1801,7 @@ const FeedPostCard = memo(function FeedPostCard({
 
       {/* ── Animated moving watermark — identical to videos.tsx ── */}
       <Animated.View pointerEvents="none" style={[cardStyles.watermarkAnimated, { transform: [{ translateX: wmX }, { translateY: wmY }], opacity: wmOpacity }]}>
-        <Image source={require('../../assets/images/adaptive-icon.png')} style={cardStyles.watermarkLogo} resizeMode="contain" />
+        <Image source={require('../assets/images/adaptive-icon.png')} style={cardStyles.watermarkLogo} resizeMode="contain" />
         <View>
           <Text style={cardStyles.watermarkText}>LumVibe</Text>
           <Text style={cardStyles.watermarkUsername}>@{post.username}</Text>
