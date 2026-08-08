@@ -107,7 +107,7 @@ if (__DEV__ && !LIVEKIT_URL) {
 
 // ── AdMob ─────────────────────────────────────────────────────
 //const BANNER_AD_UNIT_ID = __DEV__
- // ? TestIds.BANNER
+//  ? TestIds.BANNER
  // : 'ca-app-pub-8235065812461074/4176727692';
 
 // ─────────────────────────────────────────────────────────────
@@ -172,6 +172,9 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
   const [permDenied,      setPermDenied]      = useState(false);
   const [localVideoTrack, setLocalVideoTrack] = useState<any>(null);
   const [remoteVideoTrack,setRemoteVideoTrack]= useState<any>(null);
+  // ✅ NEW: real-time "who's talking" — powers the voice-line indicator on each tile
+  const [isLocalSpeaking,  setIsLocalSpeaking]  = useState(false);
+  const [isRemoteSpeaking, setIsRemoteSpeaking] = useState(false);
   const mountedRef        = useRef(true);
 
   useEffect(() => {
@@ -241,6 +244,16 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
         if (!mountedRef.current) return;
         setCallReady(false);
         setRemoteConnected(false);
+      });
+
+      // ✅ NEW: fires continuously with the list of currently-speaking
+      // participants (by audio level) — this is what drives the live
+      // "voice line" waveform on each participant's video tile.
+      room.on(RoomEvent.ActiveSpeakersChanged, (speakers: any[]) => {
+        if (!mountedRef.current) return;
+        const localSid = room.localParticipant.sid;
+        setIsLocalSpeaking(speakers.some((p: any) => p.sid === localSid));
+        setIsRemoteSpeaking(speakers.some((p: any) => p.sid !== localSid));
       });
 
       // FIX: capture the local camera track as soon as it's published,
@@ -318,6 +331,7 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
   return {
     remoteConnected, callReady, micMuted, camMuted, speakerOn, permDenied,
     localVideoTrack, remoteVideoTrack,
+    isLocalSpeaking, isRemoteSpeaking,
     toggleMic, toggleCam, toggleSpeaker, disconnect,
     // kept for backward compat with PipOverlay prop names
     agoraReady: true,
@@ -559,7 +573,7 @@ interface FloatingReaction {
   id: string; emoji: string; anim: Animated.Value; x: number;
 }
 
-const QUICK_REACTIONS = ['🔥', '😂', '😮', '❤️', '👏', '💀'];
+const QUICK_REACTIONS = ['🔥', '😂', '😮', '❤️', '👏', '💯'];
 
 // ─────────────────────────────────────────────────────────────
 // AVATAR — unified
@@ -1093,18 +1107,57 @@ async function sendChatMessage(conversationId: string, senderId: string, content
 }
 
 // ─────────────────────────────────────────────────────────────
-// PiP OVERLAY (partner) — top-right — FIX 4: uses LiveKit VideoView
+// VOICE LINE — animated waveform shown on a tile while that
+// participant is actively talking (driven by LiveKit's real-time
+// audio level via RoomEvent.ActiveSpeakersChanged, not a fake loop)
+// ─────────────────────────────────────────────────────────────
+function VoiceWave({ active, color }: { active: boolean; color?: string }) {
+  const bars = useRef([0, 1, 2].map(() => new Animated.Value(0.35))).current;
+  const loopsRef = useRef<Animated.CompositeAnimation[]>([]);
+
+  useEffect(() => {
+    loopsRef.current.forEach(l => l.stop());
+    if (active) {
+      loopsRef.current = bars.map((b, i) => Animated.loop(Animated.sequence([
+        Animated.timing(b, { toValue: 1, duration: 240 + i * 70, useNativeDriver: false }),
+        Animated.timing(b, { toValue: 0.35, duration: 240 + i * 70, useNativeDriver: false }),
+      ])));
+      loopsRef.current.forEach(l => l.start());
+    } else {
+      bars.forEach(b => b.setValue(0.35));
+    }
+    return () => loopsRef.current.forEach(l => l.stop());
+  }, [active]);
+
+  if (!active) return null;
+  return (
+    <View style={pipStyles.voiceWave}>
+      {bars.map((b, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            pipStyles.voiceWaveBar,
+            { backgroundColor: color || C.green, height: b.interpolate({ inputRange: [0.35, 1], outputRange: [3, 11] }) },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// PiP OVERLAY (partner) — right side, stacked — FIX 4: uses LiveKit VideoView
 // ─────────────────────────────────────────────────────────────
 const PIP_W = 88; const PIP_H = 118;
 const PIP_OFFSET_TOP = Platform.OS === 'ios' ? 130 : 110;
 
 // FIX 4: PipOverlay now uses LiveKit VideoView for remote participant
-function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMuted, onToggleMic, onToggleCam, callReady }: {
+function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMuted, onToggleMic, onToggleCam, callReady, isSpeaking }: {
   photo?: string; name: string; isActive: boolean;
   remoteVideoTrack: any;
   micMuted: boolean; camMuted: boolean;
   onToggleMic: () => void; onToggleCam: () => void;
-  callReady: boolean;
+  callReady: boolean; isSpeaking?: boolean;
 }) {
   const pulse = useRef(new Animated.Value(1)).current;
   const [showControls, setShowControls] = useState(false);
@@ -1119,7 +1172,7 @@ function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMute
   }, [isActive]);
 
   return (
-    <Animated.View style={[pipStyles.pip, { transform: [{ scale: pulse }] }]}>
+    <Animated.View style={[pipStyles.pip, { transform: [{ scale: pulse }] }, isSpeaking && pipStyles.pipSpeakingRing]}>
       <TouchableOpacity style={pipStyles.pipTouchable} onPress={() => setShowControls(s => !s)} activeOpacity={0.9}>
         {remoteVideoTrack && callReady ? (
           // FIX 4: LiveKit VideoView renders remote participant video
@@ -1134,16 +1187,17 @@ function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMute
         <View style={[pipStyles.pipRing, isActive && pipStyles.pipRingActive]} />
         <View style={pipStyles.pipNameTag}>
           <Text style={pipStyles.pipNameText} numberOfLines={1}>{name.split(' ')[0]}</Text>
+          <VoiceWave active={!!isSpeaking} />
         </View>
         {isActive && <View style={pipStyles.pipLiveDot} />}
       </TouchableOpacity>
       {showControls && (
         <View style={pipStyles.pipControls}>
           <TouchableOpacity style={pipStyles.pipCtrlBtn} onPress={onToggleMic}>
-            <Ionicons name={micMuted ? 'mic-off' : 'mic-outline'} size={13} color={micMuted ? C.red : C.green} />
+            <Feather name={micMuted ? 'mic-off' : 'mic'} size={13} color={micMuted ? C.red : C.green} />
           </TouchableOpacity>
           <TouchableOpacity style={pipStyles.pipCtrlBtn} onPress={onToggleCam}>
-            <Ionicons name={camMuted ? 'videocam-off' : 'videocam-outline'} size={13} color={camMuted ? C.red : C.green} />
+            <Feather name={camMuted ? 'video-off' : 'video'} size={13} color={camMuted ? C.red : C.green} />
           </TouchableOpacity>
         </View>
       )}
@@ -1152,14 +1206,14 @@ function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMute
 }
 
 // FIX 4: LocalPreview now uses LiveKit VideoView for local camera
-function LocalPreview({ localVideoTrack, photo, yourName, permDenied }: {
-  localVideoTrack: any; photo?: string; yourName: string; permDenied?: boolean;
+function LocalPreview({ localVideoTrack, photo, yourName, permDenied, isSpeaking }: {
+  localVideoTrack: any; photo?: string; yourName: string; permDenied?: boolean; isSpeaking?: boolean;
 }) {
   return (
-    <View style={pipStyles.localPip}>
+    <View style={[pipStyles.localPip, isSpeaking && pipStyles.pipSpeakingRing]}>
       {permDenied ? (
         <View style={[pipStyles.pipPlaceholder, { backgroundColor: '#1a0a0a' }]}>
-          <Ionicons name="videocam-off" size={22} color={C.red} />
+          <Feather name="video-off" size={20} color={C.red} />
           <Text style={{ color: C.red, fontSize: 7, marginTop: 3, textAlign: 'center' }}>Allow{'\n'}Camera</Text>
         </View>
       ) : localVideoTrack ? (
@@ -1171,7 +1225,10 @@ function LocalPreview({ localVideoTrack, photo, yourName, permDenied }: {
       ) : (
         <Avatar uri={photo} name={yourName} size={PIP_W} />
       )}
-      <View style={pipStyles.pipNameTag}><Text style={pipStyles.pipNameText}>You</Text></View>
+      <View style={pipStyles.pipNameTag}>
+        <Text style={pipStyles.pipNameText}>You</Text>
+        <VoiceWave active={!!isSpeaking} />
+      </View>
     </View>
   );
 }
@@ -1187,16 +1244,16 @@ function CallControls({ micMuted, camMuted, speakerOn, onToggleMic, onToggleCam,
   return (
     <View style={callCtrlStyles.bar}>
       <TouchableOpacity style={[callCtrlStyles.btn, micMuted && callCtrlStyles.btnMuted]} onPress={onToggleMic}>
-        <Ionicons name={micMuted ? 'mic-off' : 'mic-outline'} size={18} color={C.white} />
+        <Feather name={micMuted ? 'mic-off' : 'mic'} size={18} color={C.white} />
       </TouchableOpacity>
       <TouchableOpacity style={[callCtrlStyles.btn, camMuted && callCtrlStyles.btnMuted]} onPress={onToggleCam}>
-        <Ionicons name={camMuted ? 'videocam-off' : 'videocam-outline'} size={18} color={C.white} />
+        <Feather name={camMuted ? 'video-off' : 'video'} size={18} color={C.white} />
       </TouchableOpacity>
       <TouchableOpacity style={[callCtrlStyles.btn, !speakerOn && callCtrlStyles.btnMuted]} onPress={onToggleSpeaker}>
-        <Ionicons name={speakerOn ? 'volume-high-outline' : 'volume-mute-outline'} size={18} color={C.white} />
+        <Feather name={speakerOn ? 'volume-2' : 'volume-x'} size={18} color={C.white} />
       </TouchableOpacity>
       <TouchableOpacity style={callCtrlStyles.endBtn} onPress={onEndCall}>
-        <Ionicons name="call" size={18} color={C.white} />
+        <Feather name="phone-off" size={18} color={C.white} />
       </TouchableOpacity>
     </View>
   );
@@ -1885,14 +1942,14 @@ const FeedPostCard = memo(function FeedPostCard({
           <Text style={cardStyles.actionCount}>{fmtCount(post.comments_count)}</Text>
         </TouchableOpacity>
 
+        <TouchableOpacity style={cardStyles.actionBtn} onPress={() => onShare(post)}>
+          <Feather name="share" size={24} color={C.white} />
+          <Text style={cardStyles.actionCount}>Share</Text>
+        </TouchableOpacity>
+
         <TouchableOpacity style={cardStyles.actionBtn} onPress={() => onGift(post)}>
           <Ionicons name="gift-outline" size={28} color={C.gold} />
           <Text style={[cardStyles.actionCount, { color: C.gold }]}>{post.coins_received > 0 ? fmtCount(post.coins_received) : 'Gift'}</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={cardStyles.actionBtn} onPress={() => onShare(post)}>
-          <Ionicons name="share-outline" size={26} color={C.white} />
-          <Text style={cardStyles.actionCount}>Share</Text>
         </TouchableOpacity>
 
         {/* ── Mute button (video only) ── */}
@@ -2283,6 +2340,17 @@ export default function CowatchScreen() {
   const navigation = useNavigation<any>();
   const { user, userProfile, loadProfile } = useAuthStore();
 
+  // FIX: hide the parent bottom tab bar while Co-Watch is open — this is a
+  // full-screen immersive view, but without this the tab bar (Home/Explore/
+  // Messages/etc.) still renders underneath and overlaps the bottom controls.
+  useEffect(() => {
+    const parent = navigation.getParent();
+    parent?.setOptions({ tabBarStyle: { display: 'none' } });
+    return () => {
+      parent?.setOptions({ tabBarStyle: undefined });
+    };
+  }, [navigation]);
+
   // FIX 16: Offline detection
   const [isOffline, setIsOffline] = useState(false);
   useEffect(() => {
@@ -2312,7 +2380,7 @@ export default function CowatchScreen() {
   const displayName = userProfile?.display_name || userProfile?.username || 'LumVibe User';
   const {
     remoteConnected, callReady, micMuted, camMuted, speakerOn, permDenied,
-    localVideoTrack, remoteVideoTrack,
+    localVideoTrack, remoteVideoTrack, isLocalSpeaking, isRemoteSpeaking,
     toggleMic, toggleCam, toggleSpeaker, disconnect: disconnectLiveKit,
     agoraReady, engineJoined, remoteUid,  // backward compat aliases
   } = useLiveKitCall(livekitChannel, user?.id || '', displayName);
@@ -2348,6 +2416,14 @@ export default function CowatchScreen() {
   const [isSendingChat,     setIsSendingChat]     = useState(false);
   const [otherUserActive,   setOtherUserActive]   = useState(false);
   const [chatExpanded,      setChatExpanded]      = useState(false);
+  // ✅ NEW: chat sheet tabs — Queue lives in its own tab so it never
+  // covers the chat thread; overflow menu + participants sheet for the
+  // secondary controls that moved out of the top bar to match the design.
+  const [chatTab,            setChatTab]            = useState<'chat' | 'reactions' | 'queue'>('chat');
+  const [menuVisible,        setMenuVisible]        = useState(false);
+  const [participantsVisible,setParticipantsVisible]= useState(false);
+  const [repeatAll,          setRepeatAll]          = useState(true);
+  const [shuffleOn,          setShuffleOn]          = useState(false);
   const [isSynced,          setIsSynced]          = useState(false);
   // NEW: null = free-for-all (anyone can scroll/drive). A user id = only
   // that person's scroll/play actions get synced; the other is a follower.
@@ -2874,6 +2950,41 @@ export default function CowatchScreen() {
     navigation.goBack();
   }, [disconnectLiveKit, cleanupCowatchState, navigation]);
 
+  // ✅ NEW: Queue tab "Next" — advances to the next post in the shared feed.
+  // Only the host's tap actually drives the room (same rule scrolling already
+  // follows); when Shuffle is on it jumps to a random remaining post instead.
+  const handleQueueNext = useCallback(() => {
+    if (!feedItems.length) return;
+    let nextIndex: number;
+    if (shuffleOn && feedItems.length > 1) {
+      do { nextIndex = Math.floor(Math.random() * feedItems.length); } while (nextIndex === currentIndex);
+    } else {
+      nextIndex = currentIndex + 1 >= feedItems.length ? (repeatAll ? 0 : currentIndex) : currentIndex + 1;
+    }
+    if (nextIndex === currentIndex) return;
+    globalAudioManager.stopCurrent();
+    setCurrentIndex(nextIndex);
+    feedRef.current?.scrollToIndex({ index: nextIndex, animated: true });
+    if (session) {
+      isSyncingRef.current = true;
+      syncFeedIndex(session.id, nextIndex, syncedIsPlaying, 0).finally(() => {
+        setTimeout(() => { isSyncingRef.current = false; }, 600);
+      });
+    }
+  }, [feedItems.length, currentIndex, shuffleOn, repeatAll, session, syncedIsPlaying]);
+
+  // ✅ NEW: Queue tab Sync/Pause toggle — reuses the exact same host-only
+  // sync path the video card's own play/pause button already uses.
+  const handleQueueSyncToggle = useCallback(() => {
+    if (!session) return;
+    const nextPlaying = !syncedIsPlaying;
+    setSyncedIsPlaying(nextPlaying);
+    isSyncingRef.current = true;
+    syncFeedIndex(session.id, currentIndex, nextPlaying, 0).finally(() => {
+      setTimeout(() => { isSyncingRef.current = false; }, 600);
+    });
+  }, [session, syncedIsPlaying, currentIndex]);
+
   // ── AI Match screens (shown before isLoading resolves) ──
   if (isAiMatch === 'true' && aiMatchStatus === 'searching') {
     return (
@@ -3077,7 +3188,7 @@ export default function CowatchScreen() {
 
         <FloatingReactionLayer reactions={floatingReactions} />
 
-        {/* Partner PiP — top right — FIX 4: LiveKit VideoView */}
+        {/* Partner tile — right side, stacked — FIX 4: LiveKit VideoView */}
         <PipOverlay
           photo={otherPhoto || undefined}
           name={otherName || 'Partner'}
@@ -3088,77 +3199,131 @@ export default function CowatchScreen() {
           onToggleMic={toggleMic}
           onToggleCam={toggleCam}
           callReady={callReady}
+          isSpeaking={isRemoteSpeaking}
         />
 
-        {/* Your PiP — top left — FIX 4: LiveKit local video */}
+        {/* Your tile — right side, under partner — FIX 4: LiveKit local video */}
         <LocalPreview
           localVideoTrack={localVideoTrack}
           photo={userProfile?.avatar_url}
           yourName={userProfile?.display_name || userProfile?.username || 'You'}
           permDenied={permDenied}
+          isSpeaking={isLocalSpeaking}
         />
 
         {/* TOP BAR */}
         <View style={[styles.topBarWrap, { pointerEvents: 'box-none' } as any]}>
           <View style={styles.topBarRow1}>
             <TouchableOpacity style={styles.backBtn} onPress={endCowatch}>
-              <Ionicons name="chevron-back" size={20} color={C.white} />
+              <Feather name="chevron-down" size={20} color={C.white} />
             </TouchableOpacity>
-            <View style={{ flex: 1, marginLeft: 8 }}>
-              <Text style={styles.topBarTitle}>Watch Together</Text>
-              <Text style={styles.topBarSub}>with {isAiMatch === 'true' && aiMatchPartnerName ? aiMatchPartnerName : otherName}</Text>
-            </View>
-            {isSynced && (
-              <View style={styles.syncBadge}>
-                <Ionicons name="flash" size={10} color={C.green} />
-                <Text style={styles.syncBadgeText}>Synced</Text>
+            <View style={{ flex: 1, marginLeft: 8, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={styles.topBarTitle}>CoWatch</Text>
+                  <Feather name="users" size={13} color={C.green} />
+                </View>
+                <Text style={styles.topBarSub}>Watch, chat and vibe together</Text>
               </View>
-            )}
-            <View style={styles.liveBadge}>
-              <Ionicons name="radio-outline" size={9} color={C.white} />
-              <Text style={styles.liveBadgeText}>LIVE</Text>
             </View>
+            <TouchableOpacity style={styles.iconPillBtn} onPress={() => setParticipantsVisible(true)}>
+              <Feather name="users" size={15} color={C.white} />
+              <Text style={styles.iconPillBtnText}>{remoteConnected ? 2 : 1}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.iconPillBtnSquare} onPress={() => setMenuVisible(true)}>
+              <Feather name="more-vertical" size={18} color={C.white} />
+            </TouchableOpacity>
           </View>
           <View style={styles.topBarRow2}>
-            <FeedSelector activeFeed={feedType} onSelect={handleFeedTypeChange} />
-            <TouchableOpacity
-              style={[
-                styles.hostPill,
-                hostId ? (amIHost ? styles.hostPillMine : styles.hostPillTheirs) : styles.hostPillOff,
-              ]}
-              onPress={toggleHostMode}
-            >
-              <Ionicons
-                name={hostId ? 'lock-closed' : 'lock-open-outline'}
-                size={11}
-                color={hostId ? (amIHost ? '#000' : C.muted) : C.muted}
-              />
-              <Text style={[
-                styles.hostPillText,
-                hostId && amIHost && { color: '#000' },
-              ]}>
-                {!hostId ? 'Both can drive' : amIHost ? 'You\'re hosting' : `${otherName || 'Partner'} is hosting`}
-              </Text>
-            </TouchableOpacity>
-            <View style={styles.postCounter}>
-              <Text style={styles.postCounterText}>
-                {feedItems.length > 0 ? `${currentIndex + 1} / ${feedItems.length}` : '--'}
-              </Text>
+            <View style={styles.watchingTogetherPill}>
+              <View style={styles.watchingDot} />
+              <Text style={styles.watchingTogetherText}>Watching together</Text>
             </View>
+            <View style={styles.participantsCountPill}>
+              <Feather name="users" size={11} color={C.white} />
+              <Text style={styles.participantsCountText}>{remoteConnected ? 2 : 1} / 10</Text>
+            </View>
+            <View style={{ flex: 1 }} />
+            <TouchableOpacity style={styles.muteAllBtn} onPress={toggleSpeaker}>
+              <Feather name={speakerOn ? 'volume-2' : 'volume-x'} size={16} color={C.white} />
+            </TouchableOpacity>
           </View>
         </View>
-
-        {/* Call controls — left side */}
-        <CallControls micMuted={micMuted} camMuted={camMuted} speakerOn={speakerOn} onToggleMic={toggleMic} onToggleCam={toggleCam} onToggleSpeaker={toggleSpeaker} onEndCall={endCowatch} />
       </View>
 
       {/* Follower lock notice — shown briefly so the non-host knows why their scroll snapped back */}
       {partnerIsHosting && (
         <View style={styles.followerNotice} pointerEvents="none">
-          <Ionicons name="lock-closed" size={11} color={C.white} />
+          <Feather name="lock" size={11} color={C.white} />
           <Text style={styles.followerNoticeText}>{otherName || 'Your partner'} is driving</Text>
         </View>
       )}
+
+      {/* ── OVERFLOW MENU — feed switcher, host control, live status (moved off the main bar to match the reference layout) ── */}
+      <Modal visible={menuVisible} transparent animationType="fade" onRequestClose={() => setMenuVisible(false)}>
+        <TouchableOpacity style={sheetStyles.backdrop} activeOpacity={1} onPress={() => setMenuVisible(false)}>
+          <View style={[sheetStyles.sheet, { padding: 16, paddingTop: 10 }]}>
+            <View style={sheetStyles.handle} />
+            <Text style={[sheetStyles.sheetTitle, { marginBottom: 14 }]}>Room Options</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+              <Text style={{ color: C.muted, fontSize: 12, fontWeight: '600' }}>Feed</Text>
+              <FeedSelector activeFeed={feedType} onSelect={handleFeedTypeChange} />
+            </View>
+            <TouchableOpacity
+              style={[
+                styles.hostPill,
+                { alignSelf: 'stretch', justifyContent: 'center', marginBottom: 12 },
+                hostId ? (amIHost ? styles.hostPillMine : styles.hostPillTheirs) : styles.hostPillOff,
+              ]}
+              onPress={toggleHostMode}
+            >
+              <Feather name={hostId ? 'lock' : 'unlock'} size={13} color={hostId ? (amIHost ? '#000' : C.muted) : C.muted} />
+              <Text style={[styles.hostPillText, hostId && amIHost && { color: '#000' }]}>
+                {!hostId ? 'Both can drive' : amIHost ? "You're hosting" : `${otherName || 'Partner'} is hosting`}
+              </Text>
+            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Feather name="radio" size={13} color={C.red} />
+                <Text style={{ color: C.white, fontSize: 13, fontWeight: '600' }}>Live status</Text>
+              </View>
+              <View style={styles.liveBadge}>
+                <Feather name="radio" size={9} color={C.white} />
+                <Text style={styles.liveBadgeText}>LIVE</Text>
+              </View>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 }}>
+              <Text style={{ color: C.muted, fontSize: 12, fontWeight: '600' }}>Post progress</Text>
+              <View style={styles.postCounter}>
+                <Text style={styles.postCounterText}>{feedItems.length > 0 ? `${currentIndex + 1} / ${feedItems.length}` : '--'}</Text>
+              </View>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── PARTICIPANTS SHEET ── */}
+      <Modal visible={participantsVisible} transparent animationType="fade" onRequestClose={() => setParticipantsVisible(false)}>
+        <TouchableOpacity style={sheetStyles.backdrop} activeOpacity={1} onPress={() => setParticipantsVisible(false)}>
+          <View style={[sheetStyles.sheet, { padding: 16, paddingTop: 10 }]}>
+            <View style={sheetStyles.handle} />
+            <Text style={[sheetStyles.sheetTitle, { marginBottom: 14 }]}>Participants ({remoteConnected ? 2 : 1})</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 }}>
+              <Avatar uri={userProfile?.avatar_url} name={userProfile?.display_name || 'You'} size={40} />
+              <Text style={{ flex: 1, color: C.white, fontSize: 14, fontWeight: '600' }}>You</Text>
+              <Feather name={micMuted ? 'mic-off' : 'mic'} size={16} color={micMuted ? C.red : C.green} />
+              <Feather name={camMuted ? 'video-off' : 'video'} size={16} color={camMuted ? C.red : C.green} style={{ marginLeft: 10 }} />
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 }}>
+              <Avatar uri={otherPhoto} name={otherName || 'Partner'} size={40} />
+              <Text style={{ flex: 1, color: C.white, fontSize: 14, fontWeight: '600' }}>{otherName || 'Partner'}</Text>
+              {remoteConnected
+                ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}><View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.green }} /><Text style={{ color: C.green, fontSize: 11, fontWeight: '600' }}>Connected</Text></View>
+                : <Text style={{ color: C.muted, fontSize: 11 }}>Connecting…</Text>}
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* ── BOTTOM PANEL ── */}
       <KeyboardAvoidingView style={styles.bottomPanel} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -3170,65 +3335,207 @@ export default function CowatchScreen() {
             </TouchableOpacity>
           ))}
           <TouchableOpacity style={styles.chatToggleBtn} onPress={() => setChatExpanded(e => !e)}>
-            <Ionicons name={chatExpanded ? 'chevron-down' : 'chevron-up'} size={16} color={C.muted} />
+            <Feather name={chatExpanded ? 'chevron-down' : 'chevron-up'} size={16} color={C.muted} />
           </TouchableOpacity>
         </View>
 
         {chatExpanded && (
-          <FlatList
-            ref={chatFlatRef}
-            data={messages}
-            keyExtractor={m => m.id}
-            style={styles.chatArea}
-            contentContainerStyle={{ paddingHorizontal: 14, paddingVertical: 8, gap: 8 }}
-            showsVerticalScrollIndicator={false}
-            onContentSizeChange={() => chatFlatRef.current?.scrollToEnd({ animated: true })}
-            renderItem={({ item }) => {
-              if (item.user_id === 'system') {
-                return (
-                  <View style={styles.systemMsg}>
-                    <Ionicons name="radio-outline" size={11} color={C.green} />
-                    <Text style={styles.systemMsgText}>{item.content}</Text>
+          <View style={styles.chatSheetWrap}>
+            <View style={styles.chatSheetHeader}>
+              <Feather name="message-circle" size={15} color={C.white} />
+              <Text style={styles.chatSheetTitle}>CoWatch Chat</Text>
+              <TouchableOpacity onPress={() => setChatExpanded(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Feather name="x" size={18} color={C.muted} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.chatTabsRow}>
+              {(['chat', 'reactions', 'queue'] as const).map(tab => (
+                <TouchableOpacity key={tab} style={styles.chatTabBtn} onPress={() => setChatTab(tab)}>
+                  <Text style={[styles.chatTabText, chatTab === tab && styles.chatTabTextActive]}>
+                    {tab === 'chat' ? 'Chat' : tab === 'reactions' ? 'Reactions' : 'Queue'}
+                  </Text>
+                  {chatTab === tab && <View style={styles.chatTabIndicator} />}
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {chatTab === 'chat' && (
+              <FlatList
+                ref={chatFlatRef}
+                data={messages}
+                keyExtractor={m => m.id}
+                style={styles.chatArea}
+                contentContainerStyle={{ paddingHorizontal: 14, paddingVertical: 8, gap: 8 }}
+                showsVerticalScrollIndicator={false}
+                onContentSizeChange={() => chatFlatRef.current?.scrollToEnd({ animated: true })}
+                renderItem={({ item }) => {
+                  if (item.user_id === 'system') {
+                    return (
+                      <View style={styles.systemMsg}>
+                        <Feather name="radio" size={11} color={C.green} />
+                        <Text style={styles.systemMsgText}>{item.content}</Text>
+                      </View>
+                    );
+                  }
+                  if (QUICK_REACTIONS.includes(item.content)) {
+                    return <View style={[styles.cwMsg, item.isMe && styles.cwMsgMe]}><Text style={{ fontSize: 26 }}>{item.content}</Text></View>;
+                  }
+                  return (
+                    <View style={[styles.cwMsg, item.isMe && styles.cwMsgMe]}>
+                      {!item.isMe && <Avatar uri={item.avatar_url} name={item.display_name} size={26} />}
+                      <View style={[styles.cwBubble, item.isMe && styles.cwBubbleMe]}>
+                        {!item.isMe && <Text style={styles.cwSenderName}>{item.display_name}</Text>}
+                        <Text style={[styles.cwBubbleText, item.isMe && { color: '#000' }]}>{item.content}</Text>
+                      </View>
+                    </View>
+                  );
+                }}
+                ListEmptyComponent={
+                  <View style={{ alignItems: 'center', paddingTop: 8 }}>
+                    <Text style={{ color: C.muted, fontSize: 12 }}>React while watching 🔥</Text>
                   </View>
-                );
-              }
-              if (QUICK_REACTIONS.includes(item.content)) {
-                return <View style={[styles.cwMsg, item.isMe && styles.cwMsgMe]}><Text style={{ fontSize: 26 }}>{item.content}</Text></View>;
-              }
-              return (
-                <View style={[styles.cwMsg, item.isMe && styles.cwMsgMe]}>
-                  {!item.isMe && <Avatar uri={item.avatar_url} name={item.display_name} size={26} />}
-                  <View style={[styles.cwBubble, item.isMe && styles.cwBubbleMe]}>
-                    {!item.isMe && <Text style={styles.cwSenderName}>{item.display_name}</Text>}
-                    <Text style={[styles.cwBubbleText, item.isMe && { color: '#000' }]}>{item.content}</Text>
-                  </View>
-                </View>
-              );
-            }}
-            ListEmptyComponent={
-              <View style={{ alignItems: 'center', paddingTop: 8 }}>
-                <Text style={{ color: C.muted, fontSize: 12 }}>React while watching 🔥</Text>
+                }
+              />
+            )}
+
+            {chatTab === 'reactions' && (
+              <View style={styles.reactionsGrid}>
+                {QUICK_REACTIONS.map(emoji => (
+                  <TouchableOpacity key={emoji} style={styles.reactionsGridBtn} onPress={() => sendReaction(emoji)}>
+                    <Text style={{ fontSize: 30 }}>{emoji}</Text>
+                  </TouchableOpacity>
+                ))}
               </View>
-            }
-          />
+            )}
+
+            {chatTab === 'queue' && (
+              <ScrollView style={styles.chatArea} contentContainerStyle={{ padding: 14 }} showsVerticalScrollIndicator={false}>
+                <View style={styles.queueHeaderRow}>
+                  <Text style={styles.queueHeaderTitle}>Now Playing</Text>
+                  <Text style={styles.queueHeaderSub}>{Math.max(0, feedItems.length - currentIndex - 1)} in queue</Text>
+                </View>
+                {currentPost && !currentPostIsAd && (
+                  <View style={styles.queueNowPlayingRow}>
+                    <Text style={styles.queueIndex}>{currentIndex + 1}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.queueTrackTitle} numberOfLines={1}>{(currentPost as FeedPost).caption || 'Untitled post'}</Text>
+                      <Text style={styles.queueTrackArtist}>{(currentPost as FeedPost).display_name}</Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.queuePlayBtn}
+                      disabled={!amIHost}
+                      onPress={() => amIHost && handleQueueSyncToggle()}
+                    >
+                      <Feather name={syncedIsPlaying ? 'pause' : 'play'} size={16} color={amIHost ? '#000' : C.muted} />
+                    </TouchableOpacity>
+                  </View>
+                )}
+                {feedItems.slice(currentIndex + 1, currentIndex + 6).map((item, i) => {
+                  if (isAd(item)) return null;
+                  const p = item as FeedPost;
+                  return (
+                    <View key={p.id} style={styles.queueUpNextRow}>
+                      <Text style={styles.queueIndexMuted}>{currentIndex + 2 + i}</Text>
+                      {p.avatar_url
+                        ? <Image source={{ uri: p.avatar_url }} style={styles.queueThumb} />
+                        : <View style={[styles.queueThumb, { backgroundColor: C.card2, alignItems: 'center', justifyContent: 'center' }]}><Feather name="film" size={14} color={C.muted} /></View>}
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.queueTrackTitleMuted} numberOfLines={1}>{p.caption || 'Untitled post'}</Text>
+                        <Text style={styles.queueTrackArtistMuted}>{p.display_name}</Text>
+                      </View>
+                      <Feather name="menu" size={15} color={C.muted} />
+                    </View>
+                  );
+                })}
+
+                <View style={styles.queueControlsGrid}>
+                  <TouchableOpacity
+                    style={styles.queueCtrlBtn}
+                    disabled={!amIHost}
+                    onPress={() => amIHost && handleQueueSyncToggle()}
+                  >
+                    <Feather name="refresh-cw" size={17} color={amIHost ? C.green : C.muted} />
+                    <Text style={[styles.queueCtrlLabel, amIHost && { color: C.green }]}>Sync{'\n'}{syncedIsPlaying ? 'On' : 'Off'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.queueCtrlBtn}
+                    disabled={!amIHost}
+                    onPress={() => amIHost && handleQueueSyncToggle()}
+                  >
+                    <Feather name={syncedIsPlaying ? 'pause' : 'play'} size={17} color={C.white} />
+                    <Text style={styles.queueCtrlLabel}>{syncedIsPlaying ? 'Pause' : 'Play'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.queueCtrlBtn}
+                    disabled={!amIHost}
+                    onPress={() => amIHost && handleQueueNext()}
+                  >
+                    <Feather name="skip-forward" size={17} color={C.white} />
+                    <Text style={styles.queueCtrlLabel}>Next</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={styles.queueCtrlBtn} onPress={() => setRepeatAll(v => !v)}>
+                    <Feather name="repeat" size={17} color={repeatAll ? C.green : C.muted} />
+                    <Text style={[styles.queueCtrlLabel, repeatAll && { color: C.green }]}>Repeat{'\n'}{repeatAll ? 'All' : 'Off'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.queueCtrlBtn} onPress={() => setShuffleOn(v => !v)}>
+                    <Feather name="shuffle" size={17} color={shuffleOn ? C.green : C.muted} />
+                    <Text style={[styles.queueCtrlLabel, shuffleOn && { color: C.green }]}>Shuffle{'\n'}{shuffleOn ? 'On' : 'Off'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.queueCtrlBtn} onPress={toggleHostMode}>
+                    <Feather name={hostId ? 'lock' : 'unlock'} size={17} color={hostId && amIHost ? C.green : C.muted} />
+                    <Text style={[styles.queueCtrlLabel, hostId && amIHost && { color: C.green }]}>Lock{'\n'}Room</Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            )}
+          </View>
         )}
 
-        <View style={styles.inputRow}>
-          <View style={styles.inputWrap}>
-            <TextInput
-              style={styles.inputField}
-              placeholder="Say something…"
-              placeholderTextColor={C.muted2}
-              value={inputText} onChangeText={setInputText}
-              onSubmitEditing={sendLiveMessage}
-              returnKeyType="send" editable={!isSendingChat}
-            />
+        {chatExpanded && chatTab === 'chat' && (
+          <View style={styles.inputRow}>
+            <View style={styles.inputWrap}>
+              <TextInput
+                style={styles.inputField}
+                placeholder="Type a message…"
+                placeholderTextColor={C.muted2}
+                value={inputText} onChangeText={setInputText}
+                onSubmitEditing={sendLiveMessage}
+                returnKeyType="send" editable={!isSendingChat}
+              />
+            </View>
+            <TouchableOpacity
+              style={[styles.sendBtn, (!inputText.trim() || isSendingChat) && { opacity: 0.4 }]}
+              onPress={sendLiveMessage} disabled={!inputText.trim() || isSendingChat}
+            >
+              {isSendingChat ? <ActivityIndicator size="small" color="#000" /> : <Feather name="send" size={16} color="#000" />}
+            </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            style={[styles.sendBtn, (!inputText.trim() || isSendingChat) && { opacity: 0.4 }]}
-            onPress={sendLiveMessage} disabled={!inputText.trim() || isSendingChat}
-          >
-            {isSendingChat ? <ActivityIndicator size="small" color="#000" /> : <Ionicons name="send" size={16} color="#000" />}
+        )}
+
+        {/* ── BOTTOM CALL BAR — Chat / Participants / Leave Room / Mic / Camera ── */}
+        <View style={styles.callBarRow}>
+          <TouchableOpacity style={styles.callBarBtn} onPress={() => setChatExpanded(e => !e)}>
+            <Feather name="message-circle" size={19} color={chatExpanded ? C.green : C.white} />
+            <Text style={[styles.callBarLabel, chatExpanded && { color: C.green }]}>Chat</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.callBarBtn} onPress={() => setParticipantsVisible(true)}>
+            <Feather name="users" size={19} color={C.white} />
+            <Text style={styles.callBarLabel}>Participants</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.callBarBtn} onPress={endCowatch}>
+            <View style={styles.callBarLeaveBtn}>
+              <Feather name="phone-off" size={20} color={C.white} />
+            </View>
+            <Text style={[styles.callBarLabel, { color: C.red }]}>Leave Room</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.callBarBtn} onPress={toggleMic}>
+            <Feather name={micMuted ? 'mic-off' : 'mic'} size={19} color={micMuted ? C.red : C.white} />
+            <Text style={[styles.callBarLabel, micMuted && { color: C.red }]}>Mic</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.callBarBtn} onPress={toggleCam}>
+            <Feather name={camMuted ? 'video-off' : 'video'} size={19} color={camMuted ? C.red : C.white} />
+            <Text style={[styles.callBarLabel, camMuted && { color: C.red }]}>Camera</Text>
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -3236,6 +3543,7 @@ export default function CowatchScreen() {
       <CommentSheet visible={!!commentPost} postId={commentPost?.id || ''} userId={user?.id || ''} onClose={() => setCommentPost(null)} />
       <GiftSheet visible={!!giftPost} post={giftPost} userId={user?.id || ''} userProfile={userProfile} onClose={() => setGiftPost(null)} onGiftSent={handleGiftSent} />
     </SafeAreaView>
+
   );
 }
 
@@ -3254,17 +3562,25 @@ const pipStyles = StyleSheet.create({
   pipPlaceholder: { width: PIP_W, height: PIP_H, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
   pipRing: { position: 'absolute', inset: 0, borderRadius: 14, borderWidth: 2, borderColor: 'transparent', zIndex: 2 },
   pipRingActive: { borderColor: C.green },
+  // ✅ NEW: bright ring while this participant is actively talking
+  pipSpeakingRing: { borderWidth: 2.5, borderColor: C.green, borderRadius: 16 },
   pipNameTag: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,
     backgroundColor: 'rgba(0,0,0,0.65)', paddingVertical: 3, paddingHorizontal: 6,
     borderBottomLeftRadius: 14, borderBottomRightRadius: 14, zIndex: 3,
   },
   pipNameText: { fontSize: 9.5, color: C.white, fontWeight: '600', textAlign: 'center' },
+  // ✅ NEW: the animated voice-line bars next to a speaking participant's name
+  voiceWave: { flexDirection: 'row', alignItems: 'flex-end', gap: 1.5, height: 11 },
+  voiceWaveBar: { width: 2.5, borderRadius: 1.25 },
   pipLiveDot: { position: 'absolute', top: 6, right: 6, width: 8, height: 8, borderRadius: 4, backgroundColor: C.green, zIndex: 4, borderWidth: 1.5, borderColor: '#000' },
   pipControls: { position: 'absolute', top: -52, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 8, zIndex: 25 },
   pipCtrlBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: 'rgba(0,0,0,0.85)', borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  // ✅ CHANGED: local tile now stacks directly under the partner tile, right side —
+  // matches the reference design's vertical "You / Partner" column layout
   localPip: {
-    position: 'absolute', top: PIP_OFFSET_TOP, left: 12,
+    position: 'absolute', top: PIP_OFFSET_TOP + PIP_H + 10, right: 12,
     width: PIP_W, height: PIP_H, borderRadius: 14, overflow: 'hidden', zIndex: 19,
     borderWidth: 2, borderColor: C.green,
     shadowColor: '#000', shadowOpacity: 0.8, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 13,
@@ -3466,4 +3782,54 @@ const styles = StyleSheet.create({
   inputWrap: { flex: 1, backgroundColor: C.card, borderWidth: 1.5, borderColor: C.border, borderRadius: 22, paddingHorizontal: 14 },
   inputField: { color: C.white, fontSize: 14, paddingVertical: 10 },
   sendBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center' },
+
+  // ✅ NEW: top bar right-side pills (participants count + overflow menu)
+  iconPillBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 16, paddingHorizontal: 9, paddingVertical: 6, marginLeft: 6 },
+  iconPillBtnText: { color: C.white, fontSize: 12, fontWeight: '700' },
+  iconPillBtnSquare: { width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center', marginLeft: 6 },
+  // ✅ NEW: "Watching together" row (row 2 of top bar)
+  watchingTogetherPill: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  watchingDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.green },
+  watchingTogetherText: { color: C.white, fontSize: 12, fontWeight: '600' },
+  participantsCountPill: { flexDirection: 'row', alignItems: 'center', gap: 5, marginLeft: 12 },
+  participantsCountText: { color: 'rgba(255,255,255,0.8)', fontSize: 11.5, fontWeight: '600' },
+  muteAllBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: 'rgba(255,255,255,0.1)', alignItems: 'center', justifyContent: 'center' },
+
+  // ✅ NEW: tabbed CoWatch Chat sheet (Chat / Reactions / Queue)
+  chatSheetWrap: { maxHeight: SH * 0.42 },
+  chatSheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4 },
+  chatSheetTitle: { flex: 1, color: C.white, fontSize: 14, fontWeight: '800' },
+  chatTabsRow: { flexDirection: 'row', gap: 20, paddingHorizontal: 14, paddingTop: 8, borderBottomWidth: 1, borderBottomColor: C.border },
+  chatTabBtn: { alignItems: 'center', paddingBottom: 8 },
+  chatTabText: { color: C.muted, fontSize: 12.5, fontWeight: '600' },
+  chatTabTextActive: { color: C.green, fontWeight: '800' },
+  chatTabIndicator: { marginTop: 6, width: 18, height: 2, borderRadius: 1, backgroundColor: C.green },
+
+  // ✅ NEW: Reactions tab — bigger emoji grid, same sendReaction handler
+  reactionsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, padding: 16 },
+  reactionsGridBtn: { width: (SW - 32 - 24) / 4, aspectRatio: 1, backgroundColor: C.card2, borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.border },
+
+  // ✅ NEW: Queue tab — Now Playing / Up Next / transport controls
+  queueHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  queueHeaderTitle: { color: C.white, fontSize: 14, fontWeight: '800' },
+  queueHeaderSub: { color: C.muted, fontSize: 11.5 },
+  queueNowPlayingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10, borderRadius: 12, borderWidth: 1.5, borderColor: C.green, backgroundColor: C.greenBg, marginBottom: 10 },
+  queueIndex: { color: C.green, fontSize: 13, fontWeight: '800', width: 16, textAlign: 'center' },
+  queueTrackTitle: { color: C.white, fontSize: 13, fontWeight: '700' },
+  queueTrackArtist: { color: C.muted, fontSize: 11.5, marginTop: 2 },
+  queuePlayBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center' },
+  queueUpNextRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  queueIndexMuted: { color: C.muted, fontSize: 12, width: 16, textAlign: 'center' },
+  queueThumb: { width: 36, height: 36, borderRadius: 8 },
+  queueTrackTitleMuted: { color: C.white, fontSize: 12.5, fontWeight: '600' },
+  queueTrackArtistMuted: { color: C.muted, fontSize: 11, marginTop: 1 },
+  queueControlsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14 },
+  queueCtrlBtn: { width: (SW - 32 - 16) / 3, backgroundColor: C.card2, borderRadius: 12, borderWidth: 1, borderColor: C.border, paddingVertical: 10, alignItems: 'center', gap: 4 },
+  queueCtrlLabel: { color: C.muted, fontSize: 10.5, fontWeight: '600', textAlign: 'center', lineHeight: 13 },
+
+  // ✅ NEW: labeled bottom call bar — Chat / Participants / Leave Room / Mic / Camera
+  callBarRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-around', paddingVertical: 12, paddingHorizontal: 8, borderTopWidth: 1, borderTopColor: C.border, backgroundColor: '#000' },
+  callBarBtn: { alignItems: 'center', gap: 5, width: 62 },
+  callBarLabel: { color: C.white, fontSize: 10.5, fontWeight: '600' },
+  callBarLeaveBtn: { width: 46, height: 46, borderRadius: 23, backgroundColor: C.red, alignItems: 'center', justifyContent: 'center' },
 });

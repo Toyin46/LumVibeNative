@@ -48,7 +48,7 @@ import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { bakeVideo } from '../../modules/video-baker';
-import { LiveEffectPreview } from "../../modules/video-baker/LiveEffectPreview"
+import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -611,6 +611,8 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_gaze_trail',      name:'Gaze Trail',     emoji:'👀',category:'creative', desc:'Particles trail where you look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gaze_trail'},
   {id:'fx_gl_double_take',     name:'Double Take',    emoji:'👥',category:'creative', desc:'Fast head turn leaves a ghost streak — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'double_take'},
   {id:'fx_gl_blink_freeze',    name:'Blink Freeze',   emoji:'📸',category:'creative', desc:'Blink freezes the frame + zoom punch — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'blink_freeze'},
+  {id:'fx_gl_gold_skin',  name:'Gold Skin',  emoji:'👑',category:'creative', desc:'Metallic gold body — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gold_skin'},
+{id:'fx_gl_mouth_fire', name:'Mouth Fire', emoji:'🔥',category:'creative', desc:'Flame when mouth opens — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_fire'},  
 ];
 const FX_CATEGORIES = [
   {id:'all',name:'All',emoji:'🎛️'},{id:'mood',name:'Mood',emoji:'🌈'},
@@ -6030,6 +6032,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                     commentsCount={0}
                     onReplay={() => {
                       setShowEndScreen(false);
+                      // FIX: player.loop = false means playback stops dead at
+                      // the end position — calling play() again without seeking
+                      // back to 0 first does nothing on most players, which is
+                      // exactly why replay wasn't working. Seek first, then play.
+                      videoPlayer.currentTime = 0;
                       setVideoPlaying(true);
                     }}
                     onDismiss={() => setShowEndScreen(false)}
@@ -6038,7 +6045,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   <TouchableOpacity
                     style={[StyleSheet.absoluteFill, { zIndex: 5 }]}
                     activeOpacity={1}
-                    onPress={() => setVideoPlaying(v => !v)}
+                    onPress={() => {
+                      // Same fix as onReplay above — if the clip already ended,
+                      // toggling videoPlaying alone won't restart it without a seek.
+                      if (!videoPlaying && videoPlayer.currentTime >= (videoPlayer.duration ?? 0) - 0.05) {
+                        videoPlayer.currentTime = 0;
+                        setShowEndScreen(false);
+                      }
+                      setVideoPlaying(v => !v);
+                    }}
                   >
                     {!videoPlaying && (
                       <View style={[ms.videoPlayOverlay, { zIndex: 6 }]}>

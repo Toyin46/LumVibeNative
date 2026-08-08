@@ -140,4 +140,19 @@ class FaceTracker(context: Context) {
     fun close() {
         faceLandmarker.close()
     }
-}  
+
+    /**
+     * Normalized (0..1) midpoint of the inner mouth opening, for MOUTH_FIRE's flame
+     * anchor position. Landmarks 13 (upper inner lip) and 14 (lower inner lip) are
+     * part of the base 468-point mesh — unlike irisCenter's 468/478-point split,
+     * these are always present regardless of the refine_landmarks setting, so no
+     * on-device size check/fallback is needed the way irisCenter has one.
+     */
+    fun mouthCenter(result: FaceLandmarkerResult): Pair<Float, Float>? {
+        val points = result.faceLandmarks().firstOrNull() ?: return null
+        if (points.size <= 14) return null
+        val upper = points[13]
+        val lower = points[14]
+        return ((upper.x() + lower.x()) / 2f) to ((upper.y() + lower.y()) / 2f)
+    }
+}   

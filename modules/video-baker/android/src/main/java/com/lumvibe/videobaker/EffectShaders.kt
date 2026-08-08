@@ -56,7 +56,14 @@ enum class VisualEffect {
     // several output frames, which needs FrameRenderer's new freeze-capture texture. ----
     GAZE_TRAIL,          // particle trail following iris position, last N positions only
     DOUBLE_TAKE,         // directional ghost streak on fast head turn (yaw delta)
-    BLINK_FREEZE;        // freeze-frame + zoom punch on blink, held for ~0.3s
+    BLINK_FREEZE,        // freeze-frame + zoom punch on blink, held for ~0.3s
+    // ---- Phase 8: same trackers as above (SegmentationTracker, FaceTracker), new
+    // visual treatments — full-body recolor and a mouth-anchored procedural flame. ----
+    GOLD_SKIN,           // person (via segmentation mask) recolored through a metallic
+                          // gold gradient, luminance-mapped so shading/detail survives —
+                          // background untouched. Needs SegmentationTracker only.
+    MOUTH_FIRE;          // procedural flame anchored at mouth center, sized by how open
+                          // the mouth is (jawOpen blendshape). Needs FaceTracker.
 
     companion object {
         /** Maps the JS-facing string (e.g. "neon_edge") to an enum value. Unknown/null -> NONE. */
@@ -83,6 +90,8 @@ enum class VisualEffect {
             "gaze_trail" -> GAZE_TRAIL
             "double_take" -> DOUBLE_TAKE
             "blink_freeze" -> BLINK_FREEZE
+            "gold_skin" -> GOLD_SKIN
+            "mouth_fire" -> MOUTH_FIRE
             else -> NONE
         }
     }
@@ -516,20 +525,47 @@ object EffectShaders {
         uniform samplerExternalOES uTexture;
         uniform vec4 uFaceBox; // minX, minY, maxX, maxY (normalized 0..1)
         uniform float uIntensity; // repurposed: normalized audio amplitude 0..1
+        uniform float uTime;
 
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
 
             vec2 center = vec2((uFaceBox.x + uFaceBox.z) * 0.5, (uFaceBox.y + uFaceBox.w) * 0.5);
             float boxSize = max(uFaceBox.z - uFaceBox.x, uFaceBox.w - uFaceBox.y);
-            float ringRadius = boxSize * 0.75;
-
+            float baseRadius = boxSize * 0.75;
             float d = distance(vTexCoord, center);
-            float ring = smoothstep(ringRadius * 0.15, 0.0, abs(d - ringRadius));
-            ring *= (0.4 + 0.9 * uIntensity);
 
-            vec3 glowColor = vec3(0.25, 0.85, 1.0);
-            gl_FragColor = vec4(base.rgb + glowColor * ring, base.a);
+            // Non-linear response: quiet stays subtle, loud gets a real payoff —
+            // pow() curve instead of the old straight-line 0.4 + 0.9*intensity,
+            // which made every volume level look about the same.
+            float response = pow(clamp(uIntensity, 0.0, 1.0), 0.6);
+
+            // Idle shimmer: a slow outward breathing motion even at silence, so
+            // the ring never looks frozen/dead between words — this is what the
+            // old version was missing entirely (zero motion at uIntensity = 0).
+            float idleBreath = 0.03 * sin(uTime * 1.3);
+            float radius = baseRadius * (1.0 + idleBreath + response * 0.12);
+
+            // THREE layered rings at decreasing radius/opacity instead of one hard
+            // edge — this is the single biggest difference between "a ring was
+            // drawn" and "a light is glowing." Each ring uses a soft gaussian-like
+            // falloff (squared distance) rather than a hard smoothstep line.
+            float glow = 0.0;
+            for (int i = 0; i < 3; i++) {
+                float ringOffset = float(i) * 0.06;
+                float ringDist = abs(d - (radius - ringOffset));
+                float falloff = exp(-ringDist * ringDist * 900.0);
+                glow += falloff * (1.0 - float(i) * 0.32);
+            }
+            glow *= (0.35 + response * 1.1);
+
+            // Color shifts cool -> warm gold as intensity rises — reads as
+            // "reacting to your voice" rather than a static-colored sticker.
+            vec3 quietColor = vec3(0.25, 0.65, 1.0);
+            vec3 loudColor  = vec3(1.0, 0.75, 0.25);
+            vec3 glowColor = mix(quietColor, loudColor, response);
+
+            gl_FragColor = vec4(base.rgb + glowColor * glow, base.a);
         }
     """.trimIndent()
 
@@ -633,6 +669,104 @@ object EffectShaders {
 
             vec3 outColor = mix(split, src.rgb, mask);
             gl_FragColor = vec4(outColor, src.a);
+        }
+    """.trimIndent()
+
+    // Gold Skin — same uMaskTexture convention as Depth Bloom/Split Prism above
+    // (SegmentationTracker's person mask, white=person). Recolors ONLY the person
+    // through a 3-stop gold gradient MAPPED BY LUMINANCE, not a flat tint — that's
+    // what keeps shading/detail (jawline, wrinkles, clothing folds) readable as
+    // "metal" instead of just "yellow." A slow diagonal sheen sweep (uTime-driven)
+    // adds a liquid-metal highlight so it doesn't read as a static color filter.
+    // No uIntensity — this one's always at full strength when selected, nothing to
+    // repurpose intensity as; background stays completely untouched via the mask.
+    private val goldSkin = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform sampler2D uMaskTexture;
+        uniform float uTime;
+
+        void main() {
+            vec4 src = texture2D(uTexture, vTexCoord);
+            float mask = texture2D(uMaskTexture, vTexCoord).a;
+
+            float luma = dot(src.rgb, vec3(0.299, 0.587, 0.114));
+
+            vec3 shadowGold = vec3(0.25, 0.14, 0.02);
+            vec3 midGold    = vec3(0.85, 0.55, 0.12);
+            vec3 hiGold     = vec3(1.0, 0.92, 0.65);
+            vec3 gold = luma < 0.5
+                ? mix(shadowGold, midGold, luma * 2.0)
+                : mix(midGold, hiGold, (luma - 0.5) * 2.0);
+
+            // Diagonal sheen band drifting slowly across the body — mimics light
+            // catching liquid/polished metal rather than a flat painted surface.
+            float sheenPos = fract((vTexCoord.x + vTexCoord.y) * 1.5 - uTime * 0.15);
+            float sheen = smoothstep(0.42, 0.5, sheenPos) * smoothstep(0.58, 0.5, sheenPos);
+            gold += sheen * 0.25;
+
+            vec3 outColor = mix(src.rgb, gold, mask);
+            gl_FragColor = vec4(outColor, src.a);
+        }
+    """.trimIndent()
+
+    // Mouth Fire — uMouthCenter is FaceTracker.mouthCenter() (landmarks 13/14
+    // midpoint), uIntensity is repurposed as the "jawOpen" blendshape score, same
+    // repurposed-uIntensity convention as MOOD_RING/SMILE_SHATTER. Procedural flame
+    // (hash/value-noise, no texture asset needed) grows taller and wider the more
+    // the mouth opens, licking upward with a flickering noise-driven wobble rather
+    // than sitting as a static triangle — this is what separates "a shape was drawn
+    // at a point" from "something that looks like fire."
+    private val mouthFire = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform vec2 uMouthCenter; // normalized 0..1
+        uniform float uIntensity;  // repurposed: jawOpen score 0..1
+        uniform float uTime;
+
+        float hash(vec2 p) {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+
+        float valueNoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            float a = hash(i);
+            float b = hash(i + vec2(1.0, 0.0));
+            float c = hash(i + vec2(0.0, 1.0));
+            float d = hash(i + vec2(1.0, 1.0));
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
+
+        void main() {
+            vec4 base = texture2D(uTexture, vTexCoord);
+            float openAmount = clamp(uIntensity, 0.0, 1.0);
+
+            // Flame licks upward from the mouth (negative-y direction in this
+            // texcoord space, consistent with every other position-anchored effect
+            // in this file — same orientation VOICE_HALO/GAZE_TRAIL already use,
+            // no extra flip needed here).
+            float wobble = (valueNoise(vec2(vTexCoord.x * 8.0, uTime * 6.0)) - 0.5) * 0.05;
+            vec2 flameSpace = vec2(vTexCoord.x - uMouthCenter.x - wobble, vTexCoord.y - uMouthCenter.y);
+
+            float height = 0.14 + openAmount * 0.16;
+            float width = 0.05 + openAmount * 0.03;
+            float t = clamp(-flameSpace.y / height, 0.0, 1.0); // 0 at mouth, 1 at tip
+            float coreWidth = width * (1.0 - t) * (1.0 - t);
+            float edgeNoise = valueNoise(vec2(vTexCoord.x * 12.0, vTexCoord.y * 12.0 - uTime * 4.0)) * 0.02;
+
+            float withinWidth = step(abs(flameSpace.x), coreWidth + edgeNoise);
+            float aboveMouth = step(flameSpace.y, 0.02);
+            float belowTip = step(-height, flameSpace.y);
+            float inFlame = withinWidth * aboveMouth * belowTip;
+
+            vec3 flameCore = vec3(1.0, 0.95, 0.6);
+            vec3 flameOuter = vec3(1.0, 0.45, 0.05);
+            vec3 flameColor = mix(flameOuter, flameCore, 1.0 - t);
+
+            float flameAlpha = inFlame * openAmount;
+            gl_FragColor = vec4(base.rgb + flameColor * flameAlpha, base.a);
         }
     """.trimIndent()
 
@@ -840,6 +974,8 @@ object EffectShaders {
         VisualEffect.GAZE_TRAIL -> effectVertexShader to gazeTrail
         VisualEffect.DOUBLE_TAKE -> effectVertexShader to doubleTake
         VisualEffect.BLINK_FREEZE -> blinkFreezeVertex to blinkFreezeFragment
+        VisualEffect.GOLD_SKIN -> effectVertexShader to goldSkin
+        VisualEffect.MOUTH_FIRE -> effectVertexShader to mouthFire
         VisualEffect.NONE -> throw IllegalArgumentException("VisualEffect.NONE has no shader")
     }
-}  
+}   

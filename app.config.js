@@ -1,4 +1,4 @@
-{
+export default {
   "expo": {
     "name": "LumVibeNative",
     "slug": "LumVibeNative",
@@ -17,7 +17,8 @@
     "extra": {
       "eas": {
         "projectId": "aba96528-c3ae-4256-b7af-f412926dcdf5"
-      }
+      },
+      "livekitUrl": process.env.LIVEKIT_URL
     },
     "owner": "lumvibe",
     "android": {
@@ -34,6 +35,6 @@
       "expo-secure-store",
       "expo-video",
       "expo-web-browser"
-  ]
-}
-}
+    ]
+  }
+}; 

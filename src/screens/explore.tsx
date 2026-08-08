@@ -2,12 +2,13 @@
 // ✅ All original features preserved
 // ✅ Translations added via useTranslation()
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TextInput, FlatList, TouchableOpacity,
-  Image, ActivityIndicator, RefreshControl, Dimensions, Alert,
+  Image, ActivityIndicator, RefreshControl, Dimensions, Alert, ScrollView,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuthStore } from '../store/authStore'; 
 import { supabase } from '../config/supabase'; 
@@ -17,7 +18,15 @@ import { useTranslation } from '../locales/LanguageContext';
 const { width } = Dimensions.get('window');
 const GRID_ITEM_SIZE = (width - 32) / 3;
 
-type TabType = 'discover' | 'trending' | 'users';
+type CategoryType = 'vibe' | 'trending' | 'music' | 'comedy' | 'art';
+const CATEGORIES: { key: CategoryType; label: string }[] = [
+  { key: 'vibe',     label: 'Vibe' },
+  { key: 'trending', label: 'Trending' },
+  { key: 'music',    label: 'Music' },
+  { key: 'comedy',   label: 'Comedy' },
+  { key: 'art',      label: 'Art' },
+];
+const EXPLORE_CATEGORY_TILES = ['Music', 'Dance', 'Comedy', 'Lifestyle'];
 
 interface Post {
   id: string; user_id: string; username: string; display_name: string;
@@ -39,7 +48,12 @@ export default function ExploreScreen() {
   const navigation = useNavigation<any>();
 
   const [searchQuery,       setSearchQuery]       = useState('');
-  const [activeTab,         setActiveTab]         = useState<TabType>('discover');
+  const [activeCategory,    setActiveCategory]    = useState<CategoryType>('vibe');
+  const [showAllCreators,   setShowAllCreators]   = useState(false);
+  const [showAllHashtags,   setShowAllHashtags]   = useState(false);
+  const [bannerIndex,       setBannerIndex]       = useState(0);
+  const [hasUnreadNotif,    setHasUnreadNotif]    = useState(false);
+  const insets = useSafeAreaInsets();
   const [loading,           setLoading]           = useState(false);
   const [refreshing,        setRefreshing]        = useState(false);
   const [allPosts,          setAllPosts]          = useState<Post[]>([]);
@@ -54,6 +68,21 @@ export default function ExploreScreen() {
   useEffect(() => {
     loadInitialData();
     if (userId) loadFollowingStatus();
+  }, [userId]);
+
+  // ✅ NEW: unread notification dot for the bell icon, from the existing notifications table
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      try {
+        const { count } = await supabase
+          .from('notifications')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('is_read', false);
+        setHasUnreadNotif((count || 0) > 0);
+      } catch {}
+    })();
   }, [userId]);
 
   useEffect(() => {
@@ -207,6 +236,38 @@ export default function ExploreScreen() {
     setRefreshing(false);
   };
 
+  // ✅ NEW: trending hashtags — derived from real captions already loaded, no fake data
+  const trendingHashtags = useMemo(() => {
+    const counts = new Map<string, { count: number; avatar?: string }>();
+    [...trendingPosts, ...allPosts].forEach(p => {
+      const tags = (p.caption || '').match(/#\w+/g) || [];
+      tags.forEach(tag => {
+        const key = tag.toLowerCase();
+        const existing = counts.get(key);
+        if (existing) existing.count += 1;
+        else counts.set(key, { count: 1, avatar: p.user_photo_url });
+      });
+    });
+    return Array.from(counts.entries())
+      .map(([tag, v]) => ({ tag, count: v.count, avatar: v.avatar }))
+      .sort((a, b) => b.count - a.count);
+  }, [allPosts, trendingPosts]);
+
+  // ✅ NEW: category pill filtering — Music/Comedy/Art filter existing posts by caption keyword
+  const categoryPosts = useMemo(() => {
+    if (activeCategory === 'vibe') return allPosts;
+    if (activeCategory === 'trending') return trendingPosts;
+    return allPosts.filter(p => (p.caption || '').toLowerCase().includes(activeCategory));
+  }, [activeCategory, allPosts, trendingPosts]);
+
+  // ✅ NEW: hero banner slides — top trending posts with media
+  const bannerPosts = useMemo(() => trendingPosts.filter(p => p.media_url).slice(0, 3), [trendingPosts]);
+
+  const categoryTileImage = (label: string) => {
+    const match = allPosts.find(p => p.media_url && (p.caption || '').toLowerCase().includes(label.toLowerCase()));
+    return match?.media_url || allPosts.find(p => p.media_url)?.media_url;
+  };
+
   const handlePostPress = (post: Post) => { 
     navigation.navigate('PostDetail', { postId: post.id }); 
   };
@@ -310,13 +371,15 @@ export default function ExploreScreen() {
     );
   };
 
-  const renderEmptyState = (tab: TabType) => {
-    const config = {
-      discover: { icon: 'compass-outline',     title: t.feed.noContent,       sub: t.feed.noContentSub },
-      trending: { icon: 'trending-up-outline',  title: t.explore.noResults,    sub: t.feed.noContentSub },
-      users:    { icon: 'people-outline',        title: t.explore.noResults,    sub: t.explore.noResults },
+  const renderEmptyState = (category: CategoryType) => {
+    const config: Record<CategoryType, { icon: string; title: string; sub: string }> = {
+      vibe:     { icon: 'compass-outline',      title: t.feed.noContent,    sub: t.feed.noContentSub },
+      trending: { icon: 'trending-up-outline',  title: t.explore.noResults, sub: t.feed.noContentSub },
+      music:    { icon: 'musical-notes-outline', title: t.explore.noResults, sub: t.feed.noContentSub },
+      comedy:   { icon: 'happy-outline',        title: t.explore.noResults, sub: t.feed.noContentSub },
+      art:      { icon: 'color-palette-outline', title: t.explore.noResults, sub: t.feed.noContentSub },
     };
-    const { icon, title, sub } = config[tab];
+    const { icon, title, sub } = config[category];
     return (
       <View style={styles.emptyContainer}>
         <Ionicons name={icon as any} size={80} color="#333" />
@@ -398,19 +461,46 @@ export default function ExploreScreen() {
     );
   };
 
-  const currentPosts = activeTab === 'discover' ? allPosts : trendingPosts;
   const isSearching  = searchQuery.length > 0;
+
+  const TopBar = (
+    <View style={[styles.topBar, { paddingTop: insets.top + 10 }]}>
+      <View style={styles.searchBar}>
+        <Ionicons name="search" size={20} color="#888" />
+        <TextInput
+          style={styles.searchInput}
+          placeholder={t.explore.searchPlaceholder}
+          placeholderTextColor="#666"
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        {searchQuery.length > 0 && (
+          <TouchableOpacity onPress={() => setSearchQuery('')}>
+            <Ionicons name="close-circle" size={20} color="#00ff88" />
+          </TouchableOpacity>
+        )}
+      </View>
+      <TouchableOpacity
+        style={styles.bellBtn}
+        onPress={() => navigation.navigate('Notifications')}
+        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      >
+        <Ionicons name="notifications-outline" size={22} color="#fff" />
+        {hasUnreadNotif && <View style={styles.notifDot} />}
+      </TouchableOpacity>
+      <View style={styles.coinsHeader}>
+        <MaterialCommunityIcons name="diamond" size={16} color="#ffd700" />
+        <Text style={styles.coinsHeaderText}>{headerCoins}</Text>
+      </View>
+    </View>
+  );
 
   if (loading) {
     return (
       <View style={styles.container}>
-        <LinearGradient colors={['#000000', '#0a0a0a']} style={styles.header}>
-          <Text style={styles.headerTitle}>{t.explore.title}</Text>
-          <View style={styles.coinsHeader}>
-            <MaterialCommunityIcons name="diamond" size={18} color="#ffd700" />
-            <Text style={styles.coinsHeaderText}>{headerCoins}</Text>
-          </View>
-        </LinearGradient>
+        {TopBar}
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color="#00ff88" />
           <Text style={styles.loadingText}>{t.common.loading}</Text>
@@ -419,69 +509,39 @@ export default function ExploreScreen() {
     );
   }
 
-  return (
-    <View style={styles.container}>
-      <LinearGradient colors={['#000000', '#0a0a0a']} style={styles.header}>
-        <Text style={styles.headerTitle}>{t.explore.title}</Text>
-        <View style={styles.coinsHeader}>
-          <MaterialCommunityIcons name="diamond" size={18} color="#ffd700" />
-          <Text style={styles.coinsHeaderText}>{headerCoins}</Text>
-        </View>
-      </LinearGradient>
+  const CategoryPills = !isSearching && (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.pillsRow}
+      contentContainerStyle={{ paddingRight: 16 }}
+    >
+      {CATEGORIES.map(cat => (
+        <TouchableOpacity
+          key={cat.key}
+          style={[styles.pill, activeCategory === cat.key && styles.pillActive]}
+          onPress={() => { setActiveCategory(cat.key); setShowAllCreators(false); }}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.pillText, activeCategory === cat.key && styles.pillTextActive]}>{cat.label}</Text>
+        </TouchableOpacity>
+      ))}
+    </ScrollView>
+  );
 
-      <View style={styles.searchContainer}>
-        <View style={styles.searchBar}>
-          <Ionicons name="search" size={20} color="#00ff88" />
-          <TextInput
-            style={styles.searchInput}
-            placeholder={t.explore.searchPlaceholder}
-            placeholderTextColor="#666"
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => setSearchQuery('')}>
-              <Ionicons name="close-circle" size={20} color="#00ff88" />
-            </TouchableOpacity>
-          )}
+  // ✅ NEW: "View all" on Top Creators — reuses the existing full creators list
+  if (showAllCreators && !isSearching) {
+    return (
+      <View style={styles.container}>
+        {TopBar}
+        <View style={styles.sectionHeaderRow}>
+          <TouchableOpacity onPress={() => setShowAllCreators(false)} style={styles.backRow} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="chevron-back" size={20} color="#fff" />
+            <Text style={styles.sectionTitle}>Top Creators</Text>
+          </TouchableOpacity>
         </View>
-      </View>
-
-      {!isSearching && (
-        <View style={styles.tabsContainer}>
-          {(['discover', 'trending', 'users'] as TabType[]).map(tab => (
-            <TouchableOpacity
-              key={tab}
-              style={[styles.tab, activeTab === tab && styles.tabActive]}
-              onPress={() => setActiveTab(tab)}
-            >
-              <Ionicons
-                name={tab === 'discover' ? 'compass' : tab === 'trending' ? 'trending-up' : 'people'}
-                size={20}
-                color={activeTab === tab ? '#00ff88' : '#666'}
-              />
-              <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
-                {tab === 'discover' ? t.explore.title
-                  : tab === 'trending' ? t.explore.trending
-                  : t.common.followers}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
-      {searching ? (
-        <View style={styles.centerContainer}>
-          <ActivityIndicator size="large" color="#00ff88" />
-          <Text style={styles.loadingText}>{t.common.loading}</Text>
-        </View>
-      ) : isSearching ? (
-        renderSearchResults()
-      ) : activeTab === 'users' ? (
-        suggestedUsers.length === 0
-          ? renderEmptyState('users')
+        {suggestedUsers.length === 0
+          ? renderEmptyState('vibe')
           : <FlatList
               key="user-list"
               data={suggestedUsers}
@@ -490,21 +550,151 @@ export default function ExploreScreen() {
               contentContainerStyle={styles.userListContainer}
               showsVerticalScrollIndicator={false}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00ff88" />}
-            />
+            />}
+      </View>
+    );
+  }
+
+  const DiscoverHeader = activeCategory === 'vibe' && !isSearching && (
+    <>
+      {bannerPosts.length > 0 && (
+        <View style={styles.bannerWrap}>
+          <ScrollView
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={e => setBannerIndex(Math.round(e.nativeEvent.contentOffset.x / (width - 32)))}
+          >
+            {bannerPosts.map(p => (
+              <TouchableOpacity key={p.id} style={styles.bannerSlide} activeOpacity={0.9} onPress={() => handlePostPress(p)}>
+                <Image source={{ uri: p.media_url }} style={styles.bannerImage} resizeMode="cover" />
+                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={StyleSheet.absoluteFillObject} />
+                <View style={styles.bannerContent}>
+                  <Text style={styles.bannerEyebrow}>Discover</Text>
+                  <Text style={styles.bannerTitle}>{'What\'s\nTrending'}</Text>
+                  <TouchableOpacity style={styles.bannerCta} onPress={() => setActiveCategory('trending')}>
+                    <Text style={styles.bannerCtaText}>Explore Now</Text>
+                  </TouchableOpacity>
+                </View>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+          <View style={styles.bannerDots}>
+            {bannerPosts.map((_, i) => (
+              <View key={i} style={[styles.bannerDot, i === bannerIndex && styles.bannerDotActive]} />
+            ))}
+          </View>
+        </View>
+      )}
+
+      {trendingHashtags.length > 0 && (
+        <View style={styles.section}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Trending Hashtags</Text>
+            <TouchableOpacity onPress={() => setShowAllHashtags(v => !v)}>
+              <Text style={styles.viewAllText}>{showAllHashtags ? 'Show less' : 'View all ›'}</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.hashtagGrid}>
+            {(showAllHashtags ? trendingHashtags.slice(0, 12) : trendingHashtags.slice(0, 4)).map(h => (
+              <TouchableOpacity key={h.tag} style={styles.hashtagCard} onPress={() => setSearchQuery(h.tag)} activeOpacity={0.8}>
+                {h.avatar
+                  ? <Image source={{ uri: h.avatar }} style={styles.hashtagAvatar} />
+                  : <View style={[styles.hashtagAvatar, styles.avatarPlaceholder]}><Ionicons name="pricetag" size={14} color="#00ff88" /></View>}
+                <Text style={styles.hashtagTag} numberOfLines={1}>{h.tag}</Text>
+                <Text style={styles.hashtagCount}>{h.count >= 1000 ? (h.count / 1000).toFixed(1) + 'K' : h.count} posts</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      )}
+
+      {suggestedUsers.length > 0 && (
+        <View style={styles.section}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Top Creators</Text>
+            <TouchableOpacity onPress={() => setShowAllCreators(true)}>
+              <Text style={styles.viewAllText}>View all ›</Text>
+            </TouchableOpacity>
+          </View>
+          {suggestedUsers.slice(0, 3).map(u => {
+            const isFollowing = followingUsers.has(u.id);
+            return (
+              <TouchableOpacity key={u.id} style={styles.creatorRow} onPress={() => handleUserPress(u.id)} activeOpacity={0.8}>
+                {u.avatar_url
+                  ? <Image source={{ uri: u.avatar_url }} style={styles.creatorAvatar} />
+                  : <View style={[styles.creatorAvatar, styles.avatarPlaceholder]}><Ionicons name="person" size={20} color="#00ff88" /></View>}
+                <View style={styles.creatorInfo}>
+                  <Text style={styles.creatorName} numberOfLines={1}>{u.display_name}</Text>
+                  <Text style={styles.creatorUsername} numberOfLines={1}>@{u.username}</Text>
+                </View>
+                <Text style={styles.creatorFollowers}>{u.followers_count >= 1000 ? (u.followers_count / 1000).toFixed(0) + 'K' : u.followers_count} followers</Text>
+                <TouchableOpacity
+                  style={[styles.followPillBtn, isFollowing && styles.followingPillBtn]}
+                  onPress={() => handleFollowUser(u)}
+                >
+                  <Text style={[styles.followPillBtnText, isFollowing && styles.followingPillBtnText]}>
+                    {isFollowing ? t.common.following : t.common.follow}
+                  </Text>
+                </TouchableOpacity>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
+
+      <View style={styles.section}>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>Explore by Category</Text>
+        </View>
+        <View style={styles.categoryTilesRow}>
+          {EXPLORE_CATEGORY_TILES.map(label => {
+            const img = categoryTileImage(label);
+            return (
+              <TouchableOpacity key={label} style={styles.categoryTile} activeOpacity={0.85} onPress={() => setSearchQuery(label.toLowerCase())}>
+                {img
+                  ? <Image source={{ uri: img }} style={styles.categoryTileImage} />
+                  : <View style={[styles.categoryTileImage, styles.categoryTilePh]} />}
+                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.8)']} style={StyleSheet.absoluteFillObject} />
+                <Text style={styles.categoryTileLabel}>{label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionTitle}>Posts</Text>
+      </View>
+    </>
+  );
+
+  return (
+    <View style={styles.container}>
+      {TopBar}
+      {CategoryPills}
+
+      {searching ? (
+        <View style={styles.centerContainer}>
+          <ActivityIndicator size="large" color="#00ff88" />
+          <Text style={styles.loadingText}>{t.common.loading}</Text>
+        </View>
+      ) : isSearching ? (
+        renderSearchResults()
       ) : (
-        currentPosts.length === 0
-          ? renderEmptyState(activeTab)
-          : <FlatList
-              key="grid-view"
-              data={currentPosts}
-              renderItem={renderGridPost}
-              keyExtractor={item => item.id}
-              numColumns={3}
-              columnWrapperStyle={styles.gridRow}
-              contentContainerStyle={styles.gridContainer}
-              showsVerticalScrollIndicator={false}
-              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00ff88" />}
-            />
+        <FlatList
+          key="grid-view"
+          data={categoryPosts}
+          renderItem={renderGridPost}
+          keyExtractor={item => item.id}
+          numColumns={3}
+          columnWrapperStyle={styles.gridRow}
+          contentContainerStyle={styles.gridContainer}
+          showsVerticalScrollIndicator={false}
+          ListHeaderComponent={DiscoverHeader || null}
+          ListEmptyComponent={categoryPosts.length === 0 ? renderEmptyState(activeCategory) : null}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00ff88" />}
+        />
       )}
     </View>
   );
@@ -512,25 +702,70 @@ export default function ExploreScreen() {
 
 const styles = StyleSheet.create({
   container:          { flex: 1, backgroundColor: '#000' },
-  header:             { paddingTop: 50, paddingBottom: 16, paddingHorizontal: 24, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
-  headerTitle:        { fontSize: 28, fontWeight: 'bold', color: '#00ff88' },
-  coinsHeader:        { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, gap: 6, borderWidth: 1, borderColor: '#00ff88' },
-  coinsHeaderText:    { color: '#00ff88', fontWeight: 'bold', fontSize: 14 },
-  searchContainer:    { paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#000' },
-  searchBar:          { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, gap: 12, borderWidth: 1, borderColor: '#333' },
-  searchInput:        { flex: 1, fontSize: 15, color: '#fff' },
-  tabsContainer:      { flexDirection: 'row', backgroundColor: '#000', paddingHorizontal: 16, paddingBottom: 12, gap: 12 },
-  tab:                { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 10, borderRadius: 12, gap: 6, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' },
-  tabActive:          { backgroundColor: 'rgba(0,255,136,0.1)', borderColor: '#00ff88' },
-  tabText:            { fontSize: 14, fontWeight: '600', color: '#666' },
-  tabTextActive:      { color: '#00ff88' },
+  topBar:             { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingBottom: 12, backgroundColor: '#000' },
+  coinsHeader:        { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20, gap: 4, borderWidth: 1, borderColor: '#00ff88' },
+  coinsHeaderText:    { color: '#00ff88', fontWeight: 'bold', fontSize: 13 },
+  bellBtn:            { position: 'relative', padding: 2 },
+  notifDot:           { position: 'absolute', top: -1, right: -1, width: 9, height: 9, borderRadius: 5, backgroundColor: '#ff4444', borderWidth: 1.5, borderColor: '#000' },
+  searchBar:          { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, gap: 10, borderWidth: 1, borderColor: '#262626' },
+  searchInput:        { flex: 1, fontSize: 14, color: '#fff' },
+  pillsRow:           { flexGrow: 0, paddingLeft: 16, marginBottom: 14 },
+  pill:               { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: '#141414', borderWidth: 1, borderColor: '#262626', marginRight: 10 },
+  pillActive:         { backgroundColor: '#00ff88', borderColor: '#00ff88' },
+  pillText:           { fontSize: 13, fontWeight: '600', color: '#aaa' },
+  pillTextActive:     { color: '#000' },
   centerContainer:    { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' },
   loadingText:        { marginTop: 12, fontSize: 16, color: '#666' },
-  emptyContainer:     { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40, backgroundColor: '#000' },
+  emptyContainer:     { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40, paddingTop: 60, backgroundColor: '#000' },
   emptyTitle:         { fontSize: 20, fontWeight: 'bold', color: '#fff', marginTop: 16 },
   emptySubtitle:      { fontSize: 14, color: '#666', marginTop: 8, textAlign: 'center' },
   sectionHeader:      { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 10, backgroundColor: '#000', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
   sectionHeaderText:  { color: '#00ff88', fontSize: 14, fontWeight: '700' },
+  section:            { marginBottom: 22, paddingHorizontal: 16 },
+  sectionHeaderRow:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingHorizontal: 4 },
+  sectionTitle:       { fontSize: 16, fontWeight: '700', color: '#fff' },
+  viewAllText:        { fontSize: 13, fontWeight: '600', color: '#00ff88' },
+  backRow:            { flexDirection: 'row', alignItems: 'center', gap: 6 },
+
+  // Hero banner
+  bannerWrap:         { marginHorizontal: 16, marginBottom: 22 },
+  bannerSlide:        { width: width - 32, height: 180, borderRadius: 16, overflow: 'hidden', position: 'relative', backgroundColor: '#111' },
+  bannerImage:        { width: '100%', height: '100%', position: 'absolute' },
+  bannerContent:      { position: 'absolute', left: 18, bottom: 16 },
+  bannerEyebrow:      { color: '#ccc', fontSize: 12, fontWeight: '600', marginBottom: 4 },
+  bannerTitle:        { color: '#fff', fontSize: 24, fontWeight: '800', lineHeight: 28, marginBottom: 10 },
+  bannerCta:          { backgroundColor: '#00ff88', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 18, alignSelf: 'flex-start' },
+  bannerCtaText:      { color: '#000', fontSize: 13, fontWeight: '700' },
+  bannerDots:         { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 10 },
+  bannerDot:          { width: 6, height: 6, borderRadius: 3, backgroundColor: '#333' },
+  bannerDotActive:    { backgroundColor: '#00ff88', width: 16 },
+
+  // Trending hashtags
+  hashtagGrid:        { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  hashtagCard:        { width: (width - 32 - 10) / 2, backgroundColor: '#0e0e0e', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#1e1e1e' },
+  hashtagAvatar:       { width: 28, height: 28, borderRadius: 14, backgroundColor: '#1a1a1a', marginBottom: 8 },
+  hashtagTag:         { color: '#fff', fontSize: 14, fontWeight: '700', marginBottom: 2 },
+  hashtagCount:       { color: '#777', fontSize: 12 },
+
+  // Top creators
+  creatorRow:         { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10 },
+  creatorAvatar:       { width: 44, height: 44, borderRadius: 22, backgroundColor: '#1a1a1a' },
+  creatorInfo:        { flex: 1 },
+  creatorName:         { color: '#fff', fontSize: 14, fontWeight: '700' },
+  creatorUsername:    { color: '#777', fontSize: 12, marginTop: 1 },
+  creatorFollowers:    { color: '#999', fontSize: 12, marginRight: 8 },
+  followPillBtn:       { borderWidth: 1.5, borderColor: '#00ff88', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 6 },
+  followingPillBtn:    { borderColor: '#333', backgroundColor: '#141414' },
+  followPillBtnText:   { color: '#00ff88', fontSize: 12, fontWeight: '700' },
+  followingPillBtnText:{ color: '#888' },
+
+  // Explore by category
+  categoryTilesRow:    { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  categoryTile:        { width: (width - 32 - 10) / 2, height: 90, borderRadius: 12, overflow: 'hidden', backgroundColor: '#111', justifyContent: 'flex-end', padding: 10 },
+  categoryTileImage:    { width: '100%', height: '100%', position: 'absolute' },
+  categoryTilePh:      { backgroundColor: '#1a1a1a' },
+  categoryTileLabel:   { color: '#fff', fontSize: 14, fontWeight: '700' },
+
   gridContainer:      { padding: 12, backgroundColor: '#000' },
   gridRow:            { gap: 4, marginBottom: 4 },
   gridItem:           { width: GRID_ITEM_SIZE, height: GRID_ITEM_SIZE, borderRadius: 8, overflow: 'hidden', backgroundColor: '#1a1a1a', position: 'relative', borderWidth: 0.5, borderColor: '#333' },
@@ -556,4 +791,4 @@ const styles = StyleSheet.create({
   followingButton:    { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#00ff88' },
   followButtonText:   { color: '#000', fontSize: 14, fontWeight: '600' },
   followingButtonText:{ color: '#00ff88' },
-}); 
+});

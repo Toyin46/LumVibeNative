@@ -193,16 +193,18 @@ class VideoTranscoder {
         val faceBoxEffects = setOf(VisualEffect.VOICE_HALO) // needs FaceTracker.faceBoundingBox, not blendshapes
         val irisEffects = setOf(VisualEffect.GAZE_TRAIL) // needs FaceTracker.irisCenter
         val blinkEffects = setOf(VisualEffect.BLINK_FREEZE) // needs both-eye blink blendshapes
+        val mouthEffects = setOf(VisualEffect.MOUTH_FIRE) // needs FaceTracker.mouthCenter + jawOpen blendshape
         val audioScoreEffects = setOf(VisualEffect.AURA_GLOW, VisualEffect.THERMAL_PULSE) // uIntensity = amplitude directly
         val silenceEffects = setOf(VisualEffect.SILENCE_RIPPLE) // uIntensity = 1-amplitude
         val stillnessEffects = setOf(VisualEffect.COLOR_DRAIN)
         val motionEffects = setOf(VisualEffect.SPLIT_PRISM) // uIntensity = motion magnitude, not stillness
         val segmentationAudioEffects = setOf(VisualEffect.DEPTH_BLOOM) // needs mask AND amplitude
-        val segmentationOnlyEffects = setOf(VisualEffect.SPLIT_PRISM) // needs mask, motion computed separately above
+        val segmentationOnlyEffects = setOf(VisualEffect.SPLIT_PRISM, VisualEffect.GOLD_SKIN) // needs mask, nothing else
         val handGestureEffects = setOf(VisualEffect.HAND_PORTAL, VisualEffect.FIST_BUMP_BOOM, VisualEffect.TWO_HAND_FRAME)
 
         val needsFaceTracker = selectedEffect in faceScoreEffects || selectedEffect in facePoseEffects ||
-            selectedEffect in faceBoxEffects || selectedEffect in irisEffects || selectedEffect in blinkEffects
+            selectedEffect in faceBoxEffects || selectedEffect in irisEffects || selectedEffect in blinkEffects ||
+            selectedEffect in mouthEffects
         val needsHandTracker = selectedEffect in handGestureEffects
         val needsSegmentation = selectedEffect in segmentationAudioEffects || selectedEffect in segmentationOnlyEffects
         val needsAmplitude = selectedEffect in audioScoreEffects || selectedEffect in silenceEffects ||
@@ -446,6 +448,18 @@ class VideoTranscoder {
                                                 // pitch's "blink triggers freeze" (not the frame after).
                                             }
                                         }
+                                        VisualEffect.MOUTH_FIRE -> {
+                                            // Standard MediaPipe blendshape name for how open the
+                                            // jaw/mouth is — same "look it up by name, default 0"
+                                            // pattern blendshapeScore already uses everywhere else
+                                            // in this file (e.g. mouthSmileLeft/Right above).
+                                            val jawOpen = if (result != null) faceTracker.blendshapeScore(result, "jawOpen") else 0f
+                                            renderer.effectIntensity = jawOpen
+                                            val mouth = result?.let { faceTracker.mouthCenter(it) }
+                                            if (mouth != null) renderer.mouthCenter = floatArrayOf(mouth.first, mouth.second)
+                                            // else: keep last-known position, same "don't snap to a
+                                            // default on one dropped-detection frame" policy VOICE_HALO uses
+                                        }
                                         else -> {}
                                     }
                                 }
@@ -661,4 +675,4 @@ class VideoTranscoder {
 
         onProgress?.invoke(1f)
     }
-}  
+}   

@@ -12,6 +12,7 @@ import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
 import { useNavigation, CommonActions, useFocusEffect } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as FileSystem from 'expo-file-system/legacy';
 import { decode } from 'base64-arraybuffer';
 import NetInfo from '@react-native-community/netinfo';
@@ -434,6 +435,24 @@ const LazyPostThumb = memo(({ post, onPress }: { post: Post; onPress: () => void
     </TouchableOpacity>
   );
 });
+
+function FounderBadgePill({ isFounder, primaryColor }: { isFounder: boolean; primaryColor: string }) {
+  const glow = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.loop(Animated.sequence([
+      Animated.timing(glow, { toValue: 1, duration: 1200, useNativeDriver: false }),
+      Animated.timing(glow, { toValue: 0, duration: 1200, useNativeDriver: false }),
+    ])).start();
+  }, []);
+  const borderColor = glow.interpolate({ inputRange: [0, 1], outputRange: [primaryColor + '55', primaryColor] });
+  const label = isFounder ? 'Founding\nCreator' : 'Early\nAdopter';
+  return (
+    <Animated.View style={[s.founderPill, { borderColor }]}>
+      <MaterialCommunityIcons name="crown" size={16} color="#ffd700" />
+      <Text style={[s.founderPillText, { color: primaryColor }]}>{label}</Text>
+    </Animated.View>
+  );
+}
 
 function FounderBadgeStrip({ isFounder, primaryColor }: { isFounder: boolean; primaryColor: string }) {
   const glow  = useRef(new Animated.Value(0)).current;
@@ -1903,11 +1922,22 @@ export default function ProfileScreen() {
         {/* ── Classic Layout ── */}
         {!useNewLayout && (
           <>
-            <View style={[s.header, th.header]}>
-              <Text style={s.headerTitle}>Profile</Text>
-              <TouchableOpacity onPress={() => setSettingsVisible(true)}>
-                <Feather name="settings" size={22} color="#fff" />
-              </TouchableOpacity>
+            <View style={s.topBar}>
+              {navigation.canGoBack?.()
+                ? (
+                  <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Feather name="chevron-left" size={26} color="#fff" />
+                  </TouchableOpacity>
+                )
+                : <View style={{ width: 26 }} />}
+              <View style={s.topBarIcons}>
+                <TouchableOpacity onPress={() => setSettingsVisible(true)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  <Feather name="bell" size={20} color="#fff" />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setSettingsVisible(true)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  <Feather name="more-horizontal" size={22} color="#fff" />
+                </TouchableOpacity>
+              </View>
             </View>
 
             <View style={th.gamif}>
@@ -1942,62 +1972,72 @@ export default function ProfileScreen() {
             </View>
 
             <View style={s.profile}>
-              <View style={s.topRow}>
-                <View style={[s.avatarContainer, hasGlowingAvatar && { marginRight: 28 }]}>
+              <LinearGradient
+                colors={[theme.primary + '00', theme.primary + '26', theme.primary + '00']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={s.waveBg}
+                pointerEvents="none"
+              />
+
+              <View style={s.avatarSection}>
+                {(earnedBadgeIds.includes('founding_member') || earnedBadgeIds.includes('early_adopter')) && (
+                  <View style={s.founderPillWrap}>
+                    <FounderBadgePill isFounder={earnedBadgeIds.includes('founding_member')} primaryColor={theme.primary} />
+                  </View>
+                )}
+                <View style={s.avatarContainer}>
                   <TouchableOpacity onPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
-                    {AvatarNode}
+                    <ReferralGlowBorder color={theme.primary} size={90}>{AvatarImg}</ReferralGlowBorder>
                   </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[th.cameraBadge, hasGlowingAvatar && { bottom: -2, right: -10 }]}
-                    onPress={handleChangeAvatar}
-                  >
+                  <TouchableOpacity style={[th.cameraBadge, { bottom: -2, right: -2 }]} onPress={handleChangeAvatar}>
                     {uploadingAvatar
                       ? <ActivityIndicator size="small" color="#fff" />
-                      : <Feather name="camera" size={14} color="#fff" />}
+                      : <Feather name="plus" size={14} color="#fff" />}
                   </TouchableOpacity>
                 </View>
-                <View style={s.statsRow}>
-                  <View style={s.stat}>
-                    <Text style={s.statNum}>{stats.posts_count}</Text>
-                    <Text style={s.statLbl}>{t.common.posts}</Text>
-                  </View>
-                  <TouchableOpacity style={s.stat} onPress={async () => { await loadFollowers(); setFollowersModalVisible(true); }}>
-                    <Text style={s.statNum}>{stats.followers_count}</Text>
-                    <Text style={s.statLbl}>{t.common.followers}</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={s.stat} onPress={async () => { await loadFollowing(); setFollowingModalVisible(true); }}>
-                    <Text style={s.statNum}>{stats.following_count}</Text>
-                    <Text style={s.statLbl}>{t.common.following}</Text>
-                  </TouchableOpacity>
+              </View>
+
+              <View style={s.nameRowCenter}>
+                <Text style={s.nameCenter}>{userProfile.display_name}</Text>
+                {userProfile.is_premium
+                  ? <MaterialCommunityIcons name="crown" size={18} color="#ffd700" />
+                  : <Feather name="check-circle" size={16} color={theme.primary} />}
+              </View>
+              <Text style={s.usernameCenter}>@{userProfile.username}</Text>
+
+              <View style={s.statsRowCenter}>
+                <View style={s.stat}>
+                  <Text style={s.statNum}>{stats.posts_count}</Text>
+                  <Text style={s.statLbl}>{t.common.posts}</Text>
                 </View>
+                <TouchableOpacity style={s.stat} onPress={async () => { await loadFollowers(); setFollowersModalVisible(true); }}>
+                  <Text style={s.statNum}>{stats.followers_count}</Text>
+                  <Text style={s.statLbl}>{t.common.followers}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.stat} onPress={async () => { await loadFollowing(); setFollowingModalVisible(true); }}>
+                  <Text style={s.statNum}>{stats.following_count}</Text>
+                  <Text style={s.statLbl}>{t.common.following}</Text>
+                </TouchableOpacity>
               </View>
 
               {isWeeklyWinner && winnerWeekLabel
                 ? <WinnerProfileBadge weekLabel={winnerWeekLabel} points={winnerPoints} />
                 : null}
 
-              {(earnedBadgeIds.includes('founding_member') || earnedBadgeIds.includes('early_adopter')) && (
-                <FounderBadgeStrip isFounder={earnedBadgeIds.includes('founding_member')} primaryColor={theme.primary} />
-              )}
-
-              <View style={s.info}>
-                <View style={s.nameRow}>
-                  <Text style={s.name}>{userProfile.display_name}</Text>
-                  {userProfile.is_premium && <MaterialCommunityIcons name="crown" size={20} color="#ffd700" />}
-                  {hasGlowingAvatar && (
-                    <View style={[s.glowBadge, { backgroundColor: theme.primary + '22', borderColor: theme.primary + '66' }]}>
-                      <Text style={[s.glowBadgeText, { color: theme.primary }]}>✨ Top Referrer</Text>
-                    </View>
-                  )}
-                </View>
-                <Text style={s.username}>@{userProfile.username}</Text>
-                {(userProfile as any).bio ? <Text style={s.bio}>{(userProfile as any).bio}</Text> : null}
-                <View style={s.likesRow}>
+              <View style={s.infoCenter}>
+                {hasGlowingAvatar && (
+                  <View style={[s.glowBadge, { alignSelf: 'center', backgroundColor: theme.primary + '22', borderColor: theme.primary + '66', marginBottom: 6 }]}>
+                    <Text style={[s.glowBadgeText, { color: theme.primary }]}>✨ Top Referrer</Text>
+                  </View>
+                )}
+                {(userProfile as any).bio ? <Text style={s.bioCenter}>{(userProfile as any).bio}</Text> : null}
+                <View style={s.likesRowCenter}>
                   <Feather name="heart" size={14} color="#ff4d8f" />
                   <Text style={s.likesText}>{stats.likes_received} likes received</Text>
                 </View>
                 {activeSocialLinks.length > 0 && (
-                  <View style={s.socialBadgesRow}>
+                  <View style={[s.socialBadgesRow, { justifyContent: 'center' }]}>
                     {activeSocialLinks.map(platform => (
                       <TouchableOpacity
                         key={platform.id}
@@ -2011,7 +2051,7 @@ export default function ProfileScreen() {
                   </View>
                 )}
                 <TouchableOpacity
-                  style={s.addSocialBtn}
+                  style={[s.addSocialBtn, { alignSelf: 'center' }]}
                   onPress={() => { setEditingSocial({ ...socialLinks }); setSocialModalVisible(true); }}
                 >
                   <Feather name="link" size={13} color="#666" />
@@ -2021,22 +2061,36 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </View>
 
-              <View style={s.actions}>
-                <TouchableOpacity style={th.btnPrimary} onPress={handleEditProfile}>
+              <View style={s.actionsCenter}>
+                <TouchableOpacity style={[th.btnPrimary, s.actionBtnFlex]} onPress={handleEditProfile}>
                   <Text style={th.btnText}>{t.profile.editProfile}</Text>
                 </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.btnSecondary, s.actionBtnFlex]}
+                  onPress={() => Share.share({ message: `Check out my LumVibe profile @${userProfile.username} 👉 https://lumvibe.site` })}
+                >
+                  <Text style={s.btnSecondaryText}>Share Profile</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.moreActionsBtn} onPress={() => setSettingsVisible(true)}>
+                  <Feather name="chevron-down" size={18} color="#fff" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={s.quickActionsRow}>
                 <TouchableOpacity
                   style={s.btnSecondary}
                   onPress={async () => { await Promise.all([loadUserCoins(), loadTransactions()]); setWalletVisible(true); }}
                 >
-                  <Feather name="dollar-sign" size={18} color={th.icon} />
+                  <Feather name="dollar-sign" size={16} color={th.icon} />
                   <Text style={s.btnSecondaryText}>{coins.toFixed(2)}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={s.btnSecondary} onPress={() => setInviteModalVisible(true)}>
-                  <Feather name="user-plus" size={18} color={th.icon} />
+                  <Feather name="user-plus" size={16} color={th.icon} />
+                  <Text style={s.btnSecondaryText}>Invite</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={s.btnSecondary} onPress={async () => { await loadSavedPosts(); setSavedPostsModalVisible(true); }}>
-                  <Feather name="bookmark" size={18} color={th.icon} />
+                  <Feather name="bookmark" size={16} color={th.icon} />
+                  <Text style={s.btnSecondaryText}>Saved</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -3097,6 +3151,24 @@ const s = StyleSheet.create({
   glowBadge:           { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1 },
   glowBadgeText:       { fontSize: 11, fontWeight: '700' },
   actions:             { flexDirection: 'row', gap: 8 },
+  topBar:              { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 60, paddingBottom: 10 },
+  topBarIcons:         { flexDirection: 'row', alignItems: 'center', gap: 18 },
+  waveBg:              { position: 'absolute', top: 0, left: 0, right: 0, height: 220, borderRadius: 0 },
+  avatarSection:        { alignItems: 'center', paddingTop: 8, marginBottom: 10, position: 'relative' },
+  founderPillWrap:      { position: 'absolute', left: 20, top: 4 },
+  founderPill:          { width: 66, alignItems: 'center', paddingVertical: 8, paddingHorizontal: 6, borderRadius: 14, borderWidth: 1.5, backgroundColor: '#0d1f16' },
+  founderPillText:      { fontSize: 10, fontWeight: '700', textAlign: 'center', marginTop: 4, lineHeight: 12 },
+  nameRowCenter:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 2 },
+  nameCenter:           { color: '#fff', fontSize: 19, fontWeight: 'bold' },
+  usernameCenter:       { color: '#888', fontSize: 13, textAlign: 'center', marginTop: 2 },
+  statsRowCenter:       { flexDirection: 'row', justifyContent: 'center', gap: 36, marginTop: 16, marginBottom: 4 },
+  infoCenter:           { alignItems: 'center', marginTop: 10, marginBottom: 14, paddingHorizontal: 24 },
+  bioCenter:            { color: '#ccc', fontSize: 13, lineHeight: 19, textAlign: 'center', marginBottom: 6 },
+  likesRowCenter:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 6 },
+  actionsCenter:        { flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 10 },
+  actionBtnFlex:        { flex: 1 },
+  moreActionsBtn:       { width: 40, height: 40, borderRadius: 8, borderWidth: 1, borderColor: '#222', backgroundColor: '#111', alignItems: 'center', justifyContent: 'center' },
+  quickActionsRow:      { flexDirection: 'row', gap: 8 },
   btnSecondary:        { backgroundColor: '#111', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#222', flexDirection: 'row', gap: 4 },
   btnSecondaryText:    { color: '#fff', fontSize: 14, fontWeight: '600' },
   gamifRow:            { flexDirection: 'row', justifyContent: 'space-between' },
@@ -3110,7 +3182,7 @@ const s = StyleSheet.create({
   postsSection:        { paddingHorizontal: 20, paddingTop: 8 },
   sectionTitle:        { color: '#fff', fontSize: 16, fontWeight: 'bold', paddingHorizontal: 20, marginBottom: 12 },
   postsGrid:           { flexDirection: 'row', flexWrap: 'wrap' },
-  postThumb:           { width: POST_SIZE, height: POST_SIZE * 1.35, backgroundColor: '#111', position: 'relative', overflow: 'hidden', margin: 0.5 },
+  postThumb:           { width: POST_SIZE, height: POST_SIZE, backgroundColor: '#111', position: 'relative', overflow: 'hidden', margin: 0.5 },
   postThumbVideoBg:    { width: '100%', height: '100%', backgroundColor: '#111', justifyContent: 'center', alignItems: 'center' },
   postThumbImg:        { width: '100%', height: '100%' },
   postThumbStats:      { position: 'absolute', bottom: 4, left: 4, flexDirection: 'row', gap: 6 },

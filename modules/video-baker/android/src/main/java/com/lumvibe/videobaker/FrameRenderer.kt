@@ -130,6 +130,7 @@ class FrameRenderer {
     // HAND_PORTAL's circle, normalized screen space, written from HandTracker.palmCenter().
     var portalCenter: FloatArray = floatArrayOf(0.5f, 0.5f)
     var portalRadius: Float = 0.18f
+    var mouthCenter: FloatArray = floatArrayOf(0.5f, 0.6f) // GOLD_SKIN's mask needs no such property; this is MOUTH_FIRE's anchor
     // FIST_BUMP_BOOM's trigger point + decaying energy (1.0 = just punched, decays to 0).
     var boomCenter: FloatArray = floatArrayOf(0.5f, 0.5f)
     var boomEnergy: Float = 0f
@@ -282,6 +283,7 @@ class FrameRenderer {
         val uGazeAges = GLES20.glGetUniformLocation(program, "uGazeAges")
         val uGazeCount = GLES20.glGetUniformLocation(program, "uGazeCount")
         val uDirection = GLES20.glGetUniformLocation(program, "uDirection")
+        val uMouthCenter = GLES20.glGetUniformLocation(program, "uMouthCenter")
 
         GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
         GLES20.glUniform1i(uTexture, 0)
@@ -305,6 +307,7 @@ class FrameRenderer {
         if (uGazeAges >= 0) GLES20.glUniform1fv(uGazeAges, 8, gazeAges, 0)
         if (uGazeCount >= 0) GLES20.glUniform1i(uGazeCount, gazeCount.coerceIn(0, 8))
         if (uDirection >= 0) GLES20.glUniform1f(uDirection, doubleTakeDirection.coerceIn(-1f, 1f))
+        if (uMouthCenter >= 0) GLES20.glUniform2fv(uMouthCenter, 1, mouthCenter, 0)
         // Secondary texture (mask or portal scene) goes on unit 1 — only bind it
         // when this program actually declares one of the two samplers that use it.
         if (uMaskTexture >= 0 || uPortalTexture >= 0) {

@@ -21,6 +21,7 @@ import {
   PanResponder, GestureResponderEvent, RefreshControl, Platform, Linking,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Video from 'react-native-video';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -547,14 +548,14 @@ const nativeAdStyles = StyleSheet.create({
 // ─── VIDEO POST ───────────────────────────────────────────────────────────────
 const VideoPost = memo(function VideoPost({
   item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onSaveMedia, onDelete, onReport, user, onView, followStatusMap,
-  vibeRoomMap,
+  vibeRoomMap, topOffset,
 }: {
   item: Post; activePostId: string | null; onLike: (post: Post) => void; onComment: (post: Post) => void;
   onGift: (post: Post) => void; onFollow: (userId: string, isFollowing: boolean) => Promise<void>;
   onUserPress: (userId: string) => void; onShare: (post: Post) => void; onSaveMedia: (post: Post) => void;
   onDelete: (post: Post) => void; onReport: (post: Post) => void;
   user: any; onView: (postId: string) => void; followStatusMap: Map<string, boolean>;
-  vibeRoomMap: Map<string, VibeRoomPreview>;
+  vibeRoomMap: Map<string, VibeRoomPreview>; topOffset: number;
 }) {
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
@@ -706,7 +707,7 @@ const VideoPost = memo(function VideoPost({
         {tintColor && (<View style={[styles.filterTintOverlay, { backgroundColor: tintColor }]} pointerEvents="none" />)}
 
         {item.vibe_type && VIBE_TYPES[item.vibe_type] && (
-          <View pointerEvents="none" style={[styles.vibeBadge, { backgroundColor: VIBE_TYPES[item.vibe_type].color + '22', borderColor: VIBE_TYPES[item.vibe_type].color }]}>
+          <View pointerEvents="none" style={[styles.vibeBadge, { top: topOffset + 40, backgroundColor: VIBE_TYPES[item.vibe_type].color + '22', borderColor: VIBE_TYPES[item.vibe_type].color }]}>
             <Text style={styles.vibeBadgeEmoji}>{VIBE_TYPES[item.vibe_type].emoji}</Text>
             <Text style={[styles.vibeBadgeText, { color: VIBE_TYPES[item.vibe_type].color }]}>{VIBE_TYPES[item.vibe_type].label.toUpperCase()}</Text>
           </View>
@@ -736,7 +737,7 @@ const VideoPost = memo(function VideoPost({
 
       {/* ✅ NEW: Three-dot menu button — top right */}
       <TouchableOpacity
-        style={styles.menuDotBtn}
+        style={[styles.menuDotBtn, { top: topOffset }]}
         onPress={() => setMenuVisible(true)}
         activeOpacity={0.8}
         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -746,7 +747,7 @@ const VideoPost = memo(function VideoPost({
 
       {/* ✅ NEW: standalone download button — always visible, single tap, no menu needed */}
       <TouchableOpacity
-        style={styles.downloadBtn}
+        style={[styles.downloadBtn, { top: topOffset }]}
         onPress={() => onSaveMedia(item)}
         activeOpacity={0.8}
         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -910,12 +911,18 @@ const VideoPost = memo(function VideoPost({
 
       <View style={styles.actionsRight}>
         <TouchableOpacity style={styles.actionButtonRight} onPress={() => onLike(item)} activeOpacity={0.7}>
-          <View style={styles.iconContainer}><Feather name="heart" size={32} color={isLiked ? '#00ff88' : '#fff'} /></View>
-          <Text style={styles.actionTextRight}>{item.likes_count}</Text>
+          <View style={styles.iconContainer}>
+            <MaterialCommunityIcons name={isLiked ? 'heart' : 'heart-outline'} size={32} color="#00ff88" />
+          </View>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>{item.likes_count}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButtonRight} onPress={() => onComment(item)} activeOpacity={0.7}>
-          <View style={styles.iconContainer}><Feather name="message-circle" size={30} color="#fff" /></View>
-          <Text style={styles.actionTextRight}>{item.comments_count}</Text>
+          <View style={styles.iconContainer}><Feather name="message-circle" size={30} color="#00ff88" /></View>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>{item.comments_count}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.actionButtonRight} onPress={() => onShare(item)} activeOpacity={0.7}>
+          <View style={styles.iconContainer}><Feather name="share" size={28} color="#00ff88" /></View>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>Share</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButtonRight} onPress={() => onGift(item)} activeOpacity={0.7}>
           <View style={styles.iconContainer}><MaterialCommunityIcons name="gift-outline" size={32} color="#ffd700" /></View>
@@ -1083,7 +1090,27 @@ export default function VideosScreen() {
   const { userProfile, user, loadProfile } = useAuthStore();
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
   const userId = user?.id || (user as any)?.id;
+
+  // ✅ NEW: Vibe / Following feed tabs — header height scales with device safe-area
+  const [activeFeedTab, setActiveFeedTab] = useState<'vibe' | 'following'>('vibe');
+  const [hasUnreadNotif, setHasUnreadNotif] = useState(false);
+  const HEADER_HEIGHT = insets.top + 96;
+
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      try {
+        const { count } = await supabase
+          .from('notifications')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('is_read', false);
+        setHasUnreadNotif((count || 0) > 0);
+      } catch {}
+    })();
+  }, [userId]);
 
   const [posts,               setPosts]               = useState<Post[]>([]);
   const [feedItems,           setFeedItems]           = useState<FeedItem[]>([]);
@@ -1679,10 +1706,17 @@ export default function VideosScreen() {
         onFollow={handleFollow} onUserPress={handleUserPress} onShare={handleShare}
         onSaveMedia={handleSaveMedia} onDelete={handleDeletePost} onReport={handleReport}
         user={user} onView={handleView} followStatusMap={followStatusMap}
-        vibeRoomMap={vibeRoomMap}
+        vibeRoomMap={vibeRoomMap} topOffset={HEADER_HEIGHT}
       />
     );
-  }, [activePostId, weeklyWinners, followStatusMap, vibeRoomMap, handleLike, handleComment, handleGift, handleFollow, handleUserPress, handleShare, handleSaveMedia, handleDeletePost, handleReport, handleView, user]);
+  }, [activePostId, weeklyWinners, followStatusMap, vibeRoomMap, handleLike, handleComment, handleGift, handleFollow, handleUserPress, handleShare, handleSaveMedia, handleDeletePost, handleReport, handleView, user, HEADER_HEIGHT]);
+
+  // ✅ NEW: "Following" tab shows only posts from creators the viewer already follows,
+  // filtered client-side from the same feed data (no extra network round-trip).
+  const displayedFeedItems = useMemo(() => {
+    if (activeFeedTab !== 'following') return feedItems;
+    return feedItems.filter(fi => !isAd(fi) && !isWinnerCard(fi) && followStatusMap.get((fi as Post).user_id) === true);
+  }, [feedItems, activeFeedTab, followStatusMap]);
 
   if (loading) return (<View style={styles.loadingContainer}><ActivityIndicator size="large" color="#00ff88" /><Text style={styles.loadingText}>{t.videos.loadingVideos}</Text></View>);
 
@@ -1707,7 +1741,7 @@ export default function VideosScreen() {
       )}
 
       <FlatList
-        ref={flatListRef} data={feedItems} keyExtractor={(item) => item.id} renderItem={renderItem}
+        ref={flatListRef} data={displayedFeedItems} keyExtractor={(item) => item.id} renderItem={renderItem}
         pagingEnabled showsVerticalScrollIndicator={false}
         snapToInterval={height} snapToAlignment="start" decelerationRate="fast"
         getItemLayout={(_data, index) => ({ length: height, offset: height * index, index })}
@@ -1728,18 +1762,55 @@ export default function VideosScreen() {
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Feather name="video" size={64} color="#333" />
-            <Text style={styles.emptyText}>{t.videos.noVideos}</Text>
-            <Text style={styles.emptySubtext}>{t.videos.noVideosSubtext}</Text>
+            <Text style={styles.emptyText}>
+              {activeFeedTab === 'following' ? 'No videos yet from people you follow' : t.videos.noVideos}
+            </Text>
+            <Text style={styles.emptySubtext}>
+              {activeFeedTab === 'following' ? 'Follow more creators to see their vibes here' : t.videos.noVideosSubtext}
+            </Text>
             <TouchableOpacity
               style={{ marginTop: 20, paddingHorizontal: 24, paddingVertical: 12, backgroundColor: '#00ff88', borderRadius: 24 }}
-              onPress={() => loadVideos(true)}
+              onPress={() => activeFeedTab === 'following' ? setActiveFeedTab('vibe') : loadVideos(true)}
               activeOpacity={0.8}
             >
-              <Text style={{ color: '#000', fontWeight: '700', fontSize: 14 }}>Refresh Feed</Text>
+              <Text style={{ color: '#000', fontWeight: '700', fontSize: 14 }}>
+                {activeFeedTab === 'following' ? 'Explore Vibe Feed' : 'Refresh Feed'}
+              </Text>
             </TouchableOpacity>
           </View>
         }
       />
+
+      {/* ✅ NEW: LUMVIBE header + Vibe/Following tabs — fixed on top, safe-area aware for any device */}
+      <View style={[styles.topHeaderWrap, { height: HEADER_HEIGHT }]} pointerEvents="box-none">
+        <LinearGradient
+          colors={['rgba(0,0,0,0.65)', 'rgba(0,0,0,0.25)', 'transparent']}
+          style={StyleSheet.absoluteFillObject}
+          pointerEvents="none"
+        />
+        <View style={[styles.topHeaderRow, { marginTop: insets.top + 8 }]}>
+          <Text style={styles.lumvibeLogo}>LUMVIBE</Text>
+          <View style={styles.topHeaderIcons}>
+            <TouchableOpacity onPress={() => navigation.navigate('Explore')} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Feather name="search" size={22} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => navigation.navigate('Notifications')} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ position: 'relative' }}>
+              <Feather name="bell" size={22} color="#fff" />
+              {hasUnreadNotif && <View style={styles.notifDot} />}
+            </TouchableOpacity>
+          </View>
+        </View>
+        <View style={styles.feedTabsRow}>
+          <TouchableOpacity onPress={() => setActiveFeedTab('vibe')} style={styles.feedTabBtn} activeOpacity={0.8}>
+            <Text style={[styles.feedTabText, activeFeedTab === 'vibe' && styles.feedTabTextActive]}>Vibe</Text>
+            {activeFeedTab === 'vibe' && <View style={styles.feedTabIndicator} />}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setActiveFeedTab('following')} style={styles.feedTabBtn} activeOpacity={0.8}>
+            <Text style={[styles.feedTabText, activeFeedTab === 'following' && styles.feedTabTextActive]}>Following</Text>
+            {activeFeedTab === 'following' && <View style={styles.feedTabIndicator} />}
+          </TouchableOpacity>
+        </View>
+      </View>
 
       {weeklyWinners.length > 0 && showWinnersOverlay && (
         <WinnersVideoOverlay winners={weeklyWinners} onUserPress={handleUserPress} onDismiss={() => setShowWinnersOverlay(false)} />
@@ -2004,6 +2075,16 @@ const styles = StyleSheet.create({
   coinsOverlay:         { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 },
   coinsOverlayText:     { color: '#ffd700', fontSize: 12, fontWeight: '600' },
   vibeBadge:            { position: 'absolute', top: 52, right: 12, zIndex: 15, flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1.5 },
+  topHeaderWrap:        { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 50, paddingHorizontal: 16 },
+  topHeaderRow:         { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  lumvibeLogo:          { color: '#fff', fontSize: 20, fontWeight: '800', letterSpacing: 0.5 },
+  topHeaderIcons:        { flexDirection: 'row', alignItems: 'center', gap: 18 },
+  notifDot:             { position: 'absolute', top: -2, right: -2, width: 9, height: 9, borderRadius: 5, backgroundColor: '#ff4444', borderWidth: 1.5, borderColor: '#000' },
+  feedTabsRow:          { flexDirection: 'row', gap: 24, marginTop: 14 },
+  feedTabBtn:           { alignItems: 'center', paddingBottom: 8 },
+  feedTabText:          { color: 'rgba(255,255,255,0.6)', fontSize: 15, fontWeight: '600' },
+  feedTabTextActive:    { color: '#00ff88', fontWeight: '700' },
+  feedTabIndicator:     { marginTop: 6, width: 22, height: 2.5, borderRadius: 2, backgroundColor: '#00ff88' },
   vibeBadgeEmoji:       { fontSize: 13 },
   vibeBadgeText:        { fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   adContainer:          { width, height, backgroundColor: '#0a0a0a', justifyContent: 'center', alignItems: 'center', padding: 20 },

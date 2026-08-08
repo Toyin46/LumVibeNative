@@ -339,8 +339,55 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             if (lm.x() > maxX) maxX = lm.x()
             if (lm.y() > maxY) maxY = lm.y()
         }
+
+        // Blendshape-driven effects — same scores/thresholds VideoTranscoder computes
+        // in the bake path (see its faceScoreEffects/mouthEffects when-branches), just
+        // gated per-effect here so effectIntensity (shared across all of them) never
+        // gets clobbered by a score meant for a different effect. Only fetch
+        // faceBlendshapes() once, when actually needed — it's not free.
+        var intensityOverride: Float? = null
+        var mouthX = 0.5f
+        var mouthY = 0.6f
+        var mouthUpdated = false
+        when (r.currentEffect) {
+            VisualEffect.MOOD_RING, VisualEffect.SMILE_SHATTER -> {
+                val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
+                val left = shapes?.firstOrNull { it.categoryName() == "mouthSmileLeft" }?.score() ?: 0f
+                val right = shapes?.firstOrNull { it.categoryName() == "mouthSmileRight" }?.score() ?: 0f
+                intensityOverride = maxOf(left, right)
+            }
+            VisualEffect.WINK_SPARK -> {
+                val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
+                val left = shapes?.firstOrNull { it.categoryName() == "eyeBlinkLeft" }?.score() ?: 0f
+                val right = shapes?.firstOrNull { it.categoryName() == "eyeBlinkRight" }?.score() ?: 0f
+                // Same "clean single-eye wink" gate VideoTranscoder uses — plain
+                // |L - R| would also fire on a full double-blink.
+                intensityOverride = when {
+                    left > 0.6f && right < 0.3f -> left
+                    right > 0.6f && left < 0.3f -> right
+                    else -> 0f
+                }
+            }
+            VisualEffect.MOUTH_FIRE -> {
+                val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
+                intensityOverride = shapes?.firstOrNull { it.categoryName() == "jawOpen" }?.score() ?: 0f
+                // Same landmark 13/14 midpoint FaceTracker.mouthCenter() uses in the
+                // bake path — see that method's doc for why 13/14 are safe here.
+                if (landmarks.size > 14) {
+                    val upper = landmarks[13]
+                    val lower = landmarks[14]
+                    mouthX = (upper.x() + lower.x()) / 2f
+                    mouthY = (upper.y() + lower.y()) / 2f
+                    mouthUpdated = true
+                }
+            }
+            else -> {}
+        }
+
         renderHandler?.post {
             r.faceBox = floatArrayOf(minX, minY, maxX, maxY)
+            intensityOverride?.let { r.effectIntensity = it }
+            if (mouthUpdated) r.mouthCenter = floatArrayOf(mouthX, mouthY)
         }
     }
 
