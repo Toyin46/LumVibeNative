@@ -70,8 +70,17 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
     // ---- Public control surface, called from the RN bridge / ViewManager ----
 
+    // Whatever effect was last requested, even if it arrived before renderer
+    // existed — applied in setupEgl() once the renderer is actually created.
+    // Fixes a real race: Expo's Prop setter can call setEffect() synchronously
+    // right after view creation, well before surfaceCreated()/setupEgl() have
+    // run — without this, that first selection silently no-ops and the effect
+    // never reaches the renderer at all.
+    private var pendingEffect: VisualEffect = VisualEffect.NONE
+
     /** Same VisualEffect enum EffectShaders/FrameRenderer already use — no new effect vocabulary. */
     fun setEffect(effect: VisualEffect) {
+        pendingEffect = effect
         renderHandler?.post { renderer?.setEffect(effect) }
     }
 
@@ -175,6 +184,9 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         eglCore!!.makeCurrent(eglSurface!!)
 
         renderer = FrameRenderer().apply { setup() }
+        // Apply whatever effect was requested before the renderer existed — see
+        // pendingEffect's doc for why this line is the actual fix, not just belt-and-braces.
+        renderer?.setEffect(pendingEffect)
         cameraTexId = GlUtil.createExternalTexture()
         cameraSurfaceTexture = SurfaceTexture(cameraTexId).apply {
             setDefaultBufferSize(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))
@@ -293,10 +305,18 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
         val elapsedSec = (System.nanoTime() - startTimeNs) / 1_000_000_000f
         r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+
+        // FIX: must read pixels for tracking BEFORE swapBuffers, not after — on
+        // most EGL drivers the back buffer's contents become UNDEFINED right
+        // after a swap (no EGL_BUFFER_PRESERVED here), so reading post-swap risks
+        // grabbing garbage or a blank frame. That silently starves MediaPipe of
+        // real input, which is a very plausible reason face/hand tracking looked
+        // like it "wasn't working" — the frames it was fed may not have been the
+        // frames actually on screen.
+        maybeSubmitForTracking()
+
         eglC.setPresentationTime(eglS, System.nanoTime())
         eglC.swapBuffers(eglS)
-
-        maybeSubmitForTracking()
     }
 
     /** Throttled bitmap grab for MediaPipe — see trackingIntervalMs comment above. */
@@ -307,12 +327,26 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
         // Reuses the same GlUtil.readPixelsAsBitmap the freeze-frame effect uses —
         // real GPU->CPU cost, which is exactly why this is throttled and not
-        // called every render frame.
-        val bitmap: Bitmap = try {
+        // called every render frame. Must read at the FULL framebuffer size —
+        // readPixelsAsBitmap(w,h) reads a WxH region at 1:1, it doesn't scale, so
+        // passing a smaller size would just read a cropped corner, not a
+        // downscaled frame. Scale down AFTER reading instead, since MediaPipe's
+        // face/hand/segmentation models resize to a small fixed input internally
+        // anyway (roughly 192-256px) — feeding them a full 1080p+ bitmap wastes
+        // CPU on detail the model throws away immediately. Capping the longer
+        // edge at 320px cuts that wasted work with no meaningful accuracy loss
+        // for this use case (visual effects, not precision measurement).
+        val fullBitmap: Bitmap = try {
             GlUtil.readPixelsAsBitmap(surfaceW, surfaceH)
         } catch (e: Exception) {
             return
         }
+        val scale = 320f / maxOf(fullBitmap.width, fullBitmap.height).coerceAtLeast(1)
+        val bitmap = if (scale < 1f) {
+            Bitmap.createScaledBitmap(fullBitmap, (fullBitmap.width * scale).toInt().coerceAtLeast(1), (fullBitmap.height * scale).toInt().coerceAtLeast(1), true).also {
+                fullBitmap.recycle()
+            }
+        } else fullBitmap
         val ts = now
         trackingHandler?.post {
             val mpImage = BitmapImageBuilder(bitmap).build()

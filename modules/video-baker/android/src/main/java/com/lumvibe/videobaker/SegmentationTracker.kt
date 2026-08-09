@@ -6,6 +6,7 @@ import android.graphics.Color
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import java.nio.ByteBuffer
@@ -37,17 +38,26 @@ import java.nio.ByteBuffer
 */
 class SegmentationTracker(context: Context) {
 
-    private val segmenter: ImageSegmenter = run {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath("selfie_segmenter.tflite")
-            .build()
+    // SPEED: same GPU-with-CPU-fallback pattern as FaceTracker/HandTracker.
+    // Segmentation is the heaviest of the three models per-frame, so this is
+    // where GPU delegate matters most.
+    private val segmenter: ImageSegmenter = createSegmenter(context, useGpu = true)
+        ?: createSegmenter(context, useGpu = false)
+        ?: throw IllegalStateException("ImageSegmenter failed to initialize on both GPU and CPU delegates")
+
+    private fun createSegmenter(context: Context, useGpu: Boolean): ImageSegmenter? = try {
+        val baseOptionsBuilder = BaseOptions.builder().setModelAssetPath("selfie_segmenter.tflite")
+        if (useGpu) baseOptionsBuilder.setDelegate(Delegate.GPU)
         val options = ImageSegmenter.ImageSegmenterOptions.builder()
-            .setBaseOptions(baseOptions)
+            .setBaseOptions(baseOptionsBuilder.build())
             .setRunningMode(RunningMode.VIDEO)
             .setOutputCategoryMask(true)
             .setOutputConfidenceMasks(false)
             .build()
         ImageSegmenter.createFromOptions(context, options)
+    } catch (e: Exception) {
+        if (useGpu) android.util.Log.w("SegmentationTracker", "GPU delegate init failed, falling back to CPU", e)
+        null
     }
 
     /**
@@ -97,4 +107,4 @@ class SegmentationTracker(context: Context) {
     fun close() {
         segmenter.close()
     }
-} 
+}  

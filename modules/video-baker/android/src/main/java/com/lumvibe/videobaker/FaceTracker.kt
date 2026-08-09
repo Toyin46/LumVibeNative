@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
@@ -22,12 +23,20 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 */
 class FaceTracker(context: Context) {
 
-    private val faceLandmarker: FaceLandmarker = run {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath("face_landmarker.task")
-            .build()
+    // SPEED: GPU delegate first, falling back to CPU if the device/driver doesn't
+    // support it — MediaPipe on GPU is typically several times faster than CPU for
+    // these vision models. Wrapped in try/catch rather than assumed-safe because
+    // GPU delegate support varies by device/GPU driver; a device that can't
+    // initialize it should still bake (slower), not crash outright.
+    private val faceLandmarker: FaceLandmarker = createLandmarker(context, useGpu = true)
+        ?: createLandmarker(context, useGpu = false)
+        ?: throw IllegalStateException("FaceLandmarker failed to initialize on both GPU and CPU delegates")
+
+    private fun createLandmarker(context: Context, useGpu: Boolean): FaceLandmarker? = try {
+        val baseOptionsBuilder = BaseOptions.builder().setModelAssetPath("face_landmarker.task")
+        if (useGpu) baseOptionsBuilder.setDelegate(Delegate.GPU)
         val options = FaceLandmarker.FaceLandmarkerOptions.builder()
-            .setBaseOptions(baseOptions)
+            .setBaseOptions(baseOptionsBuilder.build())
             .setRunningMode(RunningMode.VIDEO)
             .setOutputFaceBlendshapes(true)
             // NEW: needed for HEAD_TILT_ZOOM / DOUBLE_TAKE — gives us a 4x4 head-pose
@@ -37,6 +46,9 @@ class FaceTracker(context: Context) {
             .setNumFaces(1)
             .build()
         FaceLandmarker.createFromOptions(context, options)
+    } catch (e: Exception) {
+        if (useGpu) android.util.Log.w("FaceTracker", "GPU delegate init failed, falling back to CPU", e)
+        null
     }
 
     /**

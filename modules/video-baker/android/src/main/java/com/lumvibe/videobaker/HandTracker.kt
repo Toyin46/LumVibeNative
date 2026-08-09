@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
@@ -31,16 +32,24 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 */
 class HandTracker(context: Context) {
 
-    private val handLandmarker: HandLandmarker = run {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath("hand_landmarker.task")
-            .build()
+    // SPEED: same GPU-with-CPU-fallback pattern as FaceTracker — see its comment
+    // for why this is wrapped in try/catch instead of assumed safe.
+    private val handLandmarker: HandLandmarker = createLandmarker(context, useGpu = true)
+        ?: createLandmarker(context, useGpu = false)
+        ?: throw IllegalStateException("HandLandmarker failed to initialize on both GPU and CPU delegates")
+
+    private fun createLandmarker(context: Context, useGpu: Boolean): HandLandmarker? = try {
+        val baseOptionsBuilder = BaseOptions.builder().setModelAssetPath("hand_landmarker.task")
+        if (useGpu) baseOptionsBuilder.setDelegate(Delegate.GPU)
         val options = HandLandmarker.HandLandmarkerOptions.builder()
-            .setBaseOptions(baseOptions)
+            .setBaseOptions(baseOptionsBuilder.build())
             .setRunningMode(RunningMode.VIDEO)
             .setNumHands(2) // TWO_HAND_FRAME needs both hands visible at once
             .build()
         HandLandmarker.createFromOptions(context, options)
+    } catch (e: Exception) {
+        if (useGpu) android.util.Log.w("HandTracker", "GPU delegate init failed, falling back to CPU", e)
+        null
     }
 
     /** Same monotonic-timestamp contract as FaceTracker.detect(). Returns null if
@@ -93,4 +102,4 @@ class HandTracker(context: Context) {
     fun close() {
         handLandmarker.close()
     }
-} 
+}  

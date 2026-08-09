@@ -351,7 +351,27 @@ class VideoTranscoder {
                                 // leave the GPU. Same tradeoff MOOD_RING originally accepted;
                                 // now shared by every effect in this category.
                                 renderer.drawVideoFrame(decoderTextureId, texMatrix)
-                                val frameBitmap = GlUtil.readPixelsAsBitmap(width, height)
+                                // SPEED: read at full resolution (required — glReadPixels
+                                // reads a WxH region 1:1, it can't scale), then downscale
+                                // BEFORE handing to MediaPipe. Face/hand/segmentation models
+                                // all resize their input to a small fixed size internally
+                                // anyway (roughly 192-256px) — feeding them a full 1080p+
+                                // bitmap every frame wastes real CPU/GPU time on detail the
+                                // model discards immediately. Capping the longer edge at
+                                // 384px cuts that wasted work with no meaningful accuracy
+                                // loss for visual effects (not precision measurement).
+                                // averageLuma() below also runs on this smaller bitmap — an
+                                // average brightness doesn't need full-res input to be accurate.
+                                val rawBitmap = GlUtil.readPixelsAsBitmap(width, height)
+                                val trackScale = 384f / maxOf(rawBitmap.width, rawBitmap.height).coerceAtLeast(1)
+                                val frameBitmap = if (trackScale < 1f) {
+                                    android.graphics.Bitmap.createScaledBitmap(
+                                        rawBitmap,
+                                        (rawBitmap.width * trackScale).toInt().coerceAtLeast(1),
+                                        (rawBitmap.height * trackScale).toInt().coerceAtLeast(1),
+                                        true
+                                    ).also { rawBitmap.recycle() }
+                                } else rawBitmap
                                 val timestampMs = bufferInfo.presentationTimeUs / 1000
 
                                 // BLINK_FREEZE's capture must happen from THIS plain frame,
