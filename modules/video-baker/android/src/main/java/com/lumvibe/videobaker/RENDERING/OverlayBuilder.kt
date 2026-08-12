@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.opengl.GLES20
 import android.opengl.GLUtils
@@ -149,6 +150,63 @@ object OverlayBuilder {
     }
 
     /**
+     * MOUTH_WORDS's reactive text — bold outlined "pop" text (comic-book style:
+     * dark stroke behind a colored fill), no background box, so it reads clearly
+     * over any video content and floats naturally as a sticker rather than
+     * sitting in a card. Color is caller-supplied so the same function serves
+     * every word/color combination (WOW/OMG/HAHA today, any future word later)
+     * without duplicating this drawing logic per word.
+     */
+    fun buildWordBubble(word: String, textColor: Int, targetHeightPx: Float): LogoTexture {
+        // Scale factor relative to a 60px-tall reference design, matching the
+        // same "density from target size" convention buildWatermarkCard uses above.
+        val density = targetHeightPx / 60f
+        val textSizePx = 48f * density
+        val strokeWidthPx = 6f * density
+        val paddingPx = 12f * density
+
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = textColor
+            textSize = textSizePx
+            isFakeBoldText = true
+            textAlign = Paint.Align.LEFT
+        }
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = textSizePx
+            isFakeBoldText = true
+            textAlign = Paint.Align.LEFT
+            style = Paint.Style.STROKE
+            strokeWidth = strokeWidthPx
+        }
+
+        val bounds = Rect()
+        fillPaint.getTextBounds(word, 0, word.length, bounds)
+        val textWidth = bounds.width().toFloat()
+        val textHeight = bounds.height().toFloat()
+
+        val bmpW = (textWidth + paddingPx * 2 + strokeWidthPx * 2).toInt().coerceAtLeast(1)
+        val bmpH = (textHeight + paddingPx * 2 + strokeWidthPx * 2).toInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        val baselineX = paddingPx + strokeWidthPx
+        val baselineY = paddingPx + strokeWidthPx + textHeight
+
+        // Outline drawn first (sits behind), then the colored fill on top —
+        // the classic comic-text "pop" look, legible over any background.
+        canvas.drawText(word, baselineX, baselineY, strokePaint)
+        canvas.drawText(word, baselineX, baselineY, fillPaint)
+
+        val textureId = GlUtil.createTexture2D()
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        val result = LogoTexture(textureId, bmpW.toFloat(), bmpH.toFloat())
+        bitmap.recycle()
+        return result
+    }
+
+    /**
      * Decodes the HAND_PORTAL scene image from disk, scaled to a square
      * [targetSize] px bitmap (the portal shader samples it with UVs remapped to
      * 0..1 within the circle, so a square source avoids stretching). Returns null
@@ -168,4 +226,4 @@ object OverlayBuilder {
         src.recycle()
         return scaled
     }
-}  
+}   

@@ -63,5 +63,37 @@ class VideoBakerModule : Module() {
                 }
             }
         }
+
+        // Image baking — same options vocabulary as bakeVideo where it applies
+        // (watermark/caption/effect/effectIntensity), minus the video-only fields
+        // (no bounce speed, no frame rate) that don't mean anything for a single
+        // frame. Same Promise pattern as bakeVideo, for the same compatibility
+        // reason noted above — no progress events, since baking one image doesn't
+        // have a meaningful multi-step progress to report the way a video's
+        // frame-by-frame transcode does.
+        AsyncFunction("bakeImage") { inputPath: String, outputPath: String, options: Map<String, Any?>, promise: Promise ->
+            CoroutineScope(Dispatchers.Default).launch {
+                try {
+                    val baker = ImageBaker()
+                    val opts = ImageBaker.Options(
+                        watermarkPngPath = options["watermarkPngPath"] as? String,
+                        watermarkUsername = options["watermarkUsername"] as? String,
+                        watermarkWidthFraction = (options["watermarkWidthFraction"] as? Number)?.toFloat() ?: 0.18f,
+                        watermarkCardWidthFraction = (options["watermarkCardWidthFraction"] as? Number)?.toFloat() ?: 0.42f,
+                        captionText = options["captionText"] as? String,
+                        brightness = (options["brightness"] as? Number)?.toFloat() ?: 0f,
+                        contrast = (options["contrast"] as? Number)?.toFloat() ?: 1f,
+                        saturation = (options["saturation"] as? Number)?.toFloat() ?: 1f,
+                        effect = options["effect"] as? String,
+                        effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f,
+                        portalScenePngPath = options["portalScenePngPath"] as? String
+                    )
+                    baker.bake(videoBakerContext, inputPath, outputPath, opts)
+                    promise.resolve(outputPath)
+                } catch (e: Exception) {
+                    promise.reject("BAKE_IMAGE_ERROR", e.message ?: "Unknown error baking image", e)
+                }
+            }
+        }
     }
-}  
+}   

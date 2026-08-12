@@ -33,6 +33,12 @@ class EglCore {
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            // NEW: explicitly request BOTH surface types on the one config, so the
+            // same EglCore/config can back a window surface (video/live path) AND
+            // a pbuffer surface (image baking path) — without this bitwise-OR, a
+            // config is only guaranteed to support whichever single type the
+            // driver defaults to, which is not reliably both.
+            EGL14.EGL_SURFACE_TYPE, (EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT),
             0x3142, 1, // EGL_RECORDABLE_ANDROID, required so the surface can feed a MediaCodec encoder
             EGL14.EGL_NONE
         )
@@ -55,6 +61,26 @@ class EglCore {
         val attribs = intArrayOf(EGL14.EGL_NONE)
         val eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, surface, attribs, 0)
         if (eglSurface == EGL14.EGL_NO_SURFACE) throw RuntimeException("eglCreateWindowSurface failed")
+        return eglSurface
+    }
+
+    /**
+     * NEW: for rendering targets with no real Android Surface behind them — image
+     * baking specifically, which has no decoder/camera/encoder surface to draw
+     * into. A pbuffer is an off-screen GL-only render target; ImageBaker renders
+     * into this, then reads the pixels back with GlUtil.readPixelsAsBitmap, same
+     * readback function the video path already uses for BLINK_FREEZE and live
+     * preview tracking. Width/height must be positive — pbuffers don't support 0
+     * or negative dimensions the way some window surfaces tolerate.
+     */
+    fun createOffscreenSurface(width: Int, height: Int): EGLSurface {
+        val attribs = intArrayOf(
+            EGL14.EGL_WIDTH, width.coerceAtLeast(1),
+            EGL14.EGL_HEIGHT, height.coerceAtLeast(1),
+            EGL14.EGL_NONE
+        )
+        val eglSurface = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, attribs, 0)
+        if (eglSurface == EGL14.EGL_NO_SURFACE) throw RuntimeException("eglCreatePbufferSurface failed")
         return eglSurface
     }
 
@@ -86,4 +112,4 @@ class EglCore {
         eglDisplay = EGL14.EGL_NO_DISPLAY
         eglContext = EGL14.EGL_NO_CONTEXT
     }
-}  
+}   

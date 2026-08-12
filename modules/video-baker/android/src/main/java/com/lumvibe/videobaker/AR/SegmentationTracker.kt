@@ -6,7 +6,6 @@ import android.graphics.Color
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
-import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import java.nio.ByteBuffer
@@ -38,26 +37,26 @@ import java.nio.ByteBuffer
 */
 class SegmentationTracker(context: Context) {
 
-    // SPEED: same GPU-with-CPU-fallback pattern as FaceTracker/HandTracker.
-    // Segmentation is the heaviest of the three models per-frame, so this is
-    // where GPU delegate matters most.
-    private val segmenter: ImageSegmenter = createSegmenter(context, useGpu = true)
-        ?: createSegmenter(context, useGpu = false)
-        ?: throw IllegalStateException("ImageSegmenter failed to initialize on both GPU and CPU delegates")
-
-    private fun createSegmenter(context: Context, useGpu: Boolean): ImageSegmenter? = try {
-        val baseOptionsBuilder = BaseOptions.builder().setModelAssetPath("selfie_segmenter.tflite")
-        if (useGpu) baseOptionsBuilder.setDelegate(Delegate.GPU)
+    // REVERTED GPU delegate for segmentation specifically. Evidence: this is what
+    // started crashing right after GPU delegate was added — "Attempt to invoke
+    // virtual method ImageSegmenterResult.categoryMask() on a null object
+    // reference" means segmentForVideo() itself returned null, not just an empty
+    // mask. Face/Hand's GPU delegate is proven working (other effects using them
+    // are fine) — this is specifically an ImageSegmenter+GPU+VIDEO-mode
+    // combination issue on this device, not a GPU-delegate-in-general problem.
+    // Rather than keep a fragile try-GPU-first path for the one tracker that's
+    // shown it can fail past initialization (my earlier fallback only caught
+    // init-time exceptions, not this kind of runtime null), segmentation stays
+    // CPU-only until GPU delegate is verified stable here specifically.
+    private val segmenter: ImageSegmenter = run {
+        val baseOptions = BaseOptions.builder().setModelAssetPath("selfie_segmenter.tflite").build()
         val options = ImageSegmenter.ImageSegmenterOptions.builder()
-            .setBaseOptions(baseOptionsBuilder.build())
+            .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.VIDEO)
             .setOutputCategoryMask(true)
             .setOutputConfidenceMasks(false)
             .build()
         ImageSegmenter.createFromOptions(context, options)
-    } catch (e: Exception) {
-        if (useGpu) android.util.Log.w("SegmentationTracker", "GPU delegate init failed, falling back to CPU", e)
-        null
     }
 
     /**
@@ -73,7 +72,13 @@ class SegmentationTracker(context: Context) {
      */
     fun maskBitmap(bitmap: Bitmap, timestampMs: Long): Bitmap? {
         val mpImage = BitmapImageBuilder(bitmap).build()
-        val result = segmenter.segmentForVideo(mpImage, timestampMs)
+        // FIX: segmentForVideo() CAN return null itself (not just an empty
+        // Optional inside a valid result) — this is the exact null check that
+        // was missing and caused "Attempt to invoke virtual method
+        // ImageSegmenterResult.categoryMask() on a null object reference" to
+        // crash the whole bake. Treat a null result the same as an empty mask —
+        // skip this frame, don't crash the pipeline over one dropped frame.
+        val result = segmenter.segmentForVideo(mpImage, timestampMs) ?: return null
         val categoryMask = result.categoryMask().orElse(null) ?: return null
 
         val w = categoryMask.width

@@ -70,15 +70,77 @@ class HandTracker(context: Context) {
      * out-of-frame may not trigger it) rather than assumed correct on paper.
      */
     fun isFist(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Boolean {
+        return !isExtended(landmarks, 8) && !isExtended(landmarks, 12) && !isExtended(landmarks, 16) && !isExtended(landmarks, 20)
+    }
+
+    /**
+     * Same tip-vs-knuckle-distance-from-wrist heuristic isFist() already used
+     * (refactored out, not changed — isFist()'s behavior above is identical to
+     * before), generalized to any single fingertip landmark index so it can
+     * back a full per-finger classification, not just the one fist/not-fist
+     * question. tipIdx must be one of the four non-thumb tips (8/12/16/20) —
+     * the thumb needs different geometry, handled separately by isThumbExtended.
+     */
+    private fun isExtended(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>, tipIdx: Int): Boolean {
         val wrist = landmarks[0]
-        fun curled(tipIdx: Int): Boolean {
-            val tip = landmarks[tipIdx]
-            val knuckle = landmarks[tipIdx - 3]
-            val tipDist = dist(tip.x(), tip.y(), wrist.x(), wrist.y())
-            val knuckleDist = dist(knuckle.x(), knuckle.y(), wrist.x(), wrist.y())
-            return tipDist < knuckleDist
+        val tip = landmarks[tipIdx]
+        val knuckle = landmarks[tipIdx - 3]
+        val tipDist = dist(tip.x(), tip.y(), wrist.x(), wrist.y())
+        val knuckleDist = dist(knuckle.x(), knuckle.y(), wrist.x(), wrist.y())
+        return tipDist >= knuckleDist
+    }
+
+    /**
+     * Thumb needs a DIFFERENT check than the other four fingers — it bends
+     * sideways across the palm, not up/down, so tip-vs-wrist distance doesn't
+     * work the same way. This compares the thumb tip's distance from the index
+     * knuckle against the thumb's OWN base joint's distance from that same
+     * point — extended means the tip has moved meaningfully farther away than
+     * its own base sits. This is a genuinely harder classification than the
+     * other four fingers (true even in professional hand-tracking work, not
+     * just here) — treat it as a real but rougher signal, and don't gate a
+     * whole gesture's core classification on it alone (see classifyGesture,
+     * which deliberately doesn't require a correct thumb read).
+     */
+    private fun isThumbExtended(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Boolean {
+        val tip = landmarks[4]
+        val base = landmarks[2]
+        val indexMcp = landmarks[5]
+        val tipDist = dist(tip.x(), tip.y(), indexMcp.x(), indexMcp.y())
+        val baseDist = dist(base.x(), base.y(), indexMcp.x(), indexMcp.y())
+        return tipDist > baseDist * 1.3f
+    }
+
+    data class FingerStates(val thumb: Boolean, val index: Boolean, val middle: Boolean, val ring: Boolean, val pinky: Boolean)
+
+    /** Real per-finger extended/curled read for a single detected hand. */
+    fun fingerStates(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): FingerStates = FingerStates(
+        thumb = isThumbExtended(landmarks),
+        index = isExtended(landmarks, 8),
+        middle = isExtended(landmarks, 12),
+        ring = isExtended(landmarks, 16),
+        pinky = isExtended(landmarks, 20)
+    )
+
+    enum class HandGesture { FIST, OPEN_PALM, SCISSORS, POINTING, UNKNOWN }
+
+    /**
+     * Classifies the overall hand shape from the four non-thumb fingers only —
+     * thumb state is available via fingerStates() for effects that want it, but
+     * deliberately excluded from THIS classification's core conditions, since
+     * isThumbExtended's heuristic is the least reliable of the five (see its
+     * own doc) and none of FIST/OPEN_PALM/SCISSORS/POINTING structurally need
+     * it to tell apart from each other.
+     */
+    fun classifyGesture(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): HandGesture {
+        val f = fingerStates(landmarks)
+        return when {
+            !f.index && !f.middle && !f.ring && !f.pinky -> HandGesture.FIST
+            f.index && f.middle && f.ring && f.pinky -> HandGesture.OPEN_PALM
+            f.index && f.middle && !f.ring && !f.pinky -> HandGesture.SCISSORS
+            f.index && !f.middle && !f.ring && !f.pinky -> HandGesture.POINTING
+            else -> HandGesture.UNKNOWN
         }
-        return curled(8) && curled(12) && curled(16) && curled(20)
     }
 
     /**
