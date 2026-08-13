@@ -665,11 +665,17 @@ class VideoTranscoder {
                                                 val smile = maxOf(smileL, smileR)
                                                 if (smile > 0.35f) {
                                                     val box = faceTracker.faceBoundingBox(result)
-                                                    // Spawn near the upper-right of the face — reads as a
-                                                    // reaction floating up beside it, not glued to a fixed point.
-                                                    val spawnX = box[2] - (box[2] - box[0]) * 0.15f
-                                                    val spawnY = box[1] + (box[3] - box[1]) * 0.2f
-                                                    stickersSystem.spawnBurst(spawnX, spawnY, count = 1, speed = 0.12f, lifetimeSec = 1.2f)
+                                                    // FIX: faceBoundingBox() returns FloatArray? (can be
+                                                    // null even with a valid result) — every other use of
+                                                    // it in this file null-checks before indexing; this one
+                                                    // didn't, which is exactly what broke the build.
+                                                    if (box != null) {
+                                                        // Spawn near the upper-right of the face — reads as a
+                                                        // reaction floating up beside it, not glued to a fixed point.
+                                                        val spawnX = box[2] - (box[2] - box[0]) * 0.15f
+                                                        val spawnY = box[1] + (box[3] - box[1]) * 0.2f
+                                                        stickersSystem.spawnBurst(spawnX, spawnY, count = 1, speed = 0.12f, lifetimeSec = 1.2f)
+                                                    }
                                                 }
                                             }
                                         }

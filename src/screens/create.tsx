@@ -47,7 +47,7 @@ import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/m
 import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { bakeVideo } from '../../modules/video-baker';
+import { bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker';
 import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
@@ -611,8 +611,23 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_gaze_trail',      name:'Gaze Trail',     emoji:'👀',category:'creative', desc:'Particles trail where you look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gaze_trail'},
   {id:'fx_gl_double_take',     name:'Double Take',    emoji:'👥',category:'creative', desc:'Fast head turn leaves a ghost streak — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'double_take'},
   {id:'fx_gl_blink_freeze',    name:'Blink Freeze',   emoji:'📸',category:'creative', desc:'Blink freezes the frame + zoom punch — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'blink_freeze'},
-  {id:'fx_gl_gold_skin',  name:'Gold Skin',  emoji:'👑',category:'creative', desc:'Metallic gold body — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gold_skin'},
-{id:'fx_gl_mouth_fire', name:'Mouth Fire', emoji:'🔥',category:'creative', desc:'Flame when mouth opens — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_fire'},  
+  {id:'fx_gl_gold_skin',       name:'Gold Skin',      emoji:'👑',category:'creative', desc:'Metallic gold body — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gold_skin'},
+  {id:'fx_gl_mouth_fire',      name:'Mouth Fire',     emoji:'🔥',category:'creative', desc:'Flame when mouth opens — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_fire'},
+  {id:'fx_gl_snow_fall',       name:'Snow Fall',      emoji:'❄️',category:'mood',     desc:'Ambient falling snow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'snow_fall'},
+  {id:'fx_gl_throw_confetti',  name:'Throw Confetti', emoji:'🎉',category:'creative', desc:'Throw motion bursts real confetti — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'throw_confetti'},
+  {id:'fx_gl_raise_eyebrow',   name:'Raise Eyebrow',  emoji:'🤨',category:'creative', desc:'Glow lifts with your brow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'raise_eyebrow'},
+  {id:'fx_gl_glitch_wave',     name:'Glitch Wave',    emoji:'📡',category:'retro',    desc:'Signal glitch bursts — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'glitch_wave'},
+  {id:'fx_gl_retro_vhs',       name:'Retro VHS',      emoji:'📼',category:'retro',    desc:'Worn tape look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'retro_vhs'},
+  {id:'fx_gl_light_leak',      name:'Light Leak',     emoji:'🌅',category:'mood',     desc:'Warm light streaks — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'light_leak'},
+  {id:'fx_gl_mouth_words',     name:'Mouth Words',    emoji:'💬',category:'creative', desc:'WOW/OMG/HAHA reacts to your expression — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_words'},
+  {id:'fx_gl_palm_magic',      name:'Palm Magic',     emoji:'✨',category:'creative', desc:'Open palm sparkles with magic — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'palm_magic'},
+  {id:'fx_gl_rock_paper_scissors', name:'Rock Paper Scissors', emoji:'✂️',category:'creative', desc:'Labels your hand shape live — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rock_paper_scissors'},
+  {id:'fx_gl_clap_burst',      name:'Clap Burst',     emoji:'👏',category:'creative', desc:'Clap triggers a burst + glow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'clap_burst'},
+  {id:'fx_gl_tap_shockwave',   name:'Tap Shockwave',  emoji:'💥',category:'creative', desc:'Finger tap sends a shockwave ring — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'tap_shockwave'},
+  {id:'fx_gl_spin_effect',     name:'Spin Effect',    emoji:'🌀',category:'creative', desc:'Head turn spins a light ring — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'spin_effect'},
+  {id:'fx_gl_face_morph',      name:'Face Morph',     emoji:'🕸️',category:'creative', desc:'Half-face wireframe mesh — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'face_morph'},
+  {id:'fx_gl_fire_book',       name:'Fire Book',      emoji:'📖',category:'creative', desc:'Hand-tracked flaming book — needs a book image, baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fire_book'},
+  {id:'fx_gl_stickers_react',  name:'Stickers React',  emoji:'💕',category:'creative', desc:'Smile sends floating hearts — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'stickers_react'},
 ];
 const FX_CATEGORIES = [
   {id:'all',name:'All',emoji:'🎛️'},{id:'mood',name:'Mood',emoji:'🌈'},
@@ -638,6 +653,12 @@ const FX_OVERLAY_TINTS: Record<string,string> = {
   fx_gl_depth_bloom:'transparent', fx_gl_split_prism:'transparent', fx_gl_hand_portal:'transparent',
   fx_gl_fist_bump_boom:'transparent', fx_gl_two_hand_frame:'transparent', fx_gl_gaze_trail:'transparent',
   fx_gl_double_take:'transparent', fx_gl_blink_freeze:'transparent',
+  fx_gl_gold_skin:'transparent', fx_gl_mouth_fire:'transparent', fx_gl_snow_fall:'transparent',
+  fx_gl_throw_confetti:'transparent', fx_gl_raise_eyebrow:'transparent', fx_gl_glitch_wave:'transparent',
+  fx_gl_retro_vhs:'transparent', fx_gl_light_leak:'transparent', fx_gl_mouth_words:'transparent',
+  fx_gl_palm_magic:'transparent', fx_gl_rock_paper_scissors:'transparent', fx_gl_clap_burst:'transparent',
+  fx_gl_tap_shockwave:'transparent', fx_gl_spin_effect:'transparent', fx_gl_face_morph:'transparent',
+  fx_gl_fire_book:'transparent', fx_gl_stickers_react:'transparent',
 };
 
 // ─── FILTERS ──────────────────────────────────────────────
@@ -5063,6 +5084,120 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
       // ── IMAGE UPLOAD ──
       } else if (mediaUri && mediaType === 'image') {
+        // Real GL shader effect selected (Mood Ring, Gaze Trail, Gold Skin, etc.)?
+        // The path below this check is the ORIGINAL image pipeline — Cloudinary
+        // colorize/l_image transforms — which only ever faked FX picks as a flat
+        // color tint, never the real face/hand/segmentation-tracked effect. Route
+        // those specific cases through the native bakeImage() pipeline instead,
+        // which runs the exact same tracking + shader the video/live path uses.
+        // Plain named filters (no glShaderEffect) keep using the original,
+        // already-working Cloudinary path below completely unchanged — this is
+        // additive, not a replacement of what already works.
+        const imgFxEffect = FX_EFFECTS.find(f => f.id === selectedFx);
+
+        if (imgFxEffect?.glShaderEffect) {
+          setUploadStage('Tracking face/hand for effect...');
+          setUploadProgress(8);
+
+          // Same live-username lookup as the video branch below — see that
+          // block's comment for why user.user_metadata is stale and this query
+          // is necessary. Duplicated here rather than factored out because the
+          // image and video branches don't currently share any setup code in
+          // this file — matching the existing structure, not a new pattern.
+          let imgUsername = user.user_metadata?.username || user.email?.split('@')[0] || 'LumVibe';
+          try {
+            const { data: liveUserRow } = await supabase.from('users').select('username').eq('id', user.id).single();
+            if (liveUserRow?.username) imgUsername = liveUserRow.username;
+          } catch (userLookupErr) {
+            console.warn('Live username lookup failed, using cached fallback:', userLookupErr);
+          }
+
+          const imgBakeOptions: Record<string, any> = {
+            effect: imgFxEffect.glShaderEffect,
+            effectIntensity: 1,
+          };
+
+          if (addWatermark) {
+            const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
+            if (!logoAsset.downloaded) {
+              await logoAsset.downloadAsync();
+            }
+            const logoDestPath = `${FileSystem.cacheDirectory}watermark_logo.png`;
+            try {
+              await FileSystem.copyAsync({ from: logoAsset.localUri || logoAsset.uri, to: logoDestPath });
+              imgBakeOptions.watermarkPngPath = logoDestPath.replace('file://', '');
+              imgBakeOptions.watermarkUsername = imgUsername.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
+            } catch (copyErr) {
+              console.warn('Watermark logo copy failed (image path), continuing without watermark:', copyErr);
+            }
+          }
+
+          if (imgFxEffect.glShaderEffect === 'hand_portal' && portalSceneUri) {
+            try {
+              const portalDestPath = `${FileSystem.cacheDirectory}portal_scene_${Date.now()}.png`;
+              await FileSystem.copyAsync({ from: portalSceneUri, to: portalDestPath });
+              imgBakeOptions.portalScenePngPath = portalDestPath.replace('file://', '');
+            } catch (copyErr) {
+              console.warn('Portal scene copy failed (image path), HAND_PORTAL will be skipped:', copyErr);
+            }
+          }
+
+          const imgOutputPath = `${FileSystem.cacheDirectory}baked_${Date.now()}.jpg`.replace('file://', '');
+          const imgCleanInput = mediaUri.replace('file://', '');
+          let bakedImagePath: string;
+          try {
+            bakedImagePath = await bakeImage(imgCleanInput, imgOutputPath, imgBakeOptions);
+          } catch (e) {
+            // Same "never crash, never silently pretend it worked" fallback the
+            // video branch uses — falls back to the ORIGINAL unedited image
+            // rather than uploading nothing or throwing the whole post away.
+            console.warn('Native image bake failed, uploading original image instead:', e);
+            bakedImagePath = mediaUri.replace('file://', '');
+          }
+
+          setUploadProgress(35);
+          setUploadStage('Uploading image...');
+          const bakedInfo = await FileSystem.getInfoAsync(`file://${bakedImagePath}`);
+          if (!bakedInfo.exists) throw new Error('Baked image file not found');
+
+          const bakedB64 = await FileSystem.readAsStringAsync(`file://${bakedImagePath}`, { encoding: FileSystem.EncodingType.Base64 });
+          setUploadProgress(55);
+
+          // Already fully baked (effect + watermark burned into the pixels) —
+          // plain upload, no further Cloudinary transforms needed, unlike the
+          // named-filter path below which relies on Cloudinary to do the tinting.
+          let bakedImgUrl: string | null = null;
+          try {
+            const bakedForm = new FormData();
+            bakedForm.append('file', `data:image/jpeg;base64,${bakedB64}`);
+            bakedForm.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+            bakedForm.append('resource_type', 'image');
+            bakedForm.append('eager', 'w_1080,c_limit,q_auto:good,f_auto');
+            bakedForm.append('eager_async', 'false');
+            const bakedRes = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, { method: 'POST', body: bakedForm });
+            if (bakedRes.ok) {
+              const bakedJson = await bakedRes.json();
+              bakedImgUrl = bakedJson.secure_url as string;
+              if (bakedImgUrl.includes('/upload/') && !bakedImgUrl.includes('q_auto')) {
+                const idx = bakedImgUrl.indexOf('/upload/');
+                bakedImgUrl = bakedImgUrl.slice(0, idx + 8) + 'q_auto:good,f_auto,dpr_auto/' + bakedImgUrl.slice(idx + 8);
+              }
+            }
+          } catch { bakedImgUrl = null; }
+
+          if (!bakedImgUrl) {
+            // Same Supabase storage fallback the plain-filter path below uses.
+            const fn = `${user.id}/${Date.now()}.jpg`;
+            const { error: ie } = await supabase.storage.from('posts').upload(fn, decode(bakedB64), { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
+            if (ie) throw new Error(`Upload failed: ${ie.message}`);
+            bakedImgUrl = supabase.storage.from('posts').getPublicUrl(fn).data.publicUrl;
+          }
+
+          finalMediaUrl = bakedImgUrl;
+          finalMediaType = 'image';
+          setUploadProgress(88);
+
+        } else {
         setUploadStage('Capturing image with effects...');
         setUploadProgress(8);
 
@@ -5187,6 +5322,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
         finalMediaType = 'image';
         setUploadProgress(88);
+        }
 
       // ── VIDEO UPLOAD ──
       } else if (mediaUri && mediaType === 'video') {
@@ -5212,7 +5348,26 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         // the FX picker (both brightness/contrast/saturation FX and the 5 GL shader
         // effects) to the actual video pixels — previously bakeVideoFilter() existed
         // but was never called, so FX picks had zero effect on the uploaded video.
-        const videoUsername = user.user_metadata?.username || user.email?.split('@')[0] || 'LumVibe';
+        // FIX: user.user_metadata.username is a snapshot from Supabase AUTH's
+        // session object — it does NOT update automatically when the profile
+        // name changes in the `users` table, unless something also calls
+        // supabase.auth.updateUser({ data: { username } }) on every profile
+        // edit (nothing in this file does). That's exactly why the watermark
+        // kept baking in "kinsta" after the profile was renamed to "Danny" —
+        // it was reading a stale cached value, not what's actually in the DB.
+        // Querying `users` directly here gets the name that's actually current,
+        // same table the app's own points/profile logic already reads from
+        // elsewhere in this file (see the `users` update near handlePost's
+        // points-award step) — not a guess at a new table name.
+        let videoUsername = user.user_metadata?.username || user.email?.split('@')[0] || 'LumVibe';
+        try {
+          const { data: liveUserRow } = await supabase.from('users').select('username').eq('id', user.id).single();
+          if (liveUserRow?.username) videoUsername = liveUserRow.username;
+        } catch (userLookupErr) {
+          // Network hiccup or similar — fall back to the cached name above
+          // rather than blocking the whole post over a watermark label.
+          console.warn('Live username lookup failed, using cached fallback:', userLookupErr);
+        }
         const filterDefForBake = FILTERS.find(f => f.id === selectedFilter) || null;
         const fxEffect = FX_EFFECTS.find(f => f.id === selectedFx);
         const needsBake = addWatermark || (!!fxEffect && selectedFx !== 'fx_none');
