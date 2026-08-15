@@ -10,7 +10,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 
 /**
-* Same pattern as FaceTracker — thin VIDEO-mode wrapper, one bitmap in, landmarks
+* Same pattern as FaceTracker  -  thin VIDEO-mode wrapper, one bitmap in, landmarks
 * out. Kept as a SEPARATE class/model rather than folded into FaceTracker because
 * MediaPipe ships hand and face landmarking as two separate .task models; running
 * both means two readbacks + two inferences per frame for any effect that needs
@@ -18,7 +18,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 *
 * REQUIRES, as real setup steps outside this file:
 *   1. Add to build.gradle:  implementation 'com.google.mediapipe:tasks-vision:0.10.26'
-*      (same artifact as FaceTracker — one dependency covers both landmarkers;
+*      (same artifact as FaceTracker  -  one dependency covers both landmarkers;
 *      confirm the version already in your build.gradle matches, don't add a
 *      second tasks-vision line)
 *   2. Download hand_landmarker.task from:
@@ -26,13 +26,13 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 *      and place it in app/src/main/assets/ alongside face_landmarker.task
 *
 * Landmark indices used below follow MediaPipe's 21-point hand model
-* (https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) —
+* (https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker)  -
 * WRIST=0, THUMB_TIP=4, INDEX_TIP=8, MIDDLE_TIP=12, RING_TIP=16, PINKY_TIP=20,
 * and each finger's *_MCP (knuckle) is TIP_INDEX - 3.
 */
 class HandTracker(context: Context) {
 
-    // SPEED: same GPU-with-CPU-fallback pattern as FaceTracker — see its comment
+    // SPEED: same GPU-with-CPU-fallback pattern as FaceTracker  -  see its comment
     // for why this is wrapped in try/catch instead of assumed safe.
     private val handLandmarker: HandLandmarker = createLandmarker(context, useGpu = true)
         ?: createLandmarker(context, useGpu = false)
@@ -53,7 +53,7 @@ class HandTracker(context: Context) {
     }
 
     /** Same monotonic-timestamp contract as FaceTracker.detect(). Returns null if
-     *  zero hands were found this frame — treat as "no gesture this frame," not an error. */
+     *  zero hands were found this frame  -  treat as "no gesture this frame," not an error. */
     fun detect(bitmap: Bitmap, timestampMs: Long): HandLandmarkerResult? {
         val mpImage = BitmapImageBuilder(bitmap).build()
         val result = handLandmarker.detectForVideo(mpImage, timestampMs)
@@ -63,7 +63,7 @@ class HandTracker(context: Context) {
     /**
      * A simple, explainable "is this a closed fist" heuristic for FIST_BUMP_BOOM:
      * true when all four non-thumb fingertips are closer to the wrist than their
-     * own knuckle is — i.e. curled in, not extended. Deliberately not using a
+     * own knuckle is  -  i.e. curled in, not extended. Deliberately not using a
      * pretrained gesture classifier (MediaPipe also ships one, GestureRecognizer)
      * to avoid a THIRD model/asset; this heuristic is a known simplification and
      * should be tuned against a real test clip (a fist held sideways or partly
@@ -75,10 +75,10 @@ class HandTracker(context: Context) {
 
     /**
      * Same tip-vs-knuckle-distance-from-wrist heuristic isFist() already used
-     * (refactored out, not changed — isFist()'s behavior above is identical to
+     * (refactored out, not changed  -  isFist()'s behavior above is identical to
      * before), generalized to any single fingertip landmark index so it can
      * back a full per-finger classification, not just the one fist/not-fist
-     * question. tipIdx must be one of the four non-thumb tips (8/12/16/20) —
+     * question. tipIdx must be one of the four non-thumb tips (8/12/16/20)  -
      * the thumb needs different geometry, handled separately by isThumbExtended.
      */
     private fun isExtended(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>, tipIdx: Int): Boolean {
@@ -91,14 +91,14 @@ class HandTracker(context: Context) {
     }
 
     /**
-     * Thumb needs a DIFFERENT check than the other four fingers — it bends
+     * Thumb needs a DIFFERENT check than the other four fingers  -  it bends
      * sideways across the palm, not up/down, so tip-vs-wrist distance doesn't
      * work the same way. This compares the thumb tip's distance from the index
      * knuckle against the thumb's OWN base joint's distance from that same
-     * point — extended means the tip has moved meaningfully farther away than
+     * point  -  extended means the tip has moved meaningfully farther away than
      * its own base sits. This is a genuinely harder classification than the
      * other four fingers (true even in professional hand-tracking work, not
-     * just here) — treat it as a real but rougher signal, and don't gate a
+     * just here)  -  treat it as a real but rougher signal, and don't gate a
      * whole gesture's core classification on it alone (see classifyGesture,
      * which deliberately doesn't require a correct thumb read).
      */
@@ -125,7 +125,7 @@ class HandTracker(context: Context) {
     enum class HandGesture { FIST, OPEN_PALM, SCISSORS, POINTING, UNKNOWN }
 
     /**
-     * Classifies the overall hand shape from the four non-thumb fingers only —
+     * Classifies the overall hand shape from the four non-thumb fingers only  -
      * thumb state is available via fingerStates() for effects that want it, but
      * deliberately excluded from THIS classification's core conditions, since
      * isThumbExtended's heuristic is the least reliable of the five (see its
@@ -155,13 +155,30 @@ class HandTracker(context: Context) {
         return (sx / idxs.size) to (sy / idxs.size)
     }
 
+    /**
+     * Angle (radians) of the wrist(0)->index-MCP(5) vector, in the same
+     * normalized-image coordinate space palmCenter() uses. Used by FIRE_BOOK
+     * to rotate the book quad to match how the hand is actually tilted,
+     * instead of always drawing it screen-axis-aligned regardless of hand
+     * orientation  -  that mismatch was the main reason the book previously
+     * read as "pasted on" rather than "held." Y is inverted (image-space Y
+     * grows downward, screen/GL rotation here follows the same convention
+     * FrameRenderer's other angle math already uses)  -  negate if a caller
+     * ever needs true screen-up-positive angles instead.
+     */
+    fun handAngle(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Float {
+        val wrist = landmarks[0]
+        val indexMcp = landmarks[5]
+        return kotlin.math.atan2(indexMcp.y() - wrist.y(), indexMcp.x() - wrist.x())
+    }
+
     private fun dist(x1: Float, y1: Float, x2: Float, y2: Float): Float {
         val dx = x1 - x2; val dy = y1 - y2
         return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
-    /** Call once when done baking — releases the model's native resources. */
+    /** Call once when done baking  -  releases the model's native resources. */
     fun close() {
         handLandmarker.close()
     }
-}  
+}   

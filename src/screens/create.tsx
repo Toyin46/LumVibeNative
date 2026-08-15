@@ -40,14 +40,13 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 import { useNavigation } from '@react-navigation/native';
-import { decode } from 'base64-arraybuffer';
 import { captureRef } from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/marketplacePostBridge';
 import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker';
+import { bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
 import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
@@ -628,7 +627,73 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_face_morph',      name:'Face Morph',     emoji:'🕸️',category:'creative', desc:'Half-face wireframe mesh — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'face_morph'},
   {id:'fx_gl_fire_book',       name:'Fire Book',      emoji:'📖',category:'creative', desc:'Hand-tracked flaming book — needs a book image, baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fire_book'},
   {id:'fx_gl_stickers_react',  name:'Stickers React',  emoji:'💕',category:'creative', desc:'Smile sends floating hearts — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'stickers_react'},
+  // ⚠️ Added by Jojo — these 5 have cover images but no matching native
+  // glShaderEffect case in EffectShaders.kt yet. They'll show in the picker
+  // fine; baking will no-op / fall back to the unedited video until the
+  // native Kotlin shader case is added for each key below.
+  {id:'fx_gl_bokeh_lights', name:'Bokeh Lights', emoji:'✨', category:'mood', desc:'Soft glowing light orbs — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'bokeh_lights'},
+  {id:'fx_gl_finger_draw', name:'Finger Draw', emoji:'✍️', category:'creative', desc:'Draw glowing trails with your finger — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'finger_draw'},
+  {id:'fx_gl_paint_splash', name:'Paint Splash', emoji:'🎨', category:'creative', desc:'Color splashes on movement — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paint_splash'},
+  {id:'fx_gl_paticle_flow', name:'Particle Flow', emoji:'💫', category:'mood', desc:'Ambient flowing particles — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paticle_flow'},
+  {id:'fx_gl_rain_fall', name:'Rain Fall', emoji:'🌧️', category:'mood', desc:'Ambient falling rain — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rain_fall'},
 ];
+
+// FX card cover images — Metro's bundler requires STATIC require() calls; it
+// cannot resolve `require(`...${id}.png`)` at build time, so every one of the
+// 39 effects gets its own literal require() line here rather than a dynamic
+// path. Every file below must exist at exactly this path/name before the app
+// will build — Metro fails the WHOLE build (not just one missing image) if
+// even one of these files is missing, since require() resolution happens at
+// bundle time, not runtime. Save each PNG at exactly this path and filename:
+// assets/images/filters/<name-below>.png
+const FX_IMAGES: Record<string, any> = {
+  fx_gl_mood_ring: require('../assets/images/filters/fx_gl_mood_ring.png'),
+  fx_gl_vintage_flicker: require('../assets/images/filters/fx_gl_vintage_flicker.png'),
+  fx_gl_neon_edge: require('../assets/images/filters/fx_gl_neon_edge.png'),
+  fx_gl_duotone_pulse: require('../assets/images/filters/fx_gl_duotone_pulse.png'),
+  fx_gl_liquid_chrome: require('../assets/images/filters/fx_gl_liquid_chrome.png'),
+  fx_gl_ink_wash: require('../assets/images/filters/fx_gl_ink_wash.png'),
+  fx_gl_aura_glow: require('../assets/images/filters/fx_gl_aura_glow.png'),
+  fx_gl_color_drain: require('../assets/images/filters/fx_gl_color_drain.png'),
+  fx_gl_thermal_pulse: require('../assets/images/filters/fx_gl_thermal_pulse.png'),
+  fx_gl_depth_bloom: require('../assets/images/filters/fx_gl_depth_bloom.png'),
+  fx_gl_split_prism: require('../assets/images/filters/fx_gl_split_prism.png'),
+  fx_gl_gold_skin: require('../assets/images/filters/fx_gl_gold_skin.png'),
+  fx_gl_glitch_wave: require('../assets/images/filters/fx_gl_glitch_wave.png'),
+  fx_gl_retro_vhs: require('../assets/images/filters/fx_gl_retro_vhs.png'),
+  fx_gl_light_leak: require('../assets/images/filters/fx_gl_light_leak.png'),
+  fx_gl_snow_fall: require('../assets/images/filters/fx_gl_snow_fall.png'),
+  fx_gl_wink_spark: require('../assets/images/filters/fx_gl_wink_spark.png'),
+  fx_gl_smile_shatter: require('../assets/images/filters/fx_gl_smile_shatter.png'),
+  fx_gl_head_tilt_zoom: require('../assets/images/filters/fx_gl_head_tilt_zoom.png'),
+  fx_gl_double_take: require('../assets/images/filters/fx_gl_double_take.png'),
+  fx_gl_blink_freeze: require('../assets/images/filters/fx_gl_blink_freeze.png'),
+  fx_gl_gaze_trail: require('../assets/images/filters/fx_gl_gaze_trail.png'),
+  fx_gl_raise_eyebrow: require('../assets/images/filters/fx_gl_raise_eyebrow.png'),
+  fx_gl_mouth_fire: require('../assets/images/filters/fx_gl_mouth_fire.png'),
+  fx_gl_mouth_words: require('../assets/images/filters/fx_gl_mouth_words.png'),
+  fx_gl_face_morph: require('../assets/images/filters/fx_gl_face_morph.png'),
+  fx_gl_stickers_react: require('../assets/images/filters/fx_gl_stickers_react.png'),
+  fx_gl_voice_halo: require('../assets/images/filters/fx_gl_voice_halo.png'),
+  fx_gl_silence_ripple: require('../assets/images/filters/fx_gl_silence_ripple.png'),
+  fx_gl_hand_portal: require('../assets/images/filters/fx_gl_hand_portal.png'),
+  fx_gl_fist_bump_boom: require('../assets/images/filters/fx_gl_fist_bump_boom.png'),
+  fx_gl_two_hand_frame: require('../assets/images/filters/fx_gl_two_hand_frame.png'),
+  fx_gl_palm_magic: require('../assets/images/filters/fx_gl_palm_magic.png'),
+  fx_gl_rock_paper_scissors: require('../assets/images/filters/fx_gl_rock_paper_scissors.png'),
+  fx_gl_clap_burst: require('../assets/images/filters/fx_gl_clap_burst.png'),
+  fx_gl_tap_shockwave: require('../assets/images/filters/fx_gl_tap_shockwave.png'),
+  fx_gl_throw_confetti: require('../assets/images/filters/fx_gl_throw_confetti.png'),
+  fx_gl_fire_book: require('../assets/images/filters/fx_gl_fire_book.png'),
+  fx_gl_spin_effect: require('../assets/images/filters/fx_gl_spin_effect.png'),
+  // ⚠️ Added by Jojo — see matching note above FX_FILTERS array
+  fx_gl_bokeh_lights: require('../assets/images/filters/fx_gl_bokeh_lights.png'),
+  fx_gl_finger_draw: require('../assets/images/filters/fx_gl_finger_draw.png'),
+  fx_gl_paint_splash: require('../assets/images/filters/fx_gl_paint_splash.png'),
+  fx_gl_paticle_flow: require('../assets/images/filters/fx_gl_paticle_flow.png'),
+  fx_gl_rain_fall: require('../assets/images/filters/fx_gl_rain_fall.png'),
+};
+
 const FX_CATEGORIES = [
   {id:'all',name:'All',emoji:'🎛️'},{id:'mood',name:'Mood',emoji:'🌈'},
   {id:'retro',name:'Retro',emoji:'📼'},{id:'editorial',name:'Editorial',emoji:'🎬'},
@@ -5142,6 +5207,22 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             }
           }
 
+          // Same bundled-asset auto-attach as the video branch — see that
+          // block's comment for why this differs from Hand Portal's picker flow.
+          if (imgFxEffect.glShaderEffect === 'fire_book') {
+            try {
+              const bookAsset = Asset.fromModule(require('../assets/images/filters/fx_gl_fire_book2.png'));
+              if (!bookAsset.downloaded) {
+                await bookAsset.downloadAsync();
+              }
+              const bookDestPath = `${FileSystem.cacheDirectory}fire_book_scene.png`;
+              await FileSystem.copyAsync({ from: bookAsset.localUri || bookAsset.uri, to: bookDestPath });
+              imgBakeOptions.portalScenePngPath = bookDestPath.replace('file://', '');
+            } catch (copyErr) {
+              console.warn('Fire Book image copy failed (image path), effect will be skipped:', copyErr);
+            }
+          }
+
           const imgOutputPath = `${FileSystem.cacheDirectory}baked_${Date.now()}.jpg`.replace('file://', '');
           const imgCleanInput = mediaUri.replace('file://', '');
           let bakedImagePath: string;
@@ -5160,16 +5241,21 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
           const bakedInfo = await FileSystem.getInfoAsync(`file://${bakedImagePath}`);
           if (!bakedInfo.exists) throw new Error('Baked image file not found');
 
-          const bakedB64 = await FileSystem.readAsStringAsync(`file://${bakedImagePath}`, { encoding: FileSystem.EncodingType.Base64 });
-          setUploadProgress(55);
+          const bakedFileUri = `file://${bakedImagePath}`;
+          setUploadProgress(45);
 
-          // Already fully baked (effect + watermark burned into the pixels) —
-          // plain upload, no further Cloudinary transforms needed, unlike the
-          // named-filter path below which relies on Cloudinary to do the tinting.
+          // ⚡ PERF FIX: was reading the whole file into a base64 JS string
+          // (FileSystem.readAsStringAsync) before every upload — for a 3-5MB
+          // baked image that's a 4-7MB string round-tripping across the RN
+          // bridge, then re-decoded into an ArrayBuffer again for the Supabase
+          // fallback. Appending {uri,type,name} directly to FormData lets the
+          // native layer stream the file itself — same pattern the video path
+          // already uses successfully a few hundred lines up (uploadVideoToCloudinary).
+          // No JS-side base64 string for the common (Cloudinary-succeeds) path.
           let bakedImgUrl: string | null = null;
           try {
             const bakedForm = new FormData();
-            bakedForm.append('file', `data:image/jpeg;base64,${bakedB64}`);
+            bakedForm.append('file', { uri: bakedFileUri, type: 'image/jpeg', name: `img_${Date.now()}.jpg` } as any);
             bakedForm.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
             bakedForm.append('resource_type', 'image');
             bakedForm.append('eager', 'w_1080,c_limit,q_auto:good,f_auto');
@@ -5187,8 +5273,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
           if (!bakedImgUrl) {
             // Same Supabase storage fallback the plain-filter path below uses.
+            // Blob (via fetch) instead of base64+decode() — still avoids the
+            // giant JS string, only paid for if Cloudinary actually failed.
             const fn = `${user.id}/${Date.now()}.jpg`;
-            const { error: ie } = await supabase.storage.from('posts').upload(fn, decode(bakedB64), { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
+            const fileBlob = await (await fetch(bakedFileUri)).blob();
+            const { error: ie } = await supabase.storage.from('posts').upload(fn, fileBlob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
             if (ie) throw new Error(`Upload failed: ${ie.message}`);
             bakedImgUrl = supabase.storage.from('posts').getPublicUrl(fn).data.publicUrl;
           }
@@ -5222,10 +5311,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         // (ImageManipulator cannot composite RGBA tints — Cloudinary can via e_colorize)
         const imgExt = 'jpg';
         const imgMime = 'image/jpeg';
-        const b64img = await FileSystem.readAsStringAsync(bakedUri, { encoding: FileSystem.EncodingType.Base64 });
-        const imgDataUri = `data:${imgMime};base64,${b64img}`;
+        // ⚡ PERF FIX: dropped the FileSystem.readAsStringAsync(base64) + data-URI
+        // step here too — same reasoning as the baked-image branch above.
+        // FormData gets the file uri directly; native side streams it.
         const imgForm = new FormData();
-        imgForm.append('file', imgDataUri);
+        imgForm.append('file', { uri: bakedUri, type: imgMime, name: `img_${Date.now()}.${imgExt}` } as any);
         imgForm.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
         imgForm.append('resource_type', 'image');
         // ✅ FIX: eager transformation forces Cloudinary to pre-generate the
@@ -5314,8 +5404,10 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
           }
         } else {
           // Cloudinary failed — fall back to Supabase storage (no tint baking)
+          // Blob upload instead of base64+decode() — no giant JS string.
           const fn = `${user.id}/${Date.now()}.jpg`;
-          const { error: ie } = await supabase.storage.from('posts').upload(fn, decode(b64img), { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
+          const fileBlob = await (await fetch(bakedUri)).blob();
+          const { error: ie } = await supabase.storage.from('posts').upload(fn, fileBlob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
           if (ie) throw new Error(`Upload failed: ${ie.message}`);
           finalMediaUrl = supabase.storage.from('posts').getPublicUrl(fn).data.publicUrl;
         }
@@ -5439,6 +5531,28 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                     bakeOptions.portalScenePngPath = portalDestPath.replace('file://', '');
                   } catch (copyErr) {
                     console.warn('Portal scene copy failed, HAND_PORTAL will be skipped:', copyErr);
+                  }
+                }
+
+                // FIRE_BOOK reuses the SAME portalScenePngPath option (its shader
+                // reuses uPortalTexture too — see EffectShaders.fireBook's doc) —
+                // but unlike HAND_PORTAL's user-picked scene, this book image is
+                // BUNDLED with the app, so it auto-attaches whenever Fire Book is
+                // selected — no picker step needed. Same Asset.fromModule +
+                // downloadAsync + copyAsync pattern the watermark logo already
+                // uses above, since this is also a require()'d bundled asset, not
+                // a picker URI like Hand Portal's.
+                if (fxEffect.glShaderEffect === 'fire_book') {
+                  try {
+                    const bookAsset = Asset.fromModule(require('../assets/images/filters/fx_gl_fire_book2.png'));
+                    if (!bookAsset.downloaded) {
+                      await bookAsset.downloadAsync();
+                    }
+                    const bookDestPath = `${FileSystem.cacheDirectory}fire_book_scene.png`;
+                    await FileSystem.copyAsync({ from: bookAsset.localUri || bookAsset.uri, to: bookDestPath });
+                    bakeOptions.portalScenePngPath = bookDestPath.replace('file://', '');
+                  } catch (copyErr) {
+                    console.warn('Fire Book image copy failed, effect will be skipped:', copyErr);
                   }
                 }
               } else {
@@ -5775,7 +5889,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           </View>
 
-          {/* Right tool panel */}
+          {/* Right tool panel — trimmed to Snapchat-style camera controls only.
+              BG / Burst / Tap / Dual / Green / Duet / Stickers buttons removed
+              per redesign: the 40 FX effects now live in the bottom strip
+              instead. Their underlying state/handlers (activeBurst,
+              greenScreenMode, duetMode, deepAREffect, etc.) are left intact
+              elsewhere in the file since executePost still branches on some
+              of them (e.g. duetMode → mergeDuetVideos) — only the entry
+              points here were removed. Safe to strip those too later if the
+              features are being fully retired, not just hidden. */}
           <View style={ms.rightTools}>
             {/* Flip camera */}
             <TouchableOpacity style={ms.toolBtn} onPress={() => setFacing(f => f === 'back' ? 'front' : 'back')}>
@@ -5784,75 +5906,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             {/* Flash */}
             <TouchableOpacity style={ms.toolBtn} onPress={() => setFlash(f => f === 'off' ? 'on' : 'off')}>
               <Ionicons name={flash === 'on' ? 'flash' : 'flash-off'} size={22} color={flash === 'on' ? '#ffd700' : '#fff'} />
-            </TouchableOpacity>
-            {/* Animated BG */}
-            <TouchableOpacity style={[ms.toolBtn, cameraFeature === 'animatedbg' && ms.toolBtnActive]} onPress={() => {
-              if (cameraFeature === 'animatedbg') { setCameraFeature('normal'); setSelectedBackground('bg_none'); }
-              else { setCameraFeature('animatedbg'); }
-            }}>
-              <Text style={{ fontSize: 16 }}>🎨</Text>
-              <Text style={ms.toolLabel}>BG</Text>
-            </TouchableOpacity>
-            {/* Effect Burst — tap fires if effect selected, long press opens panel */}
-            <TouchableOpacity
-              style={[ms.toolBtn, activeBurst && ms.toolBtnActive]}
-              onPress={() => {
-                if (activeBurst) {
-                  // Effect already selected — FIRE IT immediately
-                  handleBurstFire();
-                } else {
-                  // No effect selected — open panel to pick one
-                  setShowBurstPanel(v => !v);
-                }
-              }}
-              onLongPress={() => setShowBurstPanel(v => !v)}
-            >
-              <Text style={{ fontSize: 16 }}>🎆</Text>
-              <Text style={ms.toolLabel}>{activeBurst ? 'Fire!' : 'Burst'}</Text>
-            </TouchableOpacity>
-            {/* Beat Tap */}
-            <TouchableOpacity style={[ms.toolBtn, showBeatTap && ms.toolBtnActive]} onPress={() => setShowBeatTap(v => !v)}>
-              <Text style={{ fontSize: 16 }}>🥁</Text>
-              <Text style={ms.toolLabel}>Tap</Text>
-            </TouchableOpacity>
-            {/* Dual Cam */}
-            <TouchableOpacity style={[ms.toolBtn, cameraFeature === 'dualcam' && ms.toolBtnActive]} onPress={handleToggleDualCam}>
-              <MaterialCommunityIcons name="camera-flip-outline" size={20} color={cameraFeature === 'dualcam' ? '#00ff88' : '#fff'} />
-              <Text style={ms.toolLabel}>Dual</Text>
-            </TouchableOpacity>
-            {/* TASK 6: Green Screen */}
-            <TouchableOpacity
-              style={[ms.toolBtn, greenScreenMode && ms.toolBtnActive]}
-              onPress={() => setGreenScreenMode(v => !v)}
-            >
-              <Text style={{ fontSize: 16 }}>🟢</Text>
-              <Text style={[ms.toolLabel, greenScreenMode && { color: '#00ff88' }]}>Green</Text>
-            </TouchableOpacity>
-            {/* TASK 6: Duet Mode */}
-            <TouchableOpacity
-              style={[ms.toolBtn, duetMode && ms.toolBtnActive]}
-              onPress={() => {
-                if (!duetMode) {
-                  Alert.alert('Duet Mode', 'Pick a video from your library to duet with', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Pick Video', onPress: async () => {
-                      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Videos, quality: 1 });
-                      if (!r.canceled && r.assets[0]) { setDuetPartnerUri(r.assets[0].uri); setDuetMode(true); }
-                    }},
-                  ]);
-                } else { setDuetMode(false); setDuetPartnerUri(null); }
-              }}
-            >
-              <Text style={{ fontSize: 16 }}>🎭</Text>
-              <Text style={[ms.toolLabel, duetMode && { color: '#00ff88' }]}>Duet</Text>
-            </TouchableOpacity>
-            {/* DeepAR face effects button */}
-            <TouchableOpacity
-              style={[ms.toolBtn, deepAREffect !== 'deepar_none' && ms.toolBtnActive]}
-              onPress={() => setShowDeepARPanel(v => !v)}
-            >
-              <Text style={{ fontSize: 16 }}>🎭</Text>
-              <Text style={[ms.toolLabel]}>Stickers</Text>
             </TouchableOpacity>
           </View>
 
@@ -5978,23 +6031,34 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           )}
 
-          {/* Filter thumbnail strip — square cards with checkmark, matching the
-              reference layout. Uses a flat colour swatch (derived from each
-              filter's tintColor) as the thumbnail until real preview images are
-              dropped into assets/images/filters/ — see filterThumbSource() below. */}
+          {/* FX thumbnail strip — Snapchat-style: real cover image per effect
+              (FX_IMAGES), live GL preview kicks in via hasLiveGLEffect/
+              LiveEffectPreview above the moment selectedFx changes. Replaces
+              the old flat-colour FILTERS swatch strip. 'None' clears back to
+              the plain camera feed. */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }} contentContainerStyle={{ gap: 10, paddingHorizontal: 12 }}>
-            {FILTERS.map(f => (
+            <TouchableOpacity style={ms.filterThumbWrap} onPress={() => setSelectedFx('fx_none')}>
+              <View style={[ms.filterThumb, selectedFx === 'fx_none' && ms.filterThumbActive, { backgroundColor: '#222', alignItems: 'center', justifyContent: 'center' }]}>
+                <Feather name="slash" size={16} color="#888" />
+                {selectedFx === 'fx_none' && (
+                  <View style={ms.filterThumbCheck}><Feather name="check" size={11} color="#000" /></View>
+                )}
+              </View>
+              <Text style={[ms.filterThumbTxt, selectedFx === 'fx_none' && { color: '#00ff88' }]}>None</Text>
+            </TouchableOpacity>
+            {FX_EFFECTS.map(f => (
               <TouchableOpacity
                 key={f.id}
                 style={ms.filterThumbWrap}
-                onPress={() => setSelectedFilter(f.id)}
+                onPress={() => { setSelectedFx(f.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
               >
-                <View style={[ms.filterThumb, selectedFilter === f.id && ms.filterThumbActive, { backgroundColor: f.tintColor ? f.tintColor.replace(/,[\d.]+\)/, ',1)') : '#222' }]}>
-                  {selectedFilter === f.id && (
+                <View style={[ms.filterThumb, selectedFx === f.id && ms.filterThumbActive, { overflow: 'hidden' }]}>
+                  <Image source={FX_IMAGES[f.id]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  {selectedFx === f.id && (
                     <View style={ms.filterThumbCheck}><Feather name="check" size={11} color="#000" /></View>
                   )}
                 </View>
-                <Text style={[ms.filterThumbTxt, selectedFilter === f.id && { color: '#00ff88' }]}>{f.name}</Text>
+                <Text style={[ms.filterThumbTxt, selectedFx === f.id && { color: '#00ff88' }]} numberOfLines={1}>{f.name}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -6587,7 +6651,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   if (fx.glShaderEffect === 'hand_portal') pickPortalScene();
                 }}
               >
-                <Text style={{ fontSize: 22 }}>{fx.emoji}</Text>
+                {FX_IMAGES[fx.id] ? (
+                  <Image source={FX_IMAGES[fx.id]} style={ms.fxCardImg} resizeMode="cover" />
+                ) : (
+                  <Text style={{ fontSize: 22 }}>{fx.emoji}</Text>
+                )}
                 <Text style={[ms.fxCardName, selectedFx === fx.id && { color: '#00ff88' }]}>{fx.name}</Text>
                 <Text style={ms.fxCardDesc} numberOfLines={1}>{fx.desc}</Text>
                 {/* Now that LiveEffectPreview handles GL shader effects, selecting one
@@ -7043,6 +7111,7 @@ const ms = StyleSheet.create({
   fxCatBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#111', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5, gap: 4, borderWidth: 1, borderColor: '#1a1a1a' },
   fxCatTxt: { color: '#888', fontSize: 10, fontWeight: '600' },
   fxCard: { alignItems: 'center', backgroundColor: '#111', borderRadius: 12, padding: 10, minWidth: 78, borderWidth: 1, borderColor: '#1a1a1a', position: 'relative' },
+  fxCardImg: { width: 44, height: 44, borderRadius: 8, backgroundColor: '#0a0a0a' },
   fxCardActive: { backgroundColor: '#001a0a', borderColor: '#00ff88' },
   fxCardName: { color: '#fff', fontSize: 10, fontWeight: '700', marginTop: 4, textAlign: 'center' },
   fxCardDesc: { color: '#555', fontSize: 8, textAlign: 'center', marginTop: 2 },

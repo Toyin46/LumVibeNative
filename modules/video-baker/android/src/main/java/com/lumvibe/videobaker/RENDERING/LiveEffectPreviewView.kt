@@ -25,7 +25,7 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 
 /**
 * Live camera preview with the SAME effect shaders as VideoTranscoder's bake
-* pass — this is what makes an effect visible BEFORE posting, not just after.
+* pass  -  this is what makes an effect visible BEFORE posting, not just after.
 *
 * Architecture, mirrors VideoTranscoder exactly, source/output swapped:
 *   VideoTranscoder:  decoder SurfaceTexture -> FrameRenderer -> encoder input Surface
@@ -34,18 +34,18 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 * Same EglCore, same GlUtil, same FrameRenderer.drawEffectFrame() call. Nothing
 * about the shaders themselves changes.
 *
-* KEY DIFFERENCE FROM THE BAKE PATH — tracking mode:
+* KEY DIFFERENCE FROM THE BAKE PATH  -  tracking mode:
 * FaceTracker/SegmentationTracker use RunningMode.VIDEO, which is a blocking
 * call meant for sequential, offline processing of a finished file. Calling
 * that 30x/sec on a live camera feed would stall the render thread and drop
 * frames. Live tracking below uses RunningMode.LIVE_STREAM instead, which is
 * async: you feed a frame in, and a callback fires later (maybe 1-3 frames
-* later) with the result. That lag is normal — every live-AR app has it, it's
+* later) with the result. That lag is normal  -  every live-AR app has it, it's
 * not a bug to chase here.
 *
-* NOT YET INCLUDED, to keep this file reviewable — add the same way if needed:
+* NOT YET INCLUDED, to keep this file reviewable  -  add the same way if needed:
 *  - AudioAmplitudeReader hookup for the effects that pulse on mic volume
-*    (Voice Halo, Thermal Pulse) — AudioAmplitudeReader already runs
+*    (Voice Halo, Thermal Pulse)  -  AudioAmplitudeReader already runs
 *    independently of video, so just call its existing read into
 *    renderer.effectIntensity or wherever each shader expects it, same as
 *    VideoTranscoder does.
@@ -55,10 +55,10 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 * LiveEffectPreviewView(context)), then from the JS side render it as a host
 * component and call setEffect(...)/setFacing(...) through the ref, same
 * pattern VisionCamera's own <Camera> component uses. I haven't written that
-* bridge file — say the word and I'll do that next, it's a much smaller file
+* bridge file  -  say the word and I'll do that next, it's a much smaller file
 * than this one.
 *
-* I can't compile or run this in my environment (no Android SDK, no device) —
+* I can't compile or run this in my environment (no Android SDK, no device)  -
 * treat this as a strong first draft, not a "definitely builds" guarantee.
 * Build it, and if logcat shows something specific breaking, send it to me
 * and I'll fix that exact line instead of guessing blind.
@@ -71,14 +71,14 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // ---- Public control surface, called from the RN bridge / ViewManager ----
 
     // Whatever effect was last requested, even if it arrived before renderer
-    // existed — applied in setupEgl() once the renderer is actually created.
+    // existed  -  applied in setupEgl() once the renderer is actually created.
     // Fixes a real race: Expo's Prop setter can call setEffect() synchronously
     // right after view creation, well before surfaceCreated()/setupEgl() have
-    // run — without this, that first selection silently no-ops and the effect
+    // run  -  without this, that first selection silently no-ops and the effect
     // never reaches the renderer at all.
     private var pendingEffect: VisualEffect = VisualEffect.NONE
 
-    /** Same VisualEffect enum EffectShaders/FrameRenderer already use — no new effect vocabulary. */
+    /** Same VisualEffect enum EffectShaders/FrameRenderer already use  -  no new effect vocabulary. */
     fun setEffect(effect: VisualEffect) {
         pendingEffect = effect
         renderHandler?.post { renderer?.setEffect(effect) }
@@ -98,7 +98,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     private var renderer: FrameRenderer? = null
 
     // Offscreen texture the camera writes into. This is the SAME kind of
-    // external-OES texture the decoder writes into during baking — FrameRenderer
+    // external-OES texture the decoder writes into during baking  -  FrameRenderer
     // doesn't know or care whether the pixels came from a camera or a video file.
     private var cameraTexId = -1
     private var cameraSurfaceTexture: SurfaceTexture? = null
@@ -130,7 +130,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // loop. Running full face+hand inference every render frame is more than
     // most mid-range Android GPUs/NPUs keep up with smoothly; 12-15fps tracking
     // is visually smooth enough for hue shifts, halos, portals etc. Tune this
-    // per-device later if it feels laggy — this is a starting number, not a
+    // per-device later if it feels laggy  -  this is a starting number, not a
     // measured one.
     private val trackingIntervalMs = 70L
     private var lastTrackingSubmitMs = 0L
@@ -138,7 +138,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     init {
         holder.addCallback(this)
         // Transparent-capable so this view can sit as an overlay above VisionCamera's
-        // own preview if you go that route instead of replacing it outright — your call
+        // own preview if you go that route instead of replacing it outright  -  your call
         // once you see how it looks on device.
         holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
     }
@@ -184,7 +184,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         eglCore!!.makeCurrent(eglSurface!!)
 
         renderer = FrameRenderer().apply { setup() }
-        // Apply whatever effect was requested before the renderer existed — see
+        // Apply whatever effect was requested before the renderer existed  -  see
         // pendingEffect's doc for why this line is the actual fix, not just belt-and-braces.
         renderer?.setEffect(pendingEffect)
         cameraTexId = GlUtil.createExternalTexture()
@@ -204,7 +204,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setOutputFaceBlendshapes(true)
                 .setResultListener { result, _ -> onFaceResult(result) }
-                .setErrorListener { /* transient — next frame will retry, nothing to surface here */ }
+                .setErrorListener { /* transient  -  next frame will retry, nothing to surface here */ }
                 .build()
             liveFaceLandmarker = FaceLandmarker.createFromOptions(context, faceOptions)
 
@@ -218,7 +218,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             liveHandLandmarker = HandLandmarker.createFromOptions(context, handOptions)
 
             // Same segmenter SegmentationTracker uses for baking (selfie_segmenter.tflite,
-            // category 1 = person), just in LIVE_STREAM/async mode instead of VIDEO/blocking —
+            // category 1 = person), just in LIVE_STREAM/async mode instead of VIDEO/blocking  -
             // same reasoning as face/hand above. This is the heaviest of the three trackers
             // (SegmentationTracker's own comment flags it as "noticeably heavier per-frame"
             // even in the offline bake path), so it rides the same trackingIntervalMs throttle
@@ -234,7 +234,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             liveSegmenter = ImageSegmenter.createFromOptions(context, segOptions)
         } catch (e: Exception) {
             // Model files missing from assets/, or MediaPipe init failed on this device.
-            // Live tracking just won't update — base video/color-only effects still render.
+            // Live tracking just won't update  -  base video/color-only effects still render.
             android.util.Log.e("LiveEffectPreview", "tracker init failed", e)
         }
     }
@@ -290,7 +290,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         openCamera()
     }
 
-    // ---- Render loop (driven by camera's onFrameAvailable, not a fixed timer —
+    // ---- Render loop (driven by camera's onFrameAvailable, not a fixed timer  -
     //      matches whatever FPS the camera actually delivers) ----
 
     private fun drawFrame() {
@@ -306,12 +306,12 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val elapsedSec = (System.nanoTime() - startTimeNs) / 1_000_000_000f
         r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
 
-        // FIX: must read pixels for tracking BEFORE swapBuffers, not after — on
+        // FIX: must read pixels for tracking BEFORE swapBuffers, not after  -  on
         // most EGL drivers the back buffer's contents become UNDEFINED right
         // after a swap (no EGL_BUFFER_PRESERVED here), so reading post-swap risks
         // grabbing garbage or a blank frame. That silently starves MediaPipe of
         // real input, which is a very plausible reason face/hand tracking looked
-        // like it "wasn't working" — the frames it was fed may not have been the
+        // like it "wasn't working"  -  the frames it was fed may not have been the
         // frames actually on screen.
         maybeSubmitForTracking()
 
@@ -319,20 +319,34 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         eglC.swapBuffers(eglS)
     }
 
-    /** Throttled bitmap grab for MediaPipe — see trackingIntervalMs comment above. */
+    /** Throttled bitmap grab for MediaPipe  -  see trackingIntervalMs comment above. */
     private fun maybeSubmitForTracking() {
+        // PERF FIX: this used to submit to face+hand+segmentation EVERY throttled
+        // tick regardless of the selected effect  -  meaning a pure-shader effect
+        // like Neon Edge (which EffectRequirements says needs none of the three)
+        // was still paying for all three MediaPipe inferences every ~70ms, for
+        // no visual benefit at all. Gate each detectAsync/segmentAsync call to
+        // only the tracker(s) EffectRequirements says the CURRENT effect
+        // actually needs  -  same gating VideoTranscoder already does correctly
+        // for the bake path, just missing here until now.
+        val effect = renderer?.currentEffect ?: VisualEffect.NONE
+        val wantsFace = EffectRequirements.needsFaceTracker(effect)
+        val wantsHand = EffectRequirements.needsHandTracker(effect)
+        val wantsSeg = EffectRequirements.needsSegmentation(effect)
+        if (!wantsFace && !wantsHand && !wantsSeg) return
+
         val now = System.currentTimeMillis()
         if (now - lastTrackingSubmitMs < trackingIntervalMs) return
         lastTrackingSubmitMs = now
 
-        // Reuses the same GlUtil.readPixelsAsBitmap the freeze-frame effect uses —
+        // Reuses the same GlUtil.readPixelsAsBitmap the freeze-frame effect uses  -
         // real GPU->CPU cost, which is exactly why this is throttled and not
-        // called every render frame. Must read at the FULL framebuffer size —
+        // called every render frame. Must read at the FULL framebuffer size  -
         // readPixelsAsBitmap(w,h) reads a WxH region at 1:1, it doesn't scale, so
         // passing a smaller size would just read a cropped corner, not a
         // downscaled frame. Scale down AFTER reading instead, since MediaPipe's
         // face/hand/segmentation models resize to a small fixed input internally
-        // anyway (roughly 192-256px) — feeding them a full 1080p+ bitmap wastes
+        // anyway (roughly 192-256px)  -  feeding them a full 1080p+ bitmap wastes
         // CPU on detail the model throws away immediately. Capping the longer
         // edge at 320px cuts that wasted work with no meaningful accuracy loss
         // for this use case (visual effects, not precision measurement).
@@ -350,19 +364,19 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val ts = now
         trackingHandler?.post {
             val mpImage = BitmapImageBuilder(bitmap).build()
-            liveFaceLandmarker?.detectAsync(mpImage, ts)
-            liveHandLandmarker?.detectAsync(mpImage, ts)
-            liveSegmenter?.segmentAsync(mpImage, ts)
+            if (wantsFace) liveFaceLandmarker?.detectAsync(mpImage, ts)
+            if (wantsHand) liveHandLandmarker?.detectAsync(mpImage, ts)
+            if (wantsSeg) liveSegmenter?.segmentAsync(mpImage, ts)
         }
     }
 
-    // ---- Async tracking callbacks — cheap, just stash numbers for next drawFrame() ----
+    // ---- Async tracking callbacks  -  cheap, just stash numbers for next drawFrame() ----
 
     private fun onFaceResult(result: FaceLandmarkerResult) {
         val r = renderer ?: return
         if (result.faceLandmarks().isEmpty()) return
         val landmarks = result.faceLandmarks()[0]
-        // Bounding box from raw landmarks — same min/max approach FaceTracker.faceBoundingBox()
+        // Bounding box from raw landmarks  -  same min/max approach FaceTracker.faceBoundingBox()
         // uses in the bake path; duplicated here rather than shared because FaceTracker's
         // version is a private instance method tied to VIDEO-mode results. Worth factoring
         // both into a shared top-level function later so this logic only lives in one place.
@@ -374,11 +388,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             if (lm.y() > maxY) maxY = lm.y()
         }
 
-        // Blendshape-driven effects — same scores/thresholds VideoTranscoder computes
+        // Blendshape-driven effects  -  same scores/thresholds VideoTranscoder computes
         // in the bake path (see its faceScoreEffects/mouthEffects when-branches), just
         // gated per-effect here so effectIntensity (shared across all of them) never
         // gets clobbered by a score meant for a different effect. Only fetch
-        // faceBlendshapes() once, when actually needed — it's not free.
+        // faceBlendshapes() once, when actually needed  -  it's not free.
         var intensityOverride: Float? = null
         var mouthX = 0.5f
         var mouthY = 0.6f
@@ -394,7 +408,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
                 val left = shapes?.firstOrNull { it.categoryName() == "eyeBlinkLeft" }?.score() ?: 0f
                 val right = shapes?.firstOrNull { it.categoryName() == "eyeBlinkRight" }?.score() ?: 0f
-                // Same "clean single-eye wink" gate VideoTranscoder uses — plain
+                // Same "clean single-eye wink" gate VideoTranscoder uses  -  plain
                 // |L - R| would also fire on a full double-blink.
                 intensityOverride = when {
                     left > 0.6f && right < 0.3f -> left
@@ -406,7 +420,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
                 intensityOverride = shapes?.firstOrNull { it.categoryName() == "jawOpen" }?.score() ?: 0f
                 // Same landmark 13/14 midpoint FaceTracker.mouthCenter() uses in the
-                // bake path — see that method's doc for why 13/14 are safe here.
+                // bake path  -  see that method's doc for why 13/14 are safe here.
                 if (landmarks.size > 14) {
                     val upper = landmarks[13]
                     val lower = landmarks[14]
@@ -433,8 +447,13 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // same landmark indices HandTracker.palmCenter() already uses.
         val cx = (hand[0].x() + hand[5].x() + hand[17].x()) / 3f
         val cy = (hand[0].y() + hand[5].y() + hand[17].y()) / 3f
+        // NEW: wrist(0)->index-MCP(5) angle, same convention/indices as
+        // HandTracker.handAngle() in the bake path  -  used by FIRE_BOOK to
+        // tilt the book quad to match the hand live, not just after baking.
+        val angle = kotlin.math.atan2(hand[5].y() - hand[0].y(), hand[5].x() - hand[0].x())
         renderHandler?.post {
             r.portalCenter = floatArrayOf(cx, cy)
+            r.portalAngle = angle
         }
     }
 
@@ -445,7 +464,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val h = categoryMask.height
 
         // Same extraction/rebuild as SegmentationTracker.maskBitmap() in the bake
-        // path — MPImage requires going through ByteBufferExtractor, no direct
+        // path  -  MPImage requires going through ByteBufferExtractor, no direct
         // pixel property. Category 1 = person per selfie_segmenter's label map.
         val maskBuffer: ByteBuffer = ByteBufferExtractor.extract(categoryMask)
         maskBuffer.rewind()
@@ -459,7 +478,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         mask.copyPixelsFromBuffer(outBuffer)
 
         // uploadSecondaryTexture is the SAME FrameRenderer method VideoTranscoder
-        // calls for DEPTH_BLOOM/SPLIT_PRISM during baking — GL upload must happen
+        // calls for DEPTH_BLOOM/SPLIT_PRISM during baking  -  GL upload must happen
         // on the render thread since it touches the current EGL context, so hop
         // over via renderHandler rather than uploading from this tracking-thread
         // callback directly.
@@ -487,4 +506,4 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         trackingThread?.quitSafely()
         renderThread?.quitSafely()
     }
-} 
+}  

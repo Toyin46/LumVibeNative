@@ -16,12 +16,11 @@ export default {
     },
     "extra": {
       "eas": {
-        "projectId": "aba96528-c3ae-4256-b7af-f412926dcdf5"
+        "projectId": "52b32ab2-baf0-4bba-9b9c-2fb64c455edd"
       },
       "livekitUrl": process.env.LIVEKIT_URL
     },
-    "owner": "lumvibe",
-    "android": {
+        "android": {
       "package": "com.kinsta.kinsta2",
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {

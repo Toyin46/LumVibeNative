@@ -1,7 +1,7 @@
 package com.lumvibe.videobaker
 
 /**
-* "Phase 1" visual effects — the ones that need ONLY the decoded video frame
+* "Phase 1" visual effects  -  the ones that need ONLY the decoded video frame
 * itself, no MediaPipe face/hand tracking, no audio decode, no device motion.
 * That's why these five are safe to ship now: Mood Ring, Gaze Trail, Hand
 * Portal, Split Prism, and the audio-beat-synced version of Duotone Pulse all
@@ -11,7 +11,7 @@ package com.lumvibe.videobaker
 *
 * Every fragment shader here samples the decoder's output directly
 * (samplerExternalOES), so each one is a drop-in replacement for the plain
-* "pass-through" video shader already in FrameRenderer — see drawEffectFrame().
+* "pass-through" video shader already in FrameRenderer  -  see drawEffectFrame().
 */
 enum class VisualEffect {
     NONE,
@@ -23,19 +23,19 @@ enum class VisualEffect {
     INK_WASH,
     // ---- Phase 2: needs FaceTracker's per-frame blendshape score, driven through
     // the same repurposed-uIntensity pattern MOOD_RING introduced. See
-    // VideoTranscoder.FACE_SCORE_EFFECTS for the generic wiring (added below —
+    // VideoTranscoder.FACE_SCORE_EFFECTS for the generic wiring (added below  -
     // MOOD_RING's original hardcoded branch has been folded into that set). ----
     MOOD_RING,
     WINK_SPARK,     // uIntensity = single-eye blink score (one eye closed, other open)
     SMILE_SHATTER,  // uIntensity = smile score (same signal as MOOD_RING, different shader)
-    // ---- Phase 2b: needs FaceTracker's head-pose decomposition (headPoseDegrees) —
+    // ---- Phase 2b: needs FaceTracker's head-pose decomposition (headPoseDegrees)  -
     // see VideoTranscoder.FACE_POSE_EFFECTS. Not yet wired; see README note. ----
     HEAD_TILT_ZOOM,
-    // ---- Phase 3: needs AudioAmplitudeReader — see VideoTranscoder.AUDIO_SCORE_EFFECTS ----
+    // ---- Phase 3: needs AudioAmplitudeReader  -  see VideoTranscoder.AUDIO_SCORE_EFFECTS ----
     AURA_GLOW,      // uIntensity = normalized audio amplitude (stand-in for "voice pitch,"
-                     // which needs real pitch detection — see class doc below)
+                     // which needs real pitch detection  -  see class doc below)
     // ---- Phase 3b: needs per-frame motion estimate computed in Kotlin (frame-to-frame
-    // luma diff), not a new tracker class — see VideoTranscoder.stillnessSeconds ----
+    // luma diff), not a new tracker class  -  see VideoTranscoder.stillnessSeconds ----
     COLOR_DRAIN,
     // ---- Phase 4: needs AudioAmplitudeReader (already built) ----
     SILENCE_RIPPLE,      // ripples out from center when audio drops below a threshold
@@ -51,32 +51,32 @@ enum class VisualEffect {
     TWO_HAND_FRAME,      // both hands forming a rough rectangle triggers a vignette frame
     // ---- Phase 7: temporal effects. GAZE_TRAIL and DOUBLE_TAKE turned out to be
     // achievable as SINGLE-PASS shader tricks (position history / directional streak)
-    // rather than needing real cross-frame GPU buffers — see their shader docs below.
+    // rather than needing real cross-frame GPU buffers  -  see their shader docs below.
     // BLINK_FREEZE is the one genuine exception: it holds one captured frame across
     // several output frames, which needs FrameRenderer's new freeze-capture texture. ----
     GAZE_TRAIL,          // particle trail following iris position, last N positions only
     DOUBLE_TAKE,         // directional ghost streak on fast head turn (yaw delta)
     BLINK_FREEZE,        // freeze-frame + zoom punch on blink, held for ~0.3s
     // ---- Phase 8: same trackers as above (SegmentationTracker, FaceTracker), new
-    // visual treatments — full-body recolor and a mouth-anchored procedural flame. ----
+    // visual treatments  -  full-body recolor and a mouth-anchored procedural flame. ----
     GOLD_SKIN,           // person (via segmentation mask) recolored through a metallic
-                          // gold gradient, luminance-mapped so shading/detail survives —
+                          // gold gradient, luminance-mapped so shading/detail survives  -
                           // background untouched. Needs SegmentationTracker only.
     MOUTH_FIRE,          // procedural flame anchored at mouth center, sized by how open
                           // the mouth is (jawOpen blendshape). Needs FaceTracker.
-    // ---- Particle system core: two techniques —
+    // ---- Particle system core: two techniques  -
     //   SNOW_FALL: fully procedural/stateless, generated straight in GLSL from
-    //     uTime — no tracker, no CPU particle state, cheapest possible effect.
+    //     uTime  -  no tracker, no CPU particle state, cheapest possible effect.
     //   THROW_CONFETTI: real CPU-simulated particles (position/velocity/gravity/
     //     rotation/lifetime) via ParticleSystem.kt, triggered by a detected hand
     //     "throw" (rapid palm velocity spike), packed into a fixed-size uniform
-    //     array — same array-uniform convention GAZE_TRAIL already established. ----
+    //     array  -  same array-uniform convention GAZE_TRAIL already established. ----
     SNOW_FALL,
     THROW_CONFETTI,
-    // ---- Step 3 of the plan: new effects using only patterns already proven —
+    // ---- Step 3 of the plan: new effects using only patterns already proven  -
     // no new subsystem, unlike image baking / particles above. ----
     RAISE_EYEBROW,       // glow/lift accent above the eyebrows, driven by real
-                          // browInnerUp/browOuterUp blendshapes — same repurposed-
+                          // browInnerUp/browOuterUp blendshapes  -  same repurposed-
                           // uIntensity pattern as MOOD_RING/SMILE_SHATTER.
     GLITCH_WAVE,         // RGB channel split + scanline displacement, pure uTime-
                           // driven screen-space shader, no tracker needed.
@@ -86,49 +86,49 @@ enum class VisualEffect {
                           // pure uTime-driven, no tracker needed.
     MOUTH_WORDS,         // reactive "WOW!/OMG!/HAHA!" text near the mouth, chosen
                           // from real jawOpen/smile/browInnerUp blendshapes. This
-                          // one is a passthrough shader — the actual text is a
+                          // one is a passthrough shader  -  the actual text is a
                           // POSITIONED overlay draw (OverlayBuilder.buildWordBubble
                           // + FrameRenderer.drawWatermarkAt, reused as-is) done in
                           // VideoTranscoder after the effect frame, same layering
-                          // as the caption/watermark. Not real speech-to-text —
+                          // as the caption/watermark. Not real speech-to-text  -
                           // there's no on-device ASR in this project; this is an
                           // honest reactive-exclamation effect, not a fake
                           // transcription. Flagged clearly, not hidden.
-    // ---- Gesture classifier expansion — built on HandTracker.classifyGesture()/
+    // ---- Gesture classifier expansion  -  built on HandTracker.classifyGesture()/
     // fingerStates(), real per-finger extended/curled detection, not a fake
-    // binary. SPIN_EFFECT is the one exception — it's head-yaw driven
+    // binary. SPIN_EFFECT is the one exception  -  it's head-yaw driven
     // (FaceTracker), grouped here only because the plan grouped it here. ----
-    PALM_MAGIC,          // gentle sparkle particles rise from an open palm —
+    PALM_MAGIC,          // gentle sparkle particles rise from an open palm  -
                           // second real use of ParticleSystem.kt (low/negative
                           // gravity instead of confetti's downward arc), proves
                           // the particle core isn't single-purpose.
     ROCK_PAPER_SCISSORS,  // labels the currently-detected hand shape (ROCK/PAPER/
-                          // SCISSORS) as a positioned text bubble — reuses
+                          // SCISSORS) as a positioned text bubble  -  reuses
                           // OverlayBuilder.buildWordBubble + drawWatermarkAt,
                           // the exact same mechanism MOUTH_WORDS already proved.
-    CLAP_BURST,          // both palms detected rapidly closing distance — burst +
+    CLAP_BURST,          // both palms detected rapidly closing distance  -  burst +
                           // particles + glow at the meeting point.
-    TAP_SHOCKWAVE,       // index fingertip rapid-move-then-stop ("poke") —
+    TAP_SHOCKWAVE,       // index fingertip rapid-move-then-stop ("poke")  -
                           // expanding ring, reuses boomEnergy/boomCenter's decay
                           // as the ring's radius/opacity driver, no new uniforms.
     SPIN_EFFECT,         // rotating light ring anchored to the face, driven by
-                          // real head yaw (FaceTracker.headPoseDegrees) — same
+                          // real head yaw (FaceTracker.headPoseDegrees)  -  same
                           // architecture category as RAISE_EYEBROW, not a new
                           // gesture at all.
-    // ---- Final phase: the three hardest — each needed real design decisions,
+    // ---- Final phase: the three hardest  -  each needed real design decisions,
     // documented at each shader/wiring site below, not just "a new effect." ----
     FACE_MORPH,          // half-face wireframe mesh from REAL landmark positions,
                           // connected by actual computed nearest-neighbor proximity
-                          // (not hardcoded topology I can't fully verify) — drawn on
+                          // (not hardcoded topology I can't fully verify)  -  drawn on
                           // the CPU via Canvas, composited through the EXISTING
                           // uMaskTexture/uploadSecondaryTexture mechanism, zero new
                           // FrameRenderer uniforms.
     FIRE_BOOK,           // hand-tracked book image (asset-path, same convention as
-                          // HAND_PORTAL's portalScenePngPath — NO book asset exists
+                          // HAND_PORTAL's portalScenePngPath  -  NO book asset exists
                           // in this project, you supply one) + real fire particles
                           // (ParticleSystem, third tuning) + glow.
     STICKERS_REACT;      // real smile-triggered ParticleSystem spawning procedural
-                          // heart/sparkle SHAPES (not a static emoji glued on) —
+                          // heart/sparkle SHAPES (not a static emoji glued on)  -
                           // real trigger, real physics, matches section 2's "not
                           // the MAIN implementation" rule for literal emoji.
 
@@ -181,13 +181,13 @@ enum class VisualEffect {
 
 object EffectShaders {
 
-    // Same vertex shader as the plain video pass — applies the SurfaceTexture's
+    // Same vertex shader as the plain video pass  -  applies the SurfaceTexture's
     // transform matrix so orientation/cropping stays correct for every effect.
     private val effectVertexShader = """
         uniform mat4 uTexMatrix;
         attribute vec4 aPosition;
         attribute vec4 aTexCoord;
-        varying vec2 vTexCoord;
+        varying mediump vec2 vTexCoord; // FIX: was implicit highp, mismatched every fragment shader's mediump default from EXT_HEADER, causing "Could not link program: precision does not match" on some GPU drivers
         void main() {
             gl_Position = aPosition;
             vTexCoord = (uTexMatrix * aTexCoord).xy;
@@ -281,7 +281,7 @@ object EffectShaders {
             float l = luma(src.rgb);
 
             // NOTE: this swaps on elapsed video time, as a stand-in for real audio-beat
-            // sync (which needs the audio-amplitude decode pass — see README Phase 2).
+            // sync (which needs the audio-amplitude decode pass  -  see README Phase 2).
             float phase = 0.5 + 0.5 * sin(uTime * uPulseSpeed * 6.28318);
             vec3 low = mix(uColorA, uColorB, step(0.5, phase));
             vec3 high = mix(uColorB, uColorA, step(0.5, phase));
@@ -360,11 +360,11 @@ object EffectShaders {
 
     // Phase 2, simplified first version: a global hue rotation driven by live smile
     // score, not restricted to just the skin/face region. The original pitch was
-    // "skin-tone area only" — that needs a face-contour mask built from landmark
+    // "skin-tone area only"  -  that needs a face-contour mask built from landmark
     // points, which is a real follow-on step once this base pipeline (readback ->
     // FaceTracker -> per-frame score -> shader) is confirmed working end to end.
     // uIntensity is repurposed here to carry the live smile score (0..1) each frame,
-    // set by VideoTranscoder right before this draw call — same uniform, no new
+    // set by VideoTranscoder right before this draw call  -  same uniform, no new
     // plumbing needed.
     private val moodRing = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -398,10 +398,10 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Wink Spark — uIntensity carries the wink score (0 = both eyes open or both
+    // Wink Spark  -  uIntensity carries the wink score (0 = both eyes open or both
     // closed, 1 = a clean single-eye wink). Spark is anchored at a fixed
     // screen-space point (roughly where a face's eye sits when someone's
-    // recording themselves at arm's length) rather than a tracked eye position —
+    // recording themselves at arm's length) rather than a tracked eye position  -
     // FaceTracker's blendshapes give us WHICH eye winked, not WHERE it is in the
     // frame (that needs raw landmark coordinates, not blendshapes). Documented
     // simplification, same spirit as MOOD_RING's original note; upgrade path is
@@ -430,73 +430,102 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Smile Shatter — uIntensity carries the smile score. Renders a static
-    // glass-crack line pattern (procedural, not physically simulated shards)
-    // whose opacity scales with smile strength, plus a mild UV displacement
-    // along the crack lines so it reads as "fracturing" rather than a flat
-    // decal. Simpler than the pitch's "shatters & reforms" animation (which
-    // implies frame-to-frame physics/particle state); this is the shader-only
-    // first version — flagging so it isn't mistaken for the full effect.
+    // Smile Shatter  -  REWRITTEN from a 5-line crack decal to an actual
+    // polygonal shard shatter, matching the reference look (real glass pieces
+    // flying off, not lines drawn on top). Technique: jittered-grid Voronoi  -
+    // the screen is divided into irregular cells (like real broken glass,
+    // not a uniform grid), each cell independently displaced outward from
+    // frame center with its own random speed/rotation-drift, sampling the
+    // ORIGINAL video at the offset UV so each shard visually carries a real
+    // piece of the image with it, not a flat color. Cell boundaries get a
+    // bright edge glint (the standard "d2-d1" Voronoi trick) so shards read
+    // as faceted glass catching light, not just displaced blocks. uIntensity
+    // still carries the live smile score exactly as before  -  same uniform,
+    // same VideoTranscoder/EffectRequirements wiring, only the shader changed.
     private val smileShatter = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
         uniform float uIntensity; // repurposed: smile score 0..1
         uniform float uTime;
 
-        float crackLine(vec2 uv, vec2 from, vec2 to, float width) {
-            vec2 pa = uv - from;
-            vec2 ba = to - from;
-            float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-            return smoothstep(width, 0.0, length(pa - ba * h));
+        float hash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        vec2 hash2(vec2 p) {
+            vec2 q = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+            return fract(sin(q) * 43758.5453);
+        }
+
+        // Jittered-grid Voronoi: each grid cell gets one random point inside
+        // it, so cell shapes come out irregular (like real fracture pieces)
+        // instead of a uniform tile grid. Returns the winning cell's integer
+        // id, distance to its point (d1), and distance to the SECOND-nearest
+        // point (d2)  -  d2-d1 near zero is exactly a cell boundary, which is
+        // what drives the edge glint below.
+        void voronoi(vec2 uv, float cellSize, out vec2 cellId, out float d1, out float d2) {
+            vec2 g = floor(uv / cellSize);
+            d1 = 8.0; d2 = 8.0; cellId = g;
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    vec2 neighbor = g + vec2(float(x), float(y));
+                    vec2 point = (neighbor + hash2(neighbor)) * cellSize;
+                    float d = distance(uv, point);
+                    if (d < d1) { d2 = d1; d1 = d; cellId = neighbor; }
+                    else if (d < d2) { d2 = d; }
+                }
+            }
         }
 
         void main() {
             vec2 uv = vTexCoord;
+            // Needs a real smile to fully shatter, not a half-smirk.
+            float response = pow(clamp(uIntensity, 0.0, 1.0), 1.4);
 
-            // Non-linear response — needs a real smile to fully shatter, not a
-            // half-smirk. Old version mapped intensity straight to crack strength,
-            // so any smile at all looked about the same as a full grin.
-            float response = pow(clamp(uIntensity, 0.0, 1.0), 1.6);
+            vec2 cid; float d1; float d2;
+            voronoi(uv, 0.055, cid, d1, d2);
 
-            // Slight settling tremor so the crack pattern feels alive rather than
-            // a perfectly rigid decal — real cracked glass has micro-movement.
-            float tremor = 0.006 * sin(uTime * 9.0);
+            // Each shard's own center point, and its direction/distance from
+            // frame center  -  shards further from center fly out faster and
+            // further, exactly like a real impact radiating outward.
+            vec2 cellCenter = (cid + hash2(cid)) * 0.055;
+            vec2 fromCenter = cellCenter - vec2(0.5, 0.5);
+            float distFromCenter = length(fromCenter) + 0.001;
+            vec2 outward = fromCenter / distFromCenter;
 
-            float cracks = 0.0;
-            cracks += crackLine(uv, vec2(0.5, 0.5), vec2(0.15 + tremor, 0.10), 0.0035);
-            cracks += crackLine(uv, vec2(0.5, 0.5), vec2(0.85, 0.20 + tremor), 0.0035);
-            cracks += crackLine(uv, vec2(0.5, 0.5), vec2(0.75 - tremor, 0.90), 0.0035);
-            cracks += crackLine(uv, vec2(0.5, 0.5), vec2(0.20, 0.85 - tremor), 0.0035);
-            cracks += crackLine(uv, vec2(0.5, 0.5), vec2(0.05 + tremor, 0.55), 0.0035);
-            cracks = clamp(cracks, 0.0, 1.0) * response;
+            // Per-shard random speed so the burst doesn't move as one rigid
+            // sheet  -  some pieces lag, some lead, like real broken glass.
+            float shardSeed = hash1(cid);
+            float shardSpeed = 0.6 + shardSeed * 0.8;
+            float displaceAmount = response * distFromCenter * shardSpeed * 0.35;
 
-            // Chromatic fringe along the crack — samples R/G/B at tiny offsets,
-            // mimicking how real broken glass disperses light at the fracture
-            // edge. This one change is most of the gap between "a line drawn on
-            // top" and "glass that actually cracked."
-            vec2 dir = normalize(uv - 0.5 + 0.0001);
-            float fringe = cracks * 0.01;
-            float rCh = texture2D(uTexture, uv + dir * fringe).r;
-            float gCh = texture2D(uTexture, uv).g;
-            float bCh = texture2D(uTexture, uv - dir * fringe).b;
-            vec3 base = vec3(rCh, gCh, bCh);
+            // Small tangential drift per shard reads as tumbling rotation
+            // without needing actual per-shard rotation matrices.
+            vec2 tangent = vec2(-outward.y, outward.x);
+            float spin = (hash1(cid + 17.3) - 0.5) * 2.0;
+            vec2 displacement = outward * displaceAmount + tangent * displaceAmount * spin * 0.4;
 
-            // Twinkling glint instead of a flat white mix — cool-white core
-            // drifting toward warm, animated with uTime so it reads as light
-            // actually catching a sharp edge, not a static painted line.
-            float twinkle = 0.5 + 0.5 * sin(uTime * 14.0 + uv.x * 40.0 + uv.y * 40.0);
-            vec3 glintColor = mix(vec3(0.85, 0.95, 1.0), vec3(1.0, 0.95, 0.8), twinkle);
-            vec3 outColor = mix(base, glintColor, cracks * 0.75);
-            outColor += glintColor * pow(cracks, 3.0) * 0.4; // extra bite right at the crack core
+            vec2 sampleUv = uv - displacement;
+            vec4 src = (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0)
+                ? vec4(0.03, 0.03, 0.05, 1.0) // dark gap where a shard has flown clear off-frame
+                : texture2D(uTexture, sampleUv);
+
+            // Edge glint  -  brighter on shards that have moved further, since
+            // those are catching more implied light as they tumble free.
+            float edge = smoothstep(0.01, 0.0, d2 - d1);
+            float edgeBrightness = 0.4 + 0.6 * clamp(displaceAmount * 4.0, 0.0, 1.0);
+            vec3 edgeGlint = vec3(0.9, 0.96, 1.0) * edge * edgeBrightness * response;
+
+            // Shards that have flown far enough fade toward a dark gap rather
+            // than staying at full opacity forever  -  sells depth/distance.
+            float fade = 1.0 - smoothstep(0.15, 0.4, displaceAmount);
+            vec3 outColor = mix(vec3(0.02, 0.02, 0.03), src.rgb, fade) + edgeGlint;
 
             gl_FragColor = vec4(outColor, 1.0);
         }
     """.trimIndent()
 
-    // Aura Glow — same neon-edge-detect core as NEON_EDGE, but the glow color
+    // Aura Glow  -  same neon-edge-detect core as NEON_EDGE, but the glow color
     // rotates continuously and its INTENSITY (not hue) is driven by uIntensity,
     // which VideoTranscoder feeds from AudioAmplitudeReader.amplitudeAt() each
-    // frame. The pitch description asked for "color shifts with voice pitch" —
+    // frame. The pitch description asked for "color shifts with voice pitch"  -
     // real pitch detection (finding the fundamental frequency) is a materially
     // bigger DSP task than RMS amplitude; this ships amplitude-reactive first
     // as a real, tested stand-in, with pitch as a documented future upgrade
@@ -540,13 +569,13 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Color Drain — uIntensity here is repurposed to carry "stillness" (0 = just
+    // Color Drain  -  uIntensity here is repurposed to carry "stillness" (0 = just
     // moved, 1 = been still for a while), computed in VideoTranscoder from
     // frame-to-frame luma difference (see stillnessSeconds there) rather than a
     // device motion sensor. That substitution is a deliberate, necessary
     // adaptation: this whole pipeline bakes effects into an ALREADY-RECORDED
     // file after the fact, so there is no live gyroscope/accelerometer stream
-    // available during the bake pass — motion has to be estimated from the
+    // available during the bake pass  -  motion has to be estimated from the
     // pixels themselves.
     private val colorDrain = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -565,7 +594,7 @@ object EffectShaders {
 
     // Head Tilt Zoom needs its OWN vertex shader (not the shared effectVertexShader)
     // because the zoom/pan happens by scaling+offsetting the vertex position itself,
-    // not by sampling a different UV in the fragment shader — cheaper and avoids
+    // not by sampling a different UV in the fragment shader  -  cheaper and avoids
     // edge-clamping artifacts you'd get zooming in the fragment stage.
     private val headTiltZoomVertex = """
         uniform mat4 uTexMatrix;
@@ -573,7 +602,7 @@ object EffectShaders {
         uniform vec2 uPan;     // -1..1 range, NDC-space pan offset
         attribute vec4 aPosition;
         attribute vec4 aTexCoord;
-        varying vec2 vTexCoord;
+        varying mediump vec2 vTexCoord; // FIX: precision now matches this effect's fragment shader
         void main() {
             gl_Position = vec4(aPosition.xy / uZoom + uPan, aPosition.z, aPosition.w);
             vTexCoord = (uTexMatrix * aTexCoord).xy;
@@ -588,11 +617,11 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Silence Ripple — a continuously-running expanding-ring pattern (driven by
+    // Silence Ripple  -  a continuously-running expanding-ring pattern (driven by
     // uTime, same "one video timeline" contract as every other time-based effect
     // here), whose VISIBILITY is gated by uIntensity = 1-amplitude (so it's
     // essentially invisible while there's normal audio, and fades in as things go
-    // quiet). No new uniforms needed — reuses uTime/uIntensity, VideoTranscoder
+    // quiet). No new uniforms needed  -  reuses uTime/uIntensity, VideoTranscoder
     // just feeds a different meaning into uIntensity for this effect (see the
     // audioScoreEffects wiring).
     private val silenceRipple = EXT_HEADER + """
@@ -621,11 +650,11 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Voice Halo — a glow ring traced around FaceTracker's actual face bounding
+    // Voice Halo  -  a glow ring traced around FaceTracker's actual face bounding
     // box (uFaceBox: minX,minY,maxX,maxY, normalized), brightness driven by mic
     // volume via uIntensity. Falls back to a centered default box (set by
     // VideoTranscoder when no face was detected that frame) rather than a
-    // sudden pop-in/out — same "skip gracefully" spirit as every tracker here.
+    // sudden pop-in/out  -  same "skip gracefully" spirit as every tracker here.
     private val voiceHalo = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -641,19 +670,19 @@ object EffectShaders {
             float baseRadius = boxSize * 0.75;
             float d = distance(vTexCoord, center);
 
-            // Non-linear response: quiet stays subtle, loud gets a real payoff —
+            // Non-linear response: quiet stays subtle, loud gets a real payoff  -
             // pow() curve instead of the old straight-line 0.4 + 0.9*intensity,
             // which made every volume level look about the same.
             float response = pow(clamp(uIntensity, 0.0, 1.0), 0.6);
 
             // Idle shimmer: a slow outward breathing motion even at silence, so
-            // the ring never looks frozen/dead between words — this is what the
+            // the ring never looks frozen/dead between words  -  this is what the
             // old version was missing entirely (zero motion at uIntensity = 0).
             float idleBreath = 0.03 * sin(uTime * 1.3);
             float radius = baseRadius * (1.0 + idleBreath + response * 0.12);
 
             // THREE layered rings at decreasing radius/opacity instead of one hard
-            // edge — this is the single biggest difference between "a ring was
+            // edge  -  this is the single biggest difference between "a ring was
             // drawn" and "a light is glowing." Each ring uses a soft gaussian-like
             // falloff (squared distance) rather than a hard smoothstep line.
             float glow = 0.0;
@@ -665,7 +694,7 @@ object EffectShaders {
             }
             glow *= (0.35 + response * 1.1);
 
-            // Color shifts cool -> warm gold as intensity rises — reads as
+            // Color shifts cool -> warm gold as intensity rises  -  reads as
             // "reacting to your voice" rather than a static-colored sticker.
             vec3 quietColor = vec3(0.25, 0.65, 1.0);
             vec3 loudColor  = vec3(1.0, 0.75, 0.25);
@@ -675,25 +704,22 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Thermal Pulse — fake heat-map palette, restricted to a rough SKIN-TONE mask
-    // computed directly from the pixel color itself (a standard normalized-RGB
-    // skin heuristic), not from FaceTracker — this ships as a simplified
-    // whole-frame-skin-detection version rather than the pitch's precise
-    // "face-mesh-only" region, same documented-simplification spirit as
-    // MOOD_RING originally shipped with. Pulses with uIntensity = audio
-    // amplitude, standing in for "breath rhythm" — real breath-rhythm detection
-    // (isolating breathing from a mic signal) is its own nontrivial DSP problem,
-    // not something to silently claim as solved.
+    // Thermal Pulse  -  REWRITTEN to use SegmentationTracker's real person mask
+    // instead of a fixed-RGB "isSkin()" color guess. The old heuristic
+    // (r > 0.35 && r > g && r > b*0.9) is a classic warm-tone detector: it's
+    // biased against darker skin (luma too low to clear the 0.35 red
+    // threshold) and false-positives on any warm-colored background (wood,
+    // brick, tan walls)  -  a real correctness problem, not just cosmetic. Now
+    // gated into needsSegmentation (see EffectRequirements.kt /
+    // VideoTranscoder.kt) exactly like DEPTH_BLOOM/SPLIT_PRISM/GOLD_SKIN
+    // already are, and thermal color applies to the actual detected PERSON
+    // silhouette, working correctly across skin tones since it never looks
+    // at skin color at all.
     private val thermalPulse = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
+        uniform sampler2D uMaskTexture;
         uniform float uIntensity; // repurposed: normalized audio amplitude 0..1
-
-        bool isSkin(vec3 c) {
-            float maxC = max(c.r, max(c.g, c.b));
-            float minC = min(c.r, min(c.g, c.b));
-            return c.r > 0.35 && c.r > c.g && c.r > c.b * 0.9 && (maxC - minC) > 0.05;
-        }
 
         vec3 heatColor(float t) {
             vec3 cold = vec3(0.0, 0.0, 0.6);
@@ -704,17 +730,16 @@ object EffectShaders {
 
         void main() {
             vec4 src = texture2D(uTexture, vTexCoord);
-            if (isSkin(src.rgb)) {
-                float luma = dot(src.rgb, vec3(0.299, 0.587, 0.114));
-                float heat = clamp(luma * (0.6 + 0.6 * uIntensity), 0.0, 1.0);
-                gl_FragColor = vec4(heatColor(heat), src.a);
-            } else {
-                gl_FragColor = src;
-            }
+            float mask = texture2D(uMaskTexture, vTexCoord).a; // ALPHA_8 person mask, same convention as GOLD_SKIN/DEPTH_BLOOM
+
+            float luma = dot(src.rgb, vec3(0.299, 0.587, 0.114));
+            float heat = clamp(luma * (0.6 + 0.6 * uIntensity), 0.0, 1.0);
+            vec3 outColor = mix(src.rgb, heatColor(heat), mask);
+            gl_FragColor = vec4(outColor, src.a);
         }
     """.trimIndent()
 
-    // Depth Bloom — uMaskTexture is SegmentationTracker's per-frame foreground
+    // Depth Bloom  -  uMaskTexture is SegmentationTracker's per-frame foreground
     // mask (white = person, black = background), uploaded as a plain
     // GL_TEXTURE_2D each frame (see FrameRenderer.uploadMaskTexture). Background
     // pixels get a soft chromatic-bloom blur; foreground stays untouched.
@@ -751,8 +776,8 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Split Prism — background (via uMaskTexture, same as Depth Bloom) splits into
-    // 3 offset RGB layers. uIntensity here is repurposed as a MOTION magnitude —
+    // Split Prism  -  background (via uMaskTexture, same as Depth Bloom) splits into
+    // 3 offset RGB layers. uIntensity here is repurposed as a MOTION magnitude  -
     // computed in VideoTranscoder from frame-to-frame average-luma change, since
     // (as flagged earlier) there's no live device-motion sensor available during
     // post-record baking. Foreground (mask) stays a normal, unsplit image.
@@ -778,13 +803,13 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Gold Skin — same uMaskTexture convention as Depth Bloom/Split Prism above
+    // Gold Skin  -  same uMaskTexture convention as Depth Bloom/Split Prism above
     // (SegmentationTracker's person mask, white=person). Recolors ONLY the person
-    // through a 3-stop gold gradient MAPPED BY LUMINANCE, not a flat tint — that's
+    // through a 3-stop gold gradient MAPPED BY LUMINANCE, not a flat tint  -  that's
     // what keeps shading/detail (jawline, wrinkles, clothing folds) readable as
     // "metal" instead of just "yellow." A slow diagonal sheen sweep (uTime-driven)
     // adds a liquid-metal highlight so it doesn't read as a static color filter.
-    // No uIntensity — this one's always at full strength when selected, nothing to
+    // No uIntensity  -  this one's always at full strength when selected, nothing to
     // repurpose intensity as; background stays completely untouched via the mask.
     private val goldSkin = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -805,7 +830,7 @@ object EffectShaders {
                 ? mix(shadowGold, midGold, luma * 2.0)
                 : mix(midGold, hiGold, (luma - 0.5) * 2.0);
 
-            // Diagonal sheen band drifting slowly across the body — mimics light
+            // Diagonal sheen band drifting slowly across the body  -  mimics light
             // catching liquid/polished metal rather than a flat painted surface.
             float sheenPos = fract((vTexCoord.x + vTexCoord.y) * 1.5 - uTime * 0.15);
             float sheen = smoothstep(0.42, 0.5, sheenPos) * smoothstep(0.58, 0.5, sheenPos);
@@ -816,12 +841,12 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Mouth Fire — uMouthCenter is FaceTracker.mouthCenter() (landmarks 13/14
+    // Mouth Fire  -  uMouthCenter is FaceTracker.mouthCenter() (landmarks 13/14
     // midpoint), uIntensity is repurposed as the "jawOpen" blendshape score, same
     // repurposed-uIntensity convention as MOOD_RING/SMILE_SHATTER. Procedural flame
     // (hash/value-noise, no texture asset needed) grows taller and wider the more
     // the mouth opens, licking upward with a flickering noise-driven wobble rather
-    // than sitting as a static triangle — this is what separates "a shape was drawn
+    // than sitting as a static triangle  -  this is what separates "a shape was drawn
     // at a point" from "something that looks like fire."
     private val mouthFire = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -851,7 +876,7 @@ object EffectShaders {
 
             // Flame licks upward from the mouth (negative-y direction in this
             // texcoord space, consistent with every other position-anchored effect
-            // in this file — same orientation VOICE_HALO/GAZE_TRAIL already use,
+            // in this file  -  same orientation VOICE_HALO/GAZE_TRAIL already use,
             // no extra flip needed here).
             float wobble = (valueNoise(vec2(vTexCoord.x * 8.0, uTime * 6.0)) - 0.5) * 0.05;
             vec2 flameSpace = vec2(vTexCoord.x - uMouthCenter.x - wobble, vTexCoord.y - uMouthCenter.y);
@@ -876,14 +901,14 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Snow Fall — fully procedural, no tracker, no CPU particle state at all.
+    // Snow Fall  -  fully procedural, no tracker, no CPU particle state at all.
     // Screen space is tiled into a grid of cells; each cell gets ONE snowflake
     // whose position within the cell, size, and fall speed are all derived from
     // a hash of the cell's own coordinates (so every flake is different but
     // consistent frame-to-frame, not re-randomized every frame). uTime drives
     // the actual downward motion, with per-flake horizontal drift so it doesn't
-    // look like a rigid falling grid. This is a standard, real GPU technique —
-    // not a placeholder — and it's the cheapest possible particle effect
+    // look like a rigid falling grid. This is a standard, real GPU technique  -
+    // not a placeholder  -  and it's the cheapest possible particle effect
     // architecturally: nothing to simulate on the CPU side, nothing to upload
     // as a uniform array, works identically live and baked with zero extra
     // Kotlin wiring beyond the uTime this file's other effects already use.
@@ -920,19 +945,19 @@ object EffectShaders {
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
             float snow = 0.0;
-            snow += snowLayer(vTexCoord, 0.08, 0.06, 1.0) * 0.9;   // near layer — bigger, faster
-            snow += snowLayer(vTexCoord, 0.05, 0.03, 0.6) * 0.6;   // far layer — smaller, slower
+            snow += snowLayer(vTexCoord, 0.08, 0.06, 1.0) * 0.9;   // near layer  -  bigger, faster
+            snow += snowLayer(vTexCoord, 0.05, 0.03, 0.6) * 0.6;   // far layer  -  smaller, slower
             snow = clamp(snow, 0.0, 1.0);
             gl_FragColor = vec4(base.rgb + vec3(1.0) * snow, base.a);
         }
     """.trimIndent()
 
-    // Throw Confetti — real CPU-simulated particles from ParticleSystem.kt,
+    // Throw Confetti  -  real CPU-simulated particles from ParticleSystem.kt,
     // packed into fixed-size uniform arrays (same convention GAZE_TRAIL already
     // established for its point history). Each particle is drawn as a small
     // rotated rectangle sampled from a 6-color festive palette (index chosen by
     // ParticleSystem at spawn time), fading out as it approaches the end of its
-    // lifetime. PARTICLE_MAX must match ParticleSystem.MAX_PARTICLES exactly —
+    // lifetime. PARTICLE_MAX must match ParticleSystem.MAX_PARTICLES exactly  -
     // see that file's doc for why this is a duplicated-but-documented constant
     // rather than a shared import (matches this file's own existing convention
     // for GAZE_TRAIL_POINTS, not a new pattern invented here).
@@ -969,7 +994,7 @@ object EffectShaders {
                 // actually spins, rather than just translating a fixed-orientation shape.
                 vec2 local = vec2(toParticle.x * c + toParticle.y * s, -toParticle.x * s + toParticle.y * c);
 
-                // Small flat rectangle — a paper-confetti-piece silhouette, not a
+                // Small flat rectangle  -  a paper-confetti-piece silhouette, not a
                 // circle, so the rotation is actually visible.
                 float inRect = step(abs(local.x), 0.012) * step(abs(local.y), 0.006);
                 float fade = uParticleLife[i];
@@ -980,10 +1005,10 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Raise Eyebrow — real browInnerUp/browOuterUp blendshapes, same repurposed-
+    // Raise Eyebrow  -  real browInnerUp/browOuterUp blendshapes, same repurposed-
     // uIntensity convention MOOD_RING/SMILE_SHATTER already use. A soft glowing
     // accent lifts above the eyebrow line, brighter and higher the more the
-    // brows actually raise — anchored to uFaceBox (already-proven convention
+    // brows actually raise  -  anchored to uFaceBox (already-proven convention
     // from VOICE_HALO) rather than needing new per-effect tracking plumbing.
     private val raiseEyebrow = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -1012,8 +1037,8 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Glitch Wave — pure screen-space shader, no tracker at all. Time-gated
-    // "glitch bursts" (not a constant glitch — a constant one reads as broken,
+    // Glitch Wave  -  pure screen-space shader, no tracker at all. Time-gated
+    // "glitch bursts" (not a constant glitch  -  a constant one reads as broken,
     // not stylistic) with RGB channel split and blocky horizontal scanline
     // displacement during each burst window.
     private val glitchWave = EXT_HEADER + """
@@ -1026,13 +1051,13 @@ object EffectShaders {
         }
 
         void main() {
-            // Bursty timing: mostly calm, with irregular glitch windows —
+            // Bursty timing: mostly calm, with irregular glitch windows  -
             // reads as "a signal problem," not a constant, tiring effect.
             float burstPhase = fract(uTime * 0.4);
             float burstActive = step(0.75, hash(floor(uTime * 0.4)));
             float burstStrength = burstActive * smoothstep(0.0, 0.15, burstPhase) * smoothstep(1.0, 0.85, burstPhase);
 
-            // Blocky horizontal row displacement — classic signal-glitch look.
+            // Blocky horizontal row displacement  -  classic signal-glitch look.
             float rowId = floor(vTexCoord.y * 40.0);
             float rowGlitch = (hash(rowId + floor(uTime * 12.0)) - 0.5) * 0.06 * burstStrength;
             vec2 uv = vec2(vTexCoord.x + rowGlitch, vTexCoord.y);
@@ -1047,7 +1072,7 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Retro VHS — scanlines + chromatic fringe + horizontal tracking wobble,
+    // Retro VHS  -  scanlines + chromatic fringe + horizontal tracking wobble,
     // pure uTime-driven, no tracker. Constant/ambient (unlike Glitch Wave's
     // bursts) since a VHS look is meant to feel like a steady, worn tape, not a
     // signal error.
@@ -1074,11 +1099,11 @@ object EffectShaders {
             float b = texture2D(uTexture, uv - vec2(split, 0.0)).b;
             vec3 color = vec3(r, g, b);
 
-            // Scanlines — a dark horizontal band every few pixel-rows.
+            // Scanlines  -  a dark horizontal band every few pixel-rows.
             float scanline = 0.92 + 0.08 * sin(vTexCoord.y * 480.0);
             color *= scanline;
 
-            // Sparse horizontal noise streaks — tape dropout look.
+            // Sparse horizontal noise streaks  -  tape dropout look.
             float dropoutRow = floor(vTexCoord.y * 60.0);
             float dropout = step(0.985, hash(dropoutRow + floor(uTime * 2.0))) * 0.25;
             color += dropout;
@@ -1091,7 +1116,7 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Light Leak — warm colored streaks sweeping diagonally across the frame,
+    // Light Leak  -  warm colored streaks sweeping diagonally across the frame,
     // pure uTime-driven, no tracker. Additive blend so it reads as light
     // washing over the lens, not a solid shape painted on top.
     private val lightLeak = EXT_HEADER + """
@@ -1105,11 +1130,11 @@ object EffectShaders {
             // Diagonal coordinate that slowly sweeps with time.
             float diag = (vTexCoord.x + vTexCoord.y) * 0.7 - uTime * 0.08;
             float sweepPhase = fract(diag);
-            // Soft-edged band rather than a hard line — real lens light leaks
+            // Soft-edged band rather than a hard line  -  real lens light leaks
             // fall off gradually, not with a sharp cutoff.
             float band = smoothstep(0.0, 0.4, sweepPhase) * smoothstep(0.85, 0.4, sweepPhase);
 
-            // Warm gradient across the band itself — amber core, pink/orange edges.
+            // Warm gradient across the band itself  -  amber core, pink/orange edges.
             vec3 leakColor = mix(vec3(1.0, 0.55, 0.15), vec3(1.0, 0.25, 0.35), sweepPhase);
 
             // A second, fainter, slower streak in the opposite direction for depth.
@@ -1121,9 +1146,9 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Mouth Words — deliberately a plain passthrough. The reactive text itself
+    // Mouth Words  -  deliberately a plain passthrough. The reactive text itself
     // is drawn as a SEPARATE positioned overlay (see VisualEffect doc above),
-    // not a per-pixel shader effect — this program exists only so setEffect()/
+    // not a per-pixel shader effect  -  this program exists only so setEffect()/
     // drawEffectFrame()'s normal machinery has something valid to bind, keeping
     // this effect consistent with every other one instead of needing a special
     // case in FrameRenderer for "no shader at all."
@@ -1135,12 +1160,12 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Palm Magic — same particle uniform arrays THROW_CONFETTI uses (reused
+    // Palm Magic  -  same particle uniform arrays THROW_CONFETTI uses (reused
     // as-is), rendered as soft glowing circular sparkles instead of rotating
-    // rectangles — a warm/cool shimmering palette rather than confetti's flat
+    // rectangles  -  a warm/cool shimmering palette rather than confetti's flat
     // festive colors. The Kotlin side spawns these with near-zero/negative
     // gravity (see ParticleSystem instantiation in VideoTranscoder) so they
-    // drift gently upward rather than falling — same physics engine, different
+    // drift gently upward rather than falling  -  same physics engine, different
     // tuning, proving the particle core isn't confetti-specific.
     private val palmMagicSparkle = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -1164,8 +1189,8 @@ object EffectShaders {
             for (int i = 0; i < $PARTICLE_MAX; i++) {
                 if (i >= uParticleCount) break;
                 float d = distance(vTexCoord, uParticlePos[i]);
-                // Soft round falloff (not a hard circle) — a real glow, not a
-                // filled disc — plus a fast twinkle so each sparkle shimmers
+                // Soft round falloff (not a hard circle)  -  a real glow, not a
+                // filled disc  -  plus a fast twinkle so each sparkle shimmers
                 // rather than sitting as a static dot.
                 float glow = exp(-d * d * 900.0);
                 float twinkle = 0.6 + 0.4 * sin(uTime * 10.0 + float(i) * 12.9);
@@ -1176,7 +1201,7 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Rock Paper Scissors — deliberately a plain passthrough, same reasoning as
+    // Rock Paper Scissors  -  deliberately a plain passthrough, same reasoning as
     // MOUTH_WORDS: the actual gesture label is a POSITIONED text overlay
     // (OverlayBuilder.buildWordBubble + drawWatermarkAt, reused as-is), not a
     // per-pixel shader effect.
@@ -1188,9 +1213,9 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Clap Burst — combines TWO already-existing uniform families rather than
+    // Clap Burst  -  combines TWO already-existing uniform families rather than
     // inventing new ones: uBoomCenter/uBoomEnergy (the same generic decay pair
-    // FIST_BUMP_BOOM uses — FrameRenderer binds these to ANY shader that
+    // FIST_BUMP_BOOM uses  -  FrameRenderer binds these to ANY shader that
     // declares them, not just fist bump's own) for a central flash, plus the
     // particle arrays for a burst of debris, giving the richer "burst +
     // particles + glow" look the brief asks for without new FrameRenderer wiring.
@@ -1231,9 +1256,9 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Tap Shockwave — reuses uBoomCenter/uBoomEnergy again, no new uniforms.
+    // Tap Shockwave  -  reuses uBoomCenter/uBoomEnergy again, no new uniforms.
     // The trick: radius grows as energy DECAYS (radius = (1-energy)*max), and
-    // opacity fades WITH energy — so a single decaying-0-to-1 value drives both
+    // opacity fades WITH energy  -  so a single decaying-0-to-1 value drives both
     // an expanding ring's size and its fade-out, entirely in the shader.
     private val tapShockwave = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -1255,11 +1280,11 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Spin Effect — rotating light ring anchored to uFaceBox (already-generic,
+    // Spin Effect  -  rotating light ring anchored to uFaceBox (already-generic,
     // same convention VOICE_HALO/RAISE_EYEBROW use). uIntensity is repurposed
-    // as a normalized head-yaw magnitude — faster head turns spin the ring
+    // as a normalized head-yaw magnitude  -  faster head turns spin the ring
     // faster, but it always spins at a base rate even when still (yaw=0), so it
-    // never reads as "dead." Reuses uFaceBox/uIntensity/uTime — no new uniforms.
+    // never reads as "dead." Reuses uFaceBox/uIntensity/uTime  -  no new uniforms.
     private val spinEffect = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1281,7 +1306,7 @@ object EffectShaders {
             float spinSpeed = 1.2 + uIntensity * 2.5;
             float rotatedAngle = angle + uTime * spinSpeed;
 
-            // Several bright points around the ring rather than a solid line —
+            // Several bright points around the ring rather than a solid line  -
             // reads as "orbiting lights," not a static painted circle.
             float points = 6.0;
             float pointPattern = 0.5 + 0.5 * cos(rotatedAngle * points);
@@ -1293,18 +1318,18 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Stickers React — real smile-triggered ParticleSystem (fourth distinct
+    // Stickers React  -  real smile-triggered ParticleSystem (fourth distinct
     // tuning: gentle upward float, short lifetime, spawned from cheek/face
-    // area — see VideoTranscoder's instantiation), rendered as an actual
+    // area  -  see VideoTranscoder's instantiation), rendered as an actual
     // procedural heart SHAPE via the classic algebraic heart curve
-    // ((x²+y²-1)³ - x²y³), not a static emoji glyph glued over the face. The
+    // ((x?+y?-1)? - x?y?), not a static emoji glyph glued over the face. The
     // trigger (smile), the motion (real physics), and the position (real face
-    // landmark) are all genuine tracked data — only the shape itself is
+    // landmark) are all genuine tracked data  -  only the shape itself is
     // stylized, matching section 2's "supplementary visual asset, not the
     // main implementation" allowance rather than crossing it.
     // NOTE: heart orientation depends on the sign convention of this shader's
     // local y-axis, which I can't visually verify without rendering on a real
-    // device — if it renders upside-down, flip the sign on p.y below.
+    // device  -  if it renders upside-down, flip the sign on p.y below.
     private val stickersReact = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1344,15 +1369,15 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Face Morph — the composite shader is deliberately simple: it just alpha-
+    // Face Morph  -  the composite shader is deliberately simple: it just alpha-
     // blends uTexture with uMaskTexture (the mesh wireframe, drawn on the CPU
     // side via Canvas from REAL landmark positions and their REAL computed
-    // nearest-neighbor connections — not hardcoded topology, not the shader's
+    // nearest-neighbor connections  -  not hardcoded topology, not the shader's
     // concern at all). The "half face" split happens on the CPU side too, via
-    // Canvas.clipRect — the non-mesh half of that bitmap is simply transparent,
+    // Canvas.clipRect  -  the non-mesh half of that bitmap is simply transparent,
     // so this shader doesn't need to know about halves, sides, or geometry at
     // all. Reuses uMaskTexture/uploadSecondaryTexture exactly as DEPTH_BLOOM/
-    // GOLD_SKIN already do — zero new FrameRenderer uniforms.
+    // GOLD_SKIN already do  -  zero new FrameRenderer uniforms.
     private val faceMorphComposite = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1366,22 +1391,22 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Fire Book — reuses uPortalTexture (HAND_PORTAL's static-scene mechanism,
-    // same OverlayBuilder-style load-once pattern — this IS the honest "asset
-    // needed" flag from section 23: there's no book image in this project, you
-    // supply a PNG via bookPngPath, loaded exactly the way the portal scene
-    // image already is) for the book itself, uPortalCenter/uPortalRadius
-    // (repurposed: center = hand position, radius = half-width scale — same
-    // "repurpose an existing generic uniform" convention this whole file
-    // already uses for uIntensity) for hand-tracked position/size, and the
-    // particle arrays (fifth tuning: fast upward, red/orange/yellow, short
-    // lifetime) for real animated flames — zero new FrameRenderer uniforms.
+    // Fire Book  -  reuses uPortalTexture (HAND_PORTAL's static-scene mechanism,
+    // same OverlayBuilder-style load-once pattern) for the book itself,
+    // uPortalCenter/uPortalRadius (repurposed: center = hand position, radius
+    // = half-width scale) for hand-tracked position/size, and the particle
+    // arrays for real animated flames. uPortalAngle (NEW) rotates the book
+    // quad to match the actual wrist->index-MCP angle of the tracked hand  -
+    // previously always axis-aligned regardless of hand tilt, which read as
+    // pasted-on rather than held. Book image asset already supplied
+    // (fx_gl_fire_book2.png)  -  no longer a missing-asset situation.
     private val fireBook = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
         uniform sampler2D uPortalTexture;
         uniform vec2 uPortalCenter;
         uniform float uPortalRadius; // repurposed: book half-width scale
+        uniform float uPortalAngle; // radians  -  wrist->index-MCP angle, 0 = axis-aligned
         uniform vec2 uParticlePos[$PARTICLE_MAX];
         uniform float uParticleLife[$PARTICLE_MAX];
         uniform float uParticleColorIdx[$PARTICLE_MAX];
@@ -1398,21 +1423,30 @@ object EffectShaders {
             vec4 base = texture2D(uTexture, vTexCoord);
             vec3 outColor = base.rgb;
 
-            // Book rectangle — a fixed aesthetic aspect ratio (typical open-
+            // Book rectangle  -  a fixed aesthetic aspect ratio (typical open-
             // book proportions) around the hand-tracked center, scaled by the
-            // repurposed "radius" value.
+            // repurposed "radius" value, and now rotated to match hand angle.
             float halfW = uPortalRadius;
             float halfH = uPortalRadius * 0.7;
-            vec2 toBook = (vTexCoord - uPortalCenter) / vec2(halfW, halfH);
+            vec2 rawOffset = vTexCoord - uPortalCenter;
+            // Rotate the sample point by -uPortalAngle so the book tilts with
+            // the hand instead of always sitting screen-axis-aligned  -  this is
+            // the single biggest reason it used to read as "pasted on" rather
+            // than "held": a real held object's orientation follows the hand.
+            float ca = cos(-uPortalAngle);
+            float sa = sin(-uPortalAngle);
+            vec2 rotatedOffset = vec2(rawOffset.x * ca - rawOffset.y * sa, rawOffset.x * sa + rawOffset.y * ca);
+            vec2 toBook = rotatedOffset / vec2(halfW, halfH);
             if (abs(toBook.x) < 1.0 && abs(toBook.y) < 1.0) {
                 vec2 bookUV = toBook * 0.5 + 0.5;
                 vec4 bookColor = texture2D(uPortalTexture, bookUV);
                 outColor = mix(outColor, bookColor.rgb, bookColor.a);
             }
 
-            // Warm ambient glow around the book, pulsing like firelight —
-            // independent of whether the book image itself has its own art.
-            float glowDist = distance(vTexCoord, uPortalCenter) / max(halfW, halfH);
+            // Warm ambient glow around the book, pulsing like firelight  -
+            // uses the UNROTATED offset since plain distance-from-center
+            // doesn't change under rotation, no need to redo the trig.
+            float glowDist = length(rawOffset) / max(halfW, halfH);
             float glowPulse = 0.7 + 0.3 * sin(uTime * 6.0);
             float glow = exp(-glowDist * glowDist * 2.0) * 0.25 * glowPulse;
             outColor += vec3(1.0, 0.55, 0.15) * glow;
@@ -1430,9 +1464,9 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Hand Portal — uPortalTexture is a STATIC scene image (loaded once via
-    // OverlayBuilder-style loader, like the watermark logo — NOT a second video;
-    // a full video-in-video portal is a materially bigger feature — a portal
+    // Hand Portal  -  uPortalTexture is a STATIC scene image (loaded once via
+    // OverlayBuilder-style loader, like the watermark logo  -  NOT a second video;
+    // a full video-in-video portal is a materially bigger feature  -  a portal
     // scene photo/image is the honest first version of this pitch). Inside the
     // circle (uPortalCenter, uPortalRadius, both normalized 0..1 screen space)
     // shows the portal scene; outside shows the normal video.
@@ -1459,10 +1493,10 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Fist Bump Boom needs its OWN vertex shader for the screen-shake part —
+    // Fist Bump Boom needs its OWN vertex shader for the screen-shake part  -
     // same reason HEAD_TILT_ZOOM does (a fragment-only shake would just look
     // like blur, not an actual camera-shake feel). uBoomEnergy starts at 1.0 the
-    // frame a fist is detected and decays exponentially over subsequent frames —
+    // frame a fist is detected and decays exponentially over subsequent frames  -
     // see VideoTranscoder's boomEnergy state variable.
     private val fistBumpBoomVertex = """
         uniform mat4 uTexMatrix;
@@ -1470,7 +1504,7 @@ object EffectShaders {
         uniform float uTime;
         attribute vec4 aPosition;
         attribute vec4 aTexCoord;
-        varying vec2 vTexCoord;
+        varying mediump vec2 vTexCoord; // FIX: precision now matches this effect's fragment shader
 
         float hash(float n) { return fract(sin(n) * 43758.5453); }
 
@@ -1497,10 +1531,10 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Two-Hand Frame — uFrameRect is the rectangle (left,top,right,bottom,
+    // Two-Hand Frame  -  uFrameRect is the rectangle (left,top,right,bottom,
     // normalized 0..1) spanned by both palm positions; draws a glowing vignette
     // border along that rectangle's edge. uIntensity carries gesture confidence
-    // (how rectangle-like the two-hand shape currently is — computed in
+    // (how rectangle-like the two-hand shape currently is  -  computed in
     // VideoTranscoder, not here).
     private val twoHandFrame = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -1523,15 +1557,15 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Gaze Trail — SINGLE-PASS technique, no cross-frame GPU state: VideoTranscoder
+    // Gaze Trail  -  SINGLE-PASS technique, no cross-frame GPU state: VideoTranscoder
     // keeps the last 8 iris positions in a plain Kotlin array (see
     // VideoTranscoder.gazeHistory) and uploads the whole array as a uniform every
-    // frame. Older points are simply dimmer (via uGazeAges) — the "trail" comes
+    // frame. Older points are simply dimmer (via uGazeAges)  -  the "trail" comes
     // from Kotlin remembering positions over time, not from the GPU accumulating
     // anything, which is what keeps this safely in the same risk category as
     // every other single-pass effect above rather than needing an FBO.
     private const val GAZE_TRAIL_POINTS = 8
-    // Cap for THROW_CONFETTI's particle array — must match ParticleSystem.MAX_PARTICLES
+    // Cap for THROW_CONFETTI's particle array  -  must match ParticleSystem.MAX_PARTICLES
     // exactly (that file documents the same number with the reasoning: enough for a
     // visually rich burst, still cheap for a fixed-size uniform array + shader loop
     // on lower-end GPUs per section 19's performance requirement).
@@ -1557,14 +1591,14 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Double Take — reimagined as a SINGLE-PASS directional streak (multi-tap
+    // Double Take  -  reimagined as a SINGLE-PASS directional streak (multi-tap
     // sampling of the SAME live frame at offset UVs) rather than blending real
     // historical frames. This is a deliberate, safer substitute for a true
     // afterimage: it reads as a fast-turn ghost/blur without needing any
     // frame-capture or FBO machinery, at the cost of not showing your ACTUAL
     // previous pose (just a directional smear). If you want the literal
     // multi-frame ghost from the original pitch later, that's a genuinely
-    // different (and riskier) technique — worth a dedicated pass on its own,
+    // different (and riskier) technique  -  worth a dedicated pass on its own,
     // not bundled in here.
     private val doubleTake = EXT_HEADER + """
         varying vec2 vTexCoord;
@@ -1585,21 +1619,21 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Blink Freeze — the one effect here that GENUINELY needs to hold a captured
+    // Blink Freeze  -  the one effect here that GENUINELY needs to hold a captured
     // frame across multiple output frames (you can't "freeze" using only the
     // current frame's pixels). Samples a plain sampler2D (FrameRenderer's
-    // frozen-capture texture, filled via glCopyTexImage2D — see
+    // frozen-capture texture, filled via glCopyTexImage2D  -  see
     // FrameRenderer.captureFreezeFrame), NOT samplerExternalOES, since a
     // glCopyTexImage2D target is a normal 2D texture, not a camera/decoder
     // surface texture. Needs its own vertex shader for the zoom-punch, same
-    // reasoning as HEAD_TILT_ZOOM/FIST_BUMP_BOOM — but no uTexMatrix here, since
+    // reasoning as HEAD_TILT_ZOOM/FIST_BUMP_BOOM  -  but no uTexMatrix here, since
     // a captured 2D texture's UVs are already normal 0..1, unlike the decoder's
     // SurfaceTexture which needs that matrix to correct for its native transform.
     private val blinkFreezeVertex = """
         uniform float uZoom; // 1.0 = no zoom, >1.0 = punched in
         attribute vec4 aPosition;
         attribute vec4 aTexCoord;
-        varying vec2 vTexCoord;
+        varying mediump vec2 vTexCoord; // FIX: precision now matches this effect's fragment shader
         void main() {
             gl_Position = vec4(aPosition.xy / uZoom, aPosition.z, aPosition.w);
             vTexCoord = aTexCoord.xy;
@@ -1658,4 +1692,4 @@ object EffectShaders {
         VisualEffect.FIRE_BOOK -> effectVertexShader to fireBook
         VisualEffect.NONE -> throw IllegalArgumentException("VisualEffect.NONE has no shader")
     }
-}   
+}    

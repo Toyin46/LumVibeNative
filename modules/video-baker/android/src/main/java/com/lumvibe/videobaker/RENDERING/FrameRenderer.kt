@@ -8,18 +8,18 @@ import java.nio.FloatBuffer
 
 /**
 * Draws layers, in order, into whichever GL surface is currently current:
-*   1. The decoded video frame (external OES texture) — either the plain
+*   1. The decoded video frame (external OES texture)  -  either the plain
 *      pass-through (with brightness/contrast/saturation), or, if a
 *      VisualEffect is selected, one of the shaders in EffectShaders.kt.
 *   2. The caption overlay (normal 2D texture, full-frame, alpha-blended, static position).
-*   3. The watermark logo (normal 2D texture, drawn at a POSITIONED sub-rectangle —
-*      see drawWatermarkAt — which is what makes bouncing possible).
+*   3. The watermark logo (normal 2D texture, drawn at a POSITIONED sub-rectangle  -
+*      see drawWatermarkAt  -  which is what makes bouncing possible).
 *
-* This is intentionally simple GL — no third-party rendering library required.
+* This is intentionally simple GL  -  no third-party rendering library required.
 */
 class FrameRenderer {
 
-    // ---- Video (external texture) shader — plain pass-through with color adjust ----
+    // ---- Video (external texture) shader  -  plain pass-through with color adjust ----
     private val videoVertexShader = """
         uniform mat4 uTexMatrix;
         attribute vec4 aPosition;
@@ -50,7 +50,7 @@ class FrameRenderer {
         }
     """.trimIndent()
 
-    // ---- Overlay (normal texture, alpha blended) shader — used for BOTH caption
+    // ---- Overlay (normal texture, alpha blended) shader  -  used for BOTH caption
     // (full-screen quad) and watermark (positioned sub-rectangle quad) ----
     private val overlayVertexShader = """
         attribute vec4 aPosition;
@@ -78,7 +78,7 @@ class FrameRenderer {
     // used get compiled.
     private val effectPrograms = mutableMapOf<VisualEffect, Int>()
 
-    // full-screen quad, position (x,y) + tex coord (s,t) — used for video/effect/caption
+    // full-screen quad, position (x,y) + tex coord (s,t)  -  used for video/effect/caption
     private val vertexCoords = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
     private val textureCoords = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
 
@@ -86,27 +86,27 @@ class FrameRenderer {
     private val texCoordBuffer: FloatBuffer = makeBuffer(textureCoords)
 
     // Caption/watermark textures come from an Android Canvas Bitmap uploaded via
-    // GLUtils.texImage2D, drawn onto a fixed, un-rotated quad — they're already in
+    // GLUtils.texImage2D, drawn onto a fixed, un-rotated quad  -  they're already in
     // correct upright screen orientation and should be drawn with the plain
     // texCoordBuffer, same as everything else. overlayTexCoordBuffer below is a
-    // 180°-flipped UV set that USED to be applied here as a "fix" for a front-camera
-    // rotation issue — it was fixing the wrong layer, and instead mirrored every
+    // 180?-flipped UV set that USED to be applied here as a "fix" for a front-camera
+    // rotation issue  -  it was fixing the wrong layer, and instead mirrored every
     // caption/watermark on every video regardless of camera or source (see
     // drawOverlay/drawWatermarkAt fix). Kept unused for now in case a genuine
     // overlay-orientation bug shows up on a specific device/pipeline and this is
-    // needed again — but don't wire it back in without confirming the actual
+    // needed again  -  but don't wire it back in without confirming the actual
     // symptom first, the same mistake is easy to repeat.
     private val overlayTexCoordBuffer: FloatBuffer = makeBuffer(floatArrayOf(1f, 1f, 0f, 1f, 1f, 0f, 0f, 0f))
 
     // ACTUAL FIX: Canvas-drawn bitmaps put row 0 (the top) at texcoord v=0, but the
     // vertex mapping above (BL vertex -> texcoord index 0) treats v=0 as screen-
-    // bottom — so an upright canvas drawing comes out upside-down in GL unless v is
-    // flipped. This is a VERTICAL-ONLY flip (u unchanged) — NOT the same as
+    // bottom  -  so an upright canvas drawing comes out upside-down in GL unless v is
+    // flipped. This is a VERTICAL-ONLY flip (u unchanged)  -  NOT the same as
     // overlayTexCoordBuffer above, which flips both axes (that one caused the
     // earlier mirroring bug). Use this one for drawOverlay/drawWatermarkAt.
     private val verticalFlipTexCoordBuffer: FloatBuffer = makeBuffer(floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f))
 
-    // Separate, MUTABLE position buffer for the watermark — rewritten every frame
+    // Separate, MUTABLE position buffer for the watermark  -  rewritten every frame
     // with whatever rectangle WatermarkBounce.position() computes.
     private val watermarkPositionBuffer: FloatBuffer = makeBuffer(FloatArray(8))
 
@@ -122,7 +122,7 @@ class FrameRenderer {
     var duotoneColorB: FloatArray = floatArrayOf(1.00f, 0.35f, 0.15f)
     var duotonePulseSpeed: Float = 0.35f
     var neonGlowColor: FloatArray = floatArrayOf(0.10f, 1.00f, 0.85f)
-    // WINK_SPARK's fixed screen-space anchor point — see EffectShaders.winkSpark doc
+    // WINK_SPARK's fixed screen-space anchor point  -  see EffectShaders.winkSpark doc
     // for why this isn't a tracked eye position. (0.62, 0.4) sits upper-right of
     // center, a reasonable default for a front-camera selfie framing; expose as a
     // var so it can be tuned per-effect-config from the JS side later if needed.
@@ -138,29 +138,34 @@ class FrameRenderer {
     // HAND_PORTAL's circle, normalized screen space, written from HandTracker.palmCenter().
     var portalCenter: FloatArray = floatArrayOf(0.5f, 0.5f)
     var portalRadius: Float = 0.18f
+    // FIRE_BOOK's rotation, radians  -  angle of the wrist->index-MCP vector, so
+    // the book quad tilts to match how the hand is actually held instead of
+    // always sitting axis-aligned regardless of hand angle. HAND_PORTAL stays
+    // circular so it has no use for this (rotating a circle is a no-op).
+    var portalAngle: Float = 0f
     var mouthCenter: FloatArray = floatArrayOf(0.5f, 0.6f) // GOLD_SKIN's mask needs no such property; this is MOUTH_FIRE's anchor
     // FIST_BUMP_BOOM's trigger point + decaying energy (1.0 = just punched, decays to 0).
     var boomCenter: FloatArray = floatArrayOf(0.5f, 0.5f)
     var boomEnergy: Float = 0f
     // TWO_HAND_FRAME's rectangle (left, top, right, bottom), from both palm positions.
     var frameRect: FloatArray = floatArrayOf(0.3f, 0.3f, 0.7f, 0.7f)
-    // GAZE_TRAIL's position history — VideoTranscoder owns the actual history array
+    // GAZE_TRAIL's position history  -  VideoTranscoder owns the actual history array
     // and writes it here each frame. gazePoints is flattened (x0,y0,x1,y1,...);
     // gazeCount says how many of the (up to 8) slots are valid this frame.
     var gazePoints: FloatArray = FloatArray(16) // 8 points * 2 floats
     var gazeAges: FloatArray = FloatArray(8)
     var gazeCount: Int = 0
-    // THROW_CONFETTI's particle burst — same flatten-and-count convention as
+    // THROW_CONFETTI's particle burst  -  same flatten-and-count convention as
     // gazePoints/gazeCount above, sized for ParticleSystem.MAX_PARTICLES (24).
     var particlePositions: FloatArray = FloatArray(48) // 24 particles * 2 floats
     var particleRotations: FloatArray = FloatArray(24)
     var particleLifeRemaining: FloatArray = FloatArray(24)
     var particleColorIndices: FloatArray = FloatArray(24)
     var particleCount: Int = 0
-    // DOUBLE_TAKE's turn direction, -1..1 — see EffectShaders.doubleTake doc.
+    // DOUBLE_TAKE's turn direction, -1..1  -  see EffectShaders.doubleTake doc.
     var doubleTakeDirection: Float = 0f
 
-    // BLINK_FREEZE's captured-frame texture — separate from secondaryTextureId
+    // BLINK_FREEZE's captured-frame texture  -  separate from secondaryTextureId
     // above because it needs to coexist with a segmentation mask or portal image
     // in theory (not in practice today, since no effect combines them, but kept
     // as its own slot rather than aliased, to avoid a subtle future bug if that
@@ -174,7 +179,7 @@ class FrameRenderer {
 
     // Shared "secondary" texture slot (GL_TEXTURE1) for whichever effect needs a
     // second image this frame: SegmentationTracker's per-frame mask (DEPTH_BLOOM,
-    // SPLIT_PRISM — re-uploaded every frame, see uploadDynamicTexture) or
+    // SPLIT_PRISM  -  re-uploaded every frame, see uploadDynamicTexture) or
     // HAND_PORTAL's static scene image (uploaded once, see OverlayBuilder). Only
     // one of these effects is ever active at a time, so sharing one texture id
     // instead of allocating three is a deliberate simplification, not an oversight.
@@ -185,7 +190,7 @@ class FrameRenderer {
         if (secondaryTextureId == 0) secondaryTextureId = GlUtil.createTexture2D()
     }
 
-    /** Re-uploads [bitmap] into the secondary texture slot — call every frame for
+    /** Re-uploads [bitmap] into the secondary texture slot  -  call every frame for
      *  DEPTH_BLOOM/SPLIT_PRISM (a fresh segmentation mask each frame). For
      *  HAND_PORTAL's static scene image, call this ONCE instead, before the loop. */
     fun uploadSecondaryTexture(bitmap: android.graphics.Bitmap) {
@@ -210,7 +215,7 @@ class FrameRenderer {
         videoProgram = GlUtil.createProgram(videoVertexShader, videoFragmentShader)
         overlayProgram = GlUtil.createProgram(overlayVertexShader, overlayFragmentShader)
         // Compiled unconditionally (like video/overlay above) since it's small and
-        // effect-independent — only actually used when BLINK_FREEZE is selected,
+        // effect-independent  -  only actually used when BLINK_FREEZE is selected,
         // via captureFreezeFrame()/drawFrozenFrame() below, not through the normal
         // effectPrograms map (this program takes no external-OES texture at all,
         // so it doesn't fit the generic drawEffectFrame() path).
@@ -257,7 +262,7 @@ class FrameRenderer {
 
     /**
      * [elapsedSec] must come from the frame's presentation time (bufferInfo.presentationTimeUs
-     * / 1_000_000f), not wall-clock time — keeps time-based effects locked to the video's
+     * / 1_000_000f), not wall-clock time  -  keeps time-based effects locked to the video's
      * own timeline regardless of how fast the transcode pass runs.
      */
     fun drawEffectFrame(textureId: Int, texMatrix: FloatArray, elapsedSec: Float) {
@@ -291,6 +296,7 @@ class FrameRenderer {
         val uPortalTexture = GLES20.glGetUniformLocation(program, "uPortalTexture")
         val uPortalCenter = GLES20.glGetUniformLocation(program, "uPortalCenter")
         val uPortalRadius = GLES20.glGetUniformLocation(program, "uPortalRadius")
+        val uPortalAngle = GLES20.glGetUniformLocation(program, "uPortalAngle")
         val uBoomCenter = GLES20.glGetUniformLocation(program, "uBoomCenter")
         val uBoomEnergy = GLES20.glGetUniformLocation(program, "uBoomEnergy")
         val uFrameRect = GLES20.glGetUniformLocation(program, "uFrameRect")
@@ -323,6 +329,7 @@ class FrameRenderer {
         if (uFrameRect >= 0) GLES20.glUniform4fv(uFrameRect, 1, frameRect, 0)
         if (uPortalCenter >= 0) GLES20.glUniform2fv(uPortalCenter, 1, portalCenter, 0)
         if (uPortalRadius >= 0) GLES20.glUniform1f(uPortalRadius, portalRadius)
+        if (uPortalAngle >= 0) GLES20.glUniform1f(uPortalAngle, portalAngle)
         if (uGazePoints >= 0) GLES20.glUniform2fv(uGazePoints, 8, gazePoints, 0)
         if (uGazeAges >= 0) GLES20.glUniform1fv(uGazeAges, 8, gazeAges, 0)
         if (uGazeCount >= 0) GLES20.glUniform1i(uGazeCount, gazeCount.coerceIn(0, 8))
@@ -333,7 +340,7 @@ class FrameRenderer {
         if (uParticleCount >= 0) GLES20.glUniform1i(uParticleCount, particleCount.coerceIn(0, 24))
         if (uDirection >= 0) GLES20.glUniform1f(uDirection, doubleTakeDirection.coerceIn(-1f, 1f))
         if (uMouthCenter >= 0) GLES20.glUniform2fv(uMouthCenter, 1, mouthCenter, 0)
-        // Secondary texture (mask or portal scene) goes on unit 1 — only bind it
+        // Secondary texture (mask or portal scene) goes on unit 1  -  only bind it
         // when this program actually declares one of the two samplers that use it.
         if (uMaskTexture >= 0 || uPortalTexture >= 0) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
@@ -350,7 +357,7 @@ class FrameRenderer {
      * Snapshots whatever is CURRENTLY rendered on the bound framebuffer into the
      * frozen-capture texture, via glCopyTexImage2D. Call this immediately after
      * drawVideoFrame() (plain, no effect shader) so what gets frozen is the clean
-     * video frame — not a half-composited overlay/effect frame. VideoTranscoder
+     * video frame  -  not a half-composited overlay/effect frame. VideoTranscoder
      * calls this exactly once, on the frame a blink is first detected.
      */
     fun captureFreezeFrame() {
@@ -382,13 +389,13 @@ class FrameRenderer {
 
         // NOTE: frozen capture is a normal 2D texture with (0,0) at a different
         // corner convention than the decoder's SurfaceTexture in some GL
-        // implementations — if the frozen frame appears upside-down or mirrored
+        // implementations  -  if the frozen frame appears upside-down or mirrored
         // on-device, that's a texcoord/V-flip issue to fix in this draw call
         // (flip texCoordBuffer's V here), not a sign your capture failed.
         drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
     }
 
-    /** Full-frame overlay draw — used for the caption (static position every frame). */
+    /** Full-frame overlay draw  -  used for the caption (static position every frame). */
     fun drawOverlay(textureId: Int) {
         GLES20.glUseProgram(overlayProgram)
         GlUtil.checkGlError("glUseProgram overlay")
@@ -403,20 +410,26 @@ class FrameRenderer {
 
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        // FIX: caption/watermark textures come from an upright Android Canvas
-        // Bitmap, not from the camera's SurfaceTexture — they never needed the
-        // 180° correction overlayTexCoordBuffer applies. That flip was written
-        // for a different symptom and got applied here too, which is why text
-        // (TikTok logo, LumVibe badge, captions) was rendering mirrored on
-        // saved/posted videos. Use the plain, un-flipped texCoordBuffer instead.
-        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
+        // FIX (part 1, correct): caption/watermark textures come from an upright
+        // Android Canvas Bitmap, not the camera's SurfaceTexture, so they never
+        // needed the 180? BOTH-axis correction overlayTexCoordBuffer applied  -
+        // that was written for a different symptom and caused the mirrored text.
+        // FIX (part 2, this edit): switching to the plain texCoordBuffer only
+        // fixed the mirroring  -  it left a genuine vertical-only flip in place,
+        // because GLUtils.texImage2D uploads Canvas Bitmap row 0 (the top of
+        // what was drawn) to texture v=0, which this quad's mapping treats as
+        // screen-BOTTOM. verticalFlipTexCoordBuffer (defined above, was already
+        // written and documented but never actually wired in) corrects exactly
+        // that, without reintroducing the mirroring. This is what was making
+        // the LumVibe watermark card render upside-down.
+        drawQuad(vertexBuffer, verticalFlipTexCoordBuffer, aPosition, aTexCoord)
         GLES20.glDisable(GLES20.GL_BLEND)
     }
 
     /**
-     * Draws the watermark logo at a specific pixel rectangle instead of full-screen —
+     * Draws the watermark logo at a specific pixel rectangle instead of full-screen  -
      * this is what makes bouncing possible. (leftPx, topPx) is the rectangle's
-     * top-left corner, in pixels, origin at the top-left of the frame — exactly what
+     * top-left corner, in pixels, origin at the top-left of the frame  -  exactly what
      * WatermarkBounce.position() returns.
      */
     fun drawWatermarkAt(
@@ -450,8 +463,8 @@ class FrameRenderer {
 
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        // Same fix as drawOverlay above — plain texCoordBuffer, no flip.
-        drawQuad(watermarkPositionBuffer, texCoordBuffer, aPosition, aTexCoord)
+        // Same fix as drawOverlay above  -  vertical-only flip, no mirroring.
+        drawQuad(watermarkPositionBuffer, verticalFlipTexCoordBuffer, aPosition, aTexCoord)
         GLES20.glDisable(GLES20.GL_BLEND)
     }
 
@@ -488,4 +501,4 @@ class FrameRenderer {
             secondaryTextureId = 0
         }
     }
-}   
+}    
