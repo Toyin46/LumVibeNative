@@ -46,7 +46,7 @@ import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/m
 import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
+import { bakeVideo, bakeImage } from '../../modules/video-baker';
 import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
@@ -5909,51 +5909,13 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           </View>
 
-          {/* Face AR Effects Panel — emoji overlays */}
-          {showDeepARPanel && (
-            <View style={{ position: 'absolute', bottom: 200, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.92)', paddingVertical: 12, paddingHorizontal: 8, zIndex: 18, borderTopWidth: 1, borderTopColor: '#1a1a1a' }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingHorizontal: 4 }}>
-                <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>✨ AR Stickers</Text>
-                <TouchableOpacity onPress={() => setShowDeepARPanel(false)}><Feather name="x" size={18} color="#666" /></TouchableOpacity>
-              </View>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 4 }}>
-                {AR_EFFECTS.map((eff: any) => {
-                  const isActive = selectedArEffect === eff.id;
-                  return (
-                    <TouchableOpacity
-                      key={eff.id}
-                      style={[ms.arBtn, isActive && ms.arBtnActive]}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setSelectedArEffect(eff.id);
-                      }}
-                    >
-                      <Text style={{ fontSize: 18 }}>{eff.emoji}</Text>
-                      <Text style={[ms.arLabel, isActive && { color: '#00ff88' }]}>{eff.name}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-            </View>
-          )}
-
-          {/* AR Effects strip — emoji overlays (shown when DeepAR panel closed) */}
-          {!showDeepARPanel && (
-          <View style={ms.arStrip}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}>
-              {AR_EFFECTS.map(eff => (
-                <TouchableOpacity
-                  key={eff.id}
-                  style={[ms.arBtn, selectedArEffect === eff.id && ms.arBtnActive]}
-                  onPress={() => { setSelectedArEffect(eff.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
-                >
-                  <Text style={{ fontSize: 18 }}>{eff.emoji}</Text>
-                  <Text style={[ms.arLabel, selectedArEffect === eff.id && { color: '#00ff88' }]}>{eff.name}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-          )}
+          {/* Old emoji AR sticker strip (Flowers/Stars/Hearts/Money Rain/Fire) removed.
+              selectedArEffect stays permanently 'ar_none' (its own default state, set at
+              declaration) since nothing sets it to anything else anymore -- AROverlay,
+              DeepARCameraView's prop, and the post-bake AR-overlay branch all already
+              correctly no-op on 'ar_none', so this removal needed no changes anywhere
+              else. showDeepARPanel is likewise now permanently unreachable (dead but
+              harmless) since nothing opens it. */}
 
           {/* Animated BG picker */}
           {cameraFeature === 'animatedbg' && (

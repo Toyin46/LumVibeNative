@@ -184,6 +184,20 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         eglCore!!.makeCurrent(eglSurface!!)
 
         renderer = FrameRenderer().apply { setup() }
+        // ROOT CAUSE FIX: VideoTranscoder (bake/compose path) always calls
+        // ensureSecondaryTexture() right here, immediately after setup() -- this line
+        // was simply missing on the live-preview path. Without it, secondaryTextureId
+        // stays 0 (no real GL texture object) until the first async segmentation/hand
+        // result lands. drawEffectFrame() binds and samples it the instant an effect
+        // needing it is selected (GOLD_SKIN, THERMAL_PULSE, DEPTH_BLOOM, SPLIT_PRISM,
+        // HAND_PORTAL, FIRE_BOOK), so for however many frames land before that first
+        // async callback, the shader was sampling an unbound texture id -- undefined
+        // behavior that this device's GPU driver renders as solid black, and on some
+        // drivers leaves the pipeline in a state that never recovers even after
+        // switching effects. Creating the (empty but valid) texture object up front
+        // means the mask simply reads as "no effect yet" for those first few frames
+        // instead of corrupting the pipeline.
+        renderer?.ensureSecondaryTexture()
         // Apply whatever effect was requested before the renderer existed  -  see
         // pendingEffect's doc for why this line is the actual fix, not just belt-and-braces.
         renderer?.setEffect(pendingEffect)

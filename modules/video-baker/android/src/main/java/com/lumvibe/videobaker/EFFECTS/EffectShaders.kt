@@ -848,6 +848,13 @@ object EffectShaders {
     // the mouth opens, licking upward with a flickering noise-driven wobble rather
     // than sitting as a static triangle  -  this is what separates "a shape was drawn
     // at a point" from "something that looks like fire."
+    // Mouth Fire  -  REWRITTEN edge treatment: every boundary here used to be a
+    // hard step() cutoff (in-flame or not, no in-between), which is exactly why
+    // it read as a jagged cutout silhouette instead of organic fire. Switched to
+    // smoothstep() for soft anti-aliased edges, and added an outer glow/bloom
+    // falloff beyond the flame's hard boundary  -  same "ambient light halo"
+    // technique that already made VOICE_HALO read as glowing rather than drawn.
+    // Uniforms, wiring, and orientation are all unchanged from before.
     private val mouthFire = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -874,10 +881,6 @@ object EffectShaders {
             vec4 base = texture2D(uTexture, vTexCoord);
             float openAmount = clamp(uIntensity, 0.0, 1.0);
 
-            // Flame licks upward from the mouth (negative-y direction in this
-            // texcoord space, consistent with every other position-anchored effect
-            // in this file  -  same orientation VOICE_HALO/GAZE_TRAIL already use,
-            // no extra flip needed here).
             float wobble = (valueNoise(vec2(vTexCoord.x * 8.0, uTime * 6.0)) - 0.5) * 0.05;
             vec2 flameSpace = vec2(vTexCoord.x - uMouthCenter.x - wobble, vTexCoord.y - uMouthCenter.y);
 
@@ -887,17 +890,27 @@ object EffectShaders {
             float coreWidth = width * (1.0 - t) * (1.0 - t);
             float edgeNoise = valueNoise(vec2(vTexCoord.x * 12.0, vTexCoord.y * 12.0 - uTime * 4.0)) * 0.02;
 
-            float withinWidth = step(abs(flameSpace.x), coreWidth + edgeNoise);
-            float aboveMouth = step(flameSpace.y, 0.02);
-            float belowTip = step(-height, flameSpace.y);
+            // Soft-edged boundary (smoothstep, ~0.015 falloff band) instead of a
+            // hard step() cutoff  -  this alone removes most of the "cutout" look.
+            float edgeWidth = coreWidth + edgeNoise;
+            float withinWidth = smoothstep(edgeWidth + 0.015, edgeWidth - 0.005, abs(flameSpace.x));
+            float aboveMouth = smoothstep(0.02, -0.01, flameSpace.y);
+            float belowTip = smoothstep(-height - 0.02, -height + 0.02, flameSpace.y);
             float inFlame = withinWidth * aboveMouth * belowTip;
 
             vec3 flameCore = vec3(1.0, 0.95, 0.6);
             vec3 flameOuter = vec3(1.0, 0.45, 0.05);
             vec3 flameColor = mix(flameOuter, flameCore, 1.0 - t);
-
             float flameAlpha = inFlame * openAmount;
-            gl_FragColor = vec4(base.rgb + flameColor * flameAlpha, base.a);
+
+            // Ambient glow beyond the flame's own silhouette  -  distance-based
+            // falloff from the flame's centerline, so light appears to actually
+            // radiate off the fire instead of the fire being a flat pasted shape.
+            float distFromCore = max(0.0, abs(flameSpace.x) - coreWidth);
+            float glow = exp(-distFromCore * distFromCore * 400.0) * aboveMouth * belowTip;
+            vec3 glowColor = vec3(1.0, 0.5, 0.1) * glow * openAmount * 0.35;
+
+            gl_FragColor = vec4(base.rgb + flameColor * flameAlpha + glowColor, base.a);
         }
     """.trimIndent()
 
@@ -995,8 +1008,10 @@ object EffectShaders {
                 vec2 local = vec2(toParticle.x * c + toParticle.y * s, -toParticle.x * s + toParticle.y * c);
 
                 // Small flat rectangle  -  a paper-confetti-piece silhouette, not a
-                // circle, so the rotation is actually visible.
-                float inRect = step(abs(local.x), 0.012) * step(abs(local.y), 0.006);
+                // circle, so the rotation is actually visible. Soft-edged (smoothstep)
+                // instead of a hard step() cutoff  -  a rotated hard-edged rectangle
+                // aliases badly at this small scale; this fixes that.
+                float inRect = smoothstep(0.014, 0.010, abs(local.x)) * smoothstep(0.008, 0.004, abs(local.y));
                 float fade = uParticleLife[i];
                 addColor += paletteColor(uParticleColorIdx[i]) * inRect * fade;
             }
@@ -1248,7 +1263,9 @@ object EffectShaders {
                 vec2 toP = vTexCoord - uParticlePos[i];
                 float rad = radians(uParticleRot[i]);
                 vec2 local = vec2(toP.x * cos(rad) + toP.y * sin(rad), -toP.x * sin(rad) + toP.y * cos(rad));
-                float inShape = step(abs(local.x), 0.008) * step(abs(local.y), 0.008);
+                // Soft-edged (smoothstep) instead of a hard step() cutoff  -  same
+                // anti-aliasing fix as the confetti particle shape above.
+                float inShape = smoothstep(0.010, 0.006, abs(local.x)) * smoothstep(0.010, 0.006, abs(local.y));
                 addColor += paletteColor(uParticleColorIdx[i]) * inShape * uParticleLife[i];
             }
 
