@@ -155,6 +155,12 @@ class FrameRenderer {
     var gazePoints: FloatArray = FloatArray(16) // 8 points * 2 floats
     var gazeAges: FloatArray = FloatArray(8)
     var gazeCount: Int = 0
+    // FINGER_DRAW's position history  -  same flatten-and-count convention as
+    // gazePoints above, just a separate property so it can coexist with
+    // GAZE_TRAIL independently rather than sharing one array.
+    var fingerPoints: FloatArray = FloatArray(16) // 8 points * 2 floats
+    var fingerAges: FloatArray = FloatArray(8)
+    var fingerCount: Int = 0
     // THROW_CONFETTI's particle burst  -  same flatten-and-count convention as
     // gazePoints/gazeCount above, sized for ParticleSystem.MAX_PARTICLES (24).
     var particlePositions: FloatArray = FloatArray(48) // 24 particles * 2 floats
@@ -303,6 +309,9 @@ class FrameRenderer {
         val uGazePoints = GLES20.glGetUniformLocation(program, "uGazePoints")
         val uGazeAges = GLES20.glGetUniformLocation(program, "uGazeAges")
         val uGazeCount = GLES20.glGetUniformLocation(program, "uGazeCount")
+        val uFingerPoints = GLES20.glGetUniformLocation(program, "uFingerPoints")
+        val uFingerAges = GLES20.glGetUniformLocation(program, "uFingerAges")
+        val uFingerCount = GLES20.glGetUniformLocation(program, "uFingerCount")
         val uParticlePos = GLES20.glGetUniformLocation(program, "uParticlePos")
         val uParticleRot = GLES20.glGetUniformLocation(program, "uParticleRot")
         val uParticleLife = GLES20.glGetUniformLocation(program, "uParticleLife")
@@ -333,6 +342,9 @@ class FrameRenderer {
         if (uGazePoints >= 0) GLES20.glUniform2fv(uGazePoints, 8, gazePoints, 0)
         if (uGazeAges >= 0) GLES20.glUniform1fv(uGazeAges, 8, gazeAges, 0)
         if (uGazeCount >= 0) GLES20.glUniform1i(uGazeCount, gazeCount.coerceIn(0, 8))
+        if (uFingerPoints >= 0) GLES20.glUniform2fv(uFingerPoints, 8, fingerPoints, 0)
+        if (uFingerAges >= 0) GLES20.glUniform1fv(uFingerAges, 8, fingerAges, 0)
+        if (uFingerCount >= 0) GLES20.glUniform1i(uFingerCount, fingerCount.coerceIn(0, 8))
         if (uParticlePos >= 0) GLES20.glUniform2fv(uParticlePos, 24, particlePositions, 0)
         if (uParticleRot >= 0) GLES20.glUniform1fv(uParticleRot, 24, particleRotations, 0)
         if (uParticleLife >= 0) GLES20.glUniform1fv(uParticleLife, 24, particleLifeRemaining, 0)

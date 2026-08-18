@@ -46,7 +46,7 @@ import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/m
 import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { bakeVideo, bakeImage } from '../../modules/video-baker';
+import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
 import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
@@ -627,15 +627,16 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_face_morph',      name:'Face Morph',     emoji:'🕸️',category:'creative', desc:'Half-face wireframe mesh — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'face_morph'},
   {id:'fx_gl_fire_book',       name:'Fire Book',      emoji:'📖',category:'creative', desc:'Hand-tracked flaming book — needs a book image, baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fire_book'},
   {id:'fx_gl_stickers_react',  name:'Stickers React',  emoji:'💕',category:'creative', desc:'Smile sends floating hearts — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'stickers_react'},
-  // ⚠️ Added by Jojo — these 5 have cover images but no matching native
-  // glShaderEffect case in EffectShaders.kt yet. They'll show in the picker
-  // fine; baking will no-op / fall back to the unedited video until the
-  // native Kotlin shader case is added for each key below.
-  {id:'fx_gl_bokeh_lights', name:'Bokeh Lights', emoji:'✨', category:'mood', desc:'Soft glowing light orbs — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'bokeh_lights'},
-  {id:'fx_gl_finger_draw', name:'Finger Draw', emoji:'✍️', category:'creative', desc:'Draw glowing trails with your finger — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'finger_draw'},
-  {id:'fx_gl_paint_splash', name:'Paint Splash', emoji:'🎨', category:'creative', desc:'Color splashes on movement — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paint_splash'},
-  {id:'fx_gl_paticle_flow', name:'Particle Flow', emoji:'💫', category:'mood', desc:'Ambient flowing particles — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paticle_flow'},
-  {id:'fx_gl_rain_fall', name:'Rain Fall', emoji:'🌧️', category:'mood', desc:'Ambient falling rain — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rain_fall'},
+  // Added back with real shaders this time (see EffectShaders.kt's Phase 9
+  // comment) — previously these had cover images but no matching Kotlin
+  // shader case, so selecting them did nothing. 'particle_flow' below is
+  // also the corrected spelling — it shipped as the typo'd 'paticle_flow'
+  // before, which is part of why it silently did nothing.
+  {id:'fx_gl_bokeh_lights',    name:'Bokeh Lights',   emoji:'✨',category:'mood',     desc:'Soft glowing light orbs — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'bokeh_lights'},
+  {id:'fx_gl_particle_flow',   name:'Particle Flow',  emoji:'💫',category:'mood',     desc:'Ambient flowing particles — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'particle_flow'},
+  {id:'fx_gl_rain_fall',       name:'Rain Fall',      emoji:'🌧️',category:'mood',     desc:'Ambient falling rain — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rain_fall'},
+  {id:'fx_gl_paint_splash',    name:'Paint Splash',   emoji:'🎨',category:'creative', desc:'Color splashes on movement — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paint_splash'},
+  {id:'fx_gl_finger_draw',     name:'Finger Draw',    emoji:'✍️',category:'creative', desc:'Glowing trail from your fingertip — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'finger_draw'},
 ];
 
 // FX card cover images — Metro's bundler requires STATIC require() calls; it
@@ -686,12 +687,11 @@ const FX_IMAGES: Record<string, any> = {
   fx_gl_throw_confetti: require('../assets/images/filters/fx_gl_throw_confetti.png'),
   fx_gl_fire_book: require('../assets/images/filters/fx_gl_fire_book.png'),
   fx_gl_spin_effect: require('../assets/images/filters/fx_gl_spin_effect.png'),
-  // ⚠️ Added by Jojo — see matching note above FX_FILTERS array
   fx_gl_bokeh_lights: require('../assets/images/filters/fx_gl_bokeh_lights.png'),
-  fx_gl_finger_draw: require('../assets/images/filters/fx_gl_finger_draw.png'),
-  fx_gl_paint_splash: require('../assets/images/filters/fx_gl_paint_splash.png'),
-  fx_gl_paticle_flow: require('../assets/images/filters/fx_gl_paticle_flow.png'),
+  fx_gl_particle_flow: require('../assets/images/filters/fx_gl_particle_flow.png'),
   fx_gl_rain_fall: require('../assets/images/filters/fx_gl_rain_fall.png'),
+  fx_gl_paint_splash: require('../assets/images/filters/fx_gl_paint_splash.png'),
+  fx_gl_finger_draw: require('../assets/images/filters/fx_gl_finger_draw.png'),
 };
 
 const FX_CATEGORIES = [
@@ -4532,7 +4532,7 @@ export default function CreateScreen() {
   const [cameraMode, setCameraMode]     = useState<CameraMode>('video');
   // Visual-only for now — doesn't yet crop the actual preview/output to these
   // ratios, just labels intent. Wiring real crop is a separate follow-up.
-  const [aspectRatio, setAspectRatio]   = useState<'9:16' | '1:1' | '16:9'>('9:16');
+  const [aspectRatio, setAspectRatio]   = useState<'9:16' | '1:1' | '16:9'>('1:1');
   const [showAspectMenu, setShowAspectMenu] = useState(false);
   // 'post' = normal feed post (current behaviour). 'story' / 'live' are UI-only
   // placeholders here — they don't yet route to different posting logic.
@@ -4550,6 +4550,17 @@ export default function CreateScreen() {
   const [showBurstPanel, setShowBurstPanel] = useState(false);
   const [showBeatTap, setShowBeatTap]   = useState(false);
   const cameraRef = useRef<Camera>(null);
+  // FIX: LiveEffectPreview (used for every GL shader effect - Fist Bump Boom,
+  // Clap Burst, Fire Book, Gold Skin, Mood Ring, Thermal Pulse etc.) is a
+  // preview-only native view with no recording capability of its own. While
+  // it's mounted, the real <Camera> (cameraRef) isn't mounted at all, so
+  // cameraRef.current is null and the record button silently does nothing.
+  // This flag briefly swaps the real Camera back in - just long enough to
+  // record - the moment the user presses record with a GL effect selected.
+  // The bake step at compose time (bakeOptions.effect) already applies the
+  // shader effect onto the raw footage afterwards, same as it already does
+  // for effects picked from the gallery, so this is the only piece missing.
+  const [isCapturingLiveFx, setIsCapturingLiveFx] = useState(false);
   const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const previewBoxRef = useRef<any>(null);
   // VisionCamera device
@@ -4779,7 +4790,22 @@ export default function CreateScreen() {
   };
 
   const handleStartRecording = async () => {
-    if (!cameraRef.current || isRecording) return;
+    if (isRecording) return;
+    // FIX: if a GL shader effect is showing (LiveEffectPreview mounted),
+    // swap to the real Camera first and give it a moment to actually mount
+    // and open its Camera2 session before we try to use cameraRef.current -
+    // otherwise it's still null the instant this state flips. 350ms matches
+    // the isTransitioning debounce this file already uses elsewhere for
+    // camera mode swaps (DeepARCameraView's photo/video transition).
+    if (hasLiveGLEffect && !isCapturingLiveFx) {
+      setIsCapturingLiveFx(true);
+      await new Promise(resolve => setTimeout(resolve, 350));
+    }
+    if (!cameraRef.current) {
+      setIsCapturingLiveFx(false);
+      Alert.alert('Error', 'Camera is not ready yet - try again in a moment.');
+      return;
+    }
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       setIsRecording(true);
@@ -4798,11 +4824,13 @@ export default function CreateScreen() {
           setMediaUri(finalUri);
           setMediaType('video');
           setIsRecording(false);
+          setIsCapturingLiveFx(false);
           setVideoPlaying(false);
           setScreenView('compose');
         },
         onRecordingError: (error: any) => {
           setIsRecording(false);
+          setIsCapturingLiveFx(false);
           if (!error.message?.includes('stopped')) {
             Alert.alert('Error', 'Could not record video: ' + error.message);
           }
@@ -4810,6 +4838,7 @@ export default function CreateScreen() {
       });
     } catch (e: any) {
       setIsRecording(false);
+      setIsCapturingLiveFx(false);
       Alert.alert('Error', 'Could not start recording: ' + e.message);
     }
   };
@@ -5770,12 +5799,22 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
   // ─── CAMERA SCREEN ────────────────────────────────────
   if (screenView === 'camera') {
-    const cH = SH * 0.72;
+    // FIX: aspectRatio (the '9:16'/'1:1'/'16:9' dropdown above the camera) was
+    // pure decoration until now - cH was always a fixed SH * 0.72 regardless of
+    // what the user picked, which is why the box always looked like the same
+    // tall rectangle no matter which option was selected. Now it actually
+    // drives the camera box's real dimensions. Capped at the old SH * 0.72 so
+    // it can never grow taller than the space this screen's layout was already
+    // built and tested for.
+    const rawCH = aspectRatio === '1:1' ? SW
+      : aspectRatio === '16:9' ? SW * 9 / 16
+      : SW * 16 / 9; // '9:16'
+    const cH = Math.min(rawCH, SH * 0.72);
     return (
       <View style={ms.camScreen}>
         {/* Camera area */}
         <View style={[ms.camBox, { height: cH }]}>
-          {hasLiveGLEffect ? (
+          {hasLiveGLEffect && !isCapturingLiveFx ? (
             // A GL shader effect is selected (Mood Ring, Gaze Trail, etc.) —
             // switch from the normal camera views to the live GL renderer so
             // the effect is actually visible now, not just after posting.
@@ -5784,6 +5823,10 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             // you'll get a "camera in use" conflict. This ternary already
             // guarantees only one is mounted at once; if you later add a
             // background-camera-warm-up feature, revisit this.
+            // FIX: while isCapturingLiveFx is true (record was just pressed),
+            // we fall through to the real <Camera> branch below instead, so
+            // recording actually has a camera to record from. See
+            // isCapturingLiveFx declaration for the full explanation.
             <LiveEffectPreview
               effect={activeFx?.glShaderEffect ?? null}
               facing={facing}
@@ -5909,13 +5952,51 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           </View>
 
-          {/* Old emoji AR sticker strip (Flowers/Stars/Hearts/Money Rain/Fire) removed.
-              selectedArEffect stays permanently 'ar_none' (its own default state, set at
-              declaration) since nothing sets it to anything else anymore -- AROverlay,
-              DeepARCameraView's prop, and the post-bake AR-overlay branch all already
-              correctly no-op on 'ar_none', so this removal needed no changes anywhere
-              else. showDeepARPanel is likewise now permanently unreachable (dead but
-              harmless) since nothing opens it. */}
+          {/* Face AR Effects Panel — emoji overlays */}
+          {showDeepARPanel && (
+            <View style={{ position: 'absolute', bottom: 200, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.92)', paddingVertical: 12, paddingHorizontal: 8, zIndex: 18, borderTopWidth: 1, borderTopColor: '#1a1a1a' }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingHorizontal: 4 }}>
+                <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>✨ AR Stickers</Text>
+                <TouchableOpacity onPress={() => setShowDeepARPanel(false)}><Feather name="x" size={18} color="#666" /></TouchableOpacity>
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 4 }}>
+                {AR_EFFECTS.map((eff: any) => {
+                  const isActive = selectedArEffect === eff.id;
+                  return (
+                    <TouchableOpacity
+                      key={eff.id}
+                      style={[ms.arBtn, isActive && ms.arBtnActive]}
+                      onPress={() => {
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setSelectedArEffect(eff.id);
+                      }}
+                    >
+                      <Text style={{ fontSize: 18 }}>{eff.emoji}</Text>
+                      <Text style={[ms.arLabel, isActive && { color: '#00ff88' }]}>{eff.name}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          )}
+
+          {/* AR Effects strip — emoji overlays (shown when DeepAR panel closed) */}
+          {!showDeepARPanel && (
+          <View style={ms.arStrip}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}>
+              {AR_EFFECTS.map(eff => (
+                <TouchableOpacity
+                  key={eff.id}
+                  style={[ms.arBtn, selectedArEffect === eff.id && ms.arBtnActive]}
+                  onPress={() => { setSelectedArEffect(eff.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+                >
+                  <Text style={{ fontSize: 18 }}>{eff.emoji}</Text>
+                  <Text style={[ms.arLabel, selectedArEffect === eff.id && { color: '#00ff88' }]}>{eff.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+          )}
 
           {/* Animated BG picker */}
           {cameraFeature === 'animatedbg' && (

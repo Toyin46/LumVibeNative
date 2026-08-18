@@ -44,7 +44,7 @@ object EffectRequirements {
     private val handGestureEffects = setOf(
         VisualEffect.HAND_PORTAL, VisualEffect.FIST_BUMP_BOOM, VisualEffect.TWO_HAND_FRAME, VisualEffect.THROW_CONFETTI,
         VisualEffect.PALM_MAGIC, VisualEffect.ROCK_PAPER_SCISSORS, VisualEffect.CLAP_BURST, VisualEffect.TAP_SHOCKWAVE,
-        VisualEffect.FIRE_BOOK
+        VisualEffect.FIRE_BOOK, VisualEffect.FINGER_DRAW
     )
 
     // Effects whose intensity is normally driven by mic amplitude (or its

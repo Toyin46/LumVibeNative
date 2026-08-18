@@ -134,6 +134,25 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // measured one.
     private val trackingIntervalMs = 70L
     private var lastTrackingSubmitMs = 0L
+    // FIX: COLOR_DRAIN/SPLIT_PRISM had no motion-detection in the live path at
+    // all (VideoTranscoder's frame-to-frame luma-delta trick, which they both
+    // depend on, was never replicated here) - meaning both looked completely
+    // static live, only actually working once baked. PAINT_SPLASH needs the
+    // exact same signal, so fixing this covers all three. Mirrors
+    // VideoTranscoder's lastAvgLuma/stillnessAccumSec exactly, just as class
+    // fields here since this view's functions are called repeatedly rather
+    // than being one long-lived closure like VideoTranscoder.transcode().
+    private var lastAvgLuma: Float? = null
+    private var stillnessAccumSec = 0f
+    private val stillnessEffects = setOf(VisualEffect.COLOR_DRAIN)
+    private val motionEffects = setOf(VisualEffect.SPLIT_PRISM, VisualEffect.PAINT_SPLASH)
+    // FIX: GAZE_TRAIL had this exact live-preview gap too (no case in
+    // onFaceResult, so it showed no trail live even though it baked
+    // correctly). Fixed using FaceTracker.kt's own verified iris indices
+    // (468 left / 473 right, from the refined 478-point mesh) - see
+    // onFaceResult's GAZE_TRAIL case below.
+    private val gazeHistory = ArrayDeque<Pair<Float, Float>>()
+    private val fingerHistory = ArrayDeque<Pair<Float, Float>>()
 
     init {
         holder.addCallback(this)
@@ -212,6 +231,16 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     }
 
     private fun setupTrackers() {
+        // FIX: each tracker now gets its OWN try/catch. Previously all three were
+        // built inside one shared try/catch, in sequence (face, then hand, then
+        // segmentation) -- if hand or segmentation threw during init, the
+        // exception aborted everything after it in the block, but face (built
+        // first) had already succeeded. Result: face-tracking effects worked,
+        // hand and segmentation effects silently never tracked, indefinitely,
+        // with zero visible sign of failure (Log.e alone doesn't surface in a
+        // normal build). That symptom pattern is exactly what was reported.
+        // Isolating each one means a failure in any single tracker can no
+        // longer take the other two down with it.
         try {
             val faceOptions = FaceLandmarker.FaceLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").build())
@@ -221,7 +250,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 .setErrorListener { /* transient  -  next frame will retry, nothing to surface here */ }
                 .build()
             liveFaceLandmarker = FaceLandmarker.createFromOptions(context, faceOptions)
+        } catch (e: Exception) {
+            android.util.Log.e("LiveEffectPreview", "face tracker init failed - is face_landmarker.task in app/src/main/assets/?", e)
+        }
 
+        try {
             val handOptions = HandLandmarker.HandLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build())
                 .setRunningMode(RunningMode.LIVE_STREAM)
@@ -230,7 +263,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 .setErrorListener { }
                 .build()
             liveHandLandmarker = HandLandmarker.createFromOptions(context, handOptions)
+        } catch (e: Exception) {
+            android.util.Log.e("LiveEffectPreview", "hand tracker init failed - is hand_landmarker.task in app/src/main/assets/?", e)
+        }
 
+        try {
             // Same segmenter SegmentationTracker uses for baking (selfie_segmenter.tflite,
             // category 1 = person), just in LIVE_STREAM/async mode instead of VIDEO/blocking  -
             // same reasoning as face/hand above. This is the heaviest of the three trackers
@@ -247,9 +284,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 .build()
             liveSegmenter = ImageSegmenter.createFromOptions(context, segOptions)
         } catch (e: Exception) {
-            // Model files missing from assets/, or MediaPipe init failed on this device.
-            // Live tracking just won't update  -  base video/color-only effects still render.
-            android.util.Log.e("LiveEffectPreview", "tracker init failed", e)
+            android.util.Log.e("LiveEffectPreview", "segmentation tracker init failed - is selfie_segmenter.tflite in app/src/main/assets/?", e)
         }
     }
 
@@ -347,7 +382,8 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val wantsFace = EffectRequirements.needsFaceTracker(effect)
         val wantsHand = EffectRequirements.needsHandTracker(effect)
         val wantsSeg = EffectRequirements.needsSegmentation(effect)
-        if (!wantsFace && !wantsHand && !wantsSeg) return
+        val wantsMotion = effect in stillnessEffects || effect in motionEffects
+        if (!wantsFace && !wantsHand && !wantsSeg && !wantsMotion) return
 
         val now = System.currentTimeMillis()
         if (now - lastTrackingSubmitMs < trackingIntervalMs) return
@@ -375,6 +411,25 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 fullBitmap.recycle()
             }
         } else fullBitmap
+        // Motion-driven effects (COLOR_DRAIN/SPLIT_PRISM/PAINT_SPLASH) don't need
+        // MediaPipe at all - just this frame's average brightness vs last frame's,
+        // same averageLuma() trick VideoTranscoder uses. Safe to set
+        // renderer.effectIntensity directly (not via renderHandler.post) since
+        // this whole function already runs on the render thread - see
+        // setOnFrameAvailableListener(..., renderHandler) where drawFrame()
+        // (which calls this) is registered.
+        if (wantsMotion) {
+            val luma = averageLuma(bitmap)
+            val frameDur = trackingIntervalMs / 1000f
+            val delta = if (lastAvgLuma != null) kotlin.math.abs(luma - lastAvgLuma!!) else 0f
+            if (effect in stillnessEffects) {
+                if (delta > 0.01f) stillnessAccumSec = 0f else stillnessAccumSec += frameDur
+                renderer?.effectIntensity = (stillnessAccumSec / 3f).coerceIn(0f, 1f)
+            } else {
+                renderer?.effectIntensity = (delta / 0.05f).coerceIn(0f, 1f)
+            }
+            lastAvgLuma = luma
+        }
         val ts = now
         trackingHandler?.post {
             val mpImage = BitmapImageBuilder(bitmap).build()
@@ -382,6 +437,23 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             if (wantsHand) liveHandLandmarker?.detectAsync(mpImage, ts)
             if (wantsSeg) liveSegmenter?.segmentAsync(mpImage, ts)
         }
+    }
+
+    /** Same downsample-then-average approach as VideoTranscoder.averageLuma() - kept
+     * identical on purpose so live and baked motion response feel the same. */
+    private fun averageLuma(bitmap: Bitmap): Float {
+        val small = Bitmap.createScaledBitmap(bitmap, 32, 32, true)
+        var sum = 0L
+        val pixels = IntArray(32 * 32)
+        small.getPixels(pixels, 0, 32, 0, 0, 32, 32)
+        for (p in pixels) {
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            sum += (0.299 * r + 0.587 * g + 0.114 * b).toLong()
+        }
+        small.recycle()
+        return sum / (32f * 32f * 255f)
     }
 
     // ---- Async tracking callbacks  -  cheap, just stash numbers for next drawFrame() ----
@@ -446,10 +518,43 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             else -> {}
         }
 
+        // GAZE_TRAIL  -  outside the when() above (not blendshape-driven, doesn't
+        // touch intensityOverride) since it needs its own multi-value payload
+        // (points/ages/count), same reason FINGER_DRAW is handled separately in
+        // onHandResult rather than folded into that function's single cx/cy/angle
+        // path. Landmarks 468 (left iris) / 473 (right iris) and the >473 size
+        // guard match FaceTracker.irisCenter() exactly (see that method's doc for
+        // why the guard matters - the base 468-point mesh doesn't include these).
+        var gazeFlat: FloatArray? = null
+        var gazeAgesArr: FloatArray? = null
+        var gazeCountVal = 0
+        if (r.currentEffect == VisualEffect.GAZE_TRAIL && landmarks.size > 473) {
+            val left = landmarks[468]
+            val right = landmarks[473]
+            val ix = (left.x() + right.x()) / 2f
+            val iy = (left.y() + right.y()) / 2f
+            gazeHistory.addFirst(Pair(ix, iy))
+            while (gazeHistory.size > 8) gazeHistory.removeLast()
+            val flat = FloatArray(16)
+            val ages = FloatArray(8)
+            gazeHistory.forEachIndexed { i, (x, y) ->
+                flat[i * 2] = x; flat[i * 2 + 1] = y
+                ages[i] = i / 8f
+            }
+            gazeFlat = flat
+            gazeAgesArr = ages
+            gazeCountVal = gazeHistory.size
+        }
+
         renderHandler?.post {
             r.faceBox = floatArrayOf(minX, minY, maxX, maxY)
             intensityOverride?.let { r.effectIntensity = it }
             if (mouthUpdated) r.mouthCenter = floatArrayOf(mouthX, mouthY)
+            if (gazeFlat != null) {
+                r.gazePoints = gazeFlat
+                r.gazeAges = gazeAgesArr!!
+                r.gazeCount = gazeCountVal
+            }
         }
     }
 
@@ -465,9 +570,36 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // HandTracker.handAngle() in the bake path  -  used by FIRE_BOOK to
         // tilt the book quad to match the hand live, not just after baking.
         val angle = kotlin.math.atan2(hand[5].y() - hand[0].y(), hand[5].x() - hand[0].x())
+        // FINGER_DRAW: index fingertip = landmark 8, same numbering
+        // VideoTranscoder's FINGER_DRAW case uses. Built here in onHandResult
+        // (not renderHandler.post below) since ArrayDeque mutation doesn't
+        // touch GL state and doesn't need the render thread; only the
+        // renderer.fingerPoints/Ages/Count assignment does.
+        var fingerFlat: FloatArray? = null
+        var fingerAgesArr: FloatArray? = null
+        var fingerCountVal = 0
+        if (r.currentEffect == VisualEffect.FINGER_DRAW && hand.size > 8) {
+            val tip = hand[8]
+            fingerHistory.addFirst(Pair(tip.x(), tip.y()))
+            while (fingerHistory.size > 8) fingerHistory.removeLast()
+            val flat = FloatArray(16)
+            val ages = FloatArray(8)
+            fingerHistory.forEachIndexed { i, (x, y) ->
+                flat[i * 2] = x; flat[i * 2 + 1] = y
+                ages[i] = i / 8f
+            }
+            fingerFlat = flat
+            fingerAgesArr = ages
+            fingerCountVal = fingerHistory.size
+        }
         renderHandler?.post {
             r.portalCenter = floatArrayOf(cx, cy)
             r.portalAngle = angle
+            if (fingerFlat != null) {
+                r.fingerPoints = fingerFlat
+                r.fingerAges = fingerAgesArr!!
+                r.fingerCount = fingerCountVal
+            }
         }
     }
 

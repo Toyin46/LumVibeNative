@@ -1,5 +1,3 @@
-package com.lumvibe.videobaker
-
 /**
 * "Phase 1" visual effects  -  the ones that need ONLY the decoded video frame
 * itself, no MediaPipe face/hand tracking, no audio decode, no device motion.
@@ -127,10 +125,29 @@ enum class VisualEffect {
                           // HAND_PORTAL's portalScenePngPath  -  NO book asset exists
                           // in this project, you supply one) + real fire particles
                           // (ParticleSystem, third tuning) + glow.
-    STICKERS_REACT;      // real smile-triggered ParticleSystem spawning procedural
+    STICKERS_REACT,      // real smile-triggered ParticleSystem spawning procedural
                           // heart/sparkle SHAPES (not a static emoji glued on)  -
                           // real trigger, real physics, matches section 2's "not
                           // the MAIN implementation" rule for literal emoji.
+    // ---- Phase 9: the 5 effects that shipped in the UI (cover image + FX_EFFECTS
+    // entry) with no matching case here, so selecting them was a silent no-op.
+    // Writing real shaders for all 5 now, each following the closest-matching
+    // existing pattern rather than inventing a new technique:
+    //   BOKEH_LIGHTS / PARTICLE_FLOW / RAIN_FALL - pure Phase-1-style shaders,
+    //     only need uTime/uTexture (already set for every effect), no tracker.
+    //   PAINT_SPLASH - reuses the SAME frame-to-frame motion delta SPLIT_PRISM
+    //     already uses (see VideoTranscoder.motionEffects), just a different
+    //     visual treatment of the same signal.
+    //   FINGER_DRAW - reuses GAZE_TRAIL's exact "last N positions" trail
+    //     technique, driven by the hand tracker's index fingertip (landmark 8)
+    //     instead of the iris, since this is an in-frame gesture effect like
+    //     the other HAND_PORTAL/FIST_BUMP_BOOM-style effects, not a touchscreen
+    //     draw (can't touch the screen and be filmed at the same time anyway).
+    BOKEH_LIGHTS,
+    PARTICLE_FLOW,
+    RAIN_FALL,
+    PAINT_SPLASH,
+    FINGER_DRAW;
 
     companion object {
         /** Maps the JS-facing string (e.g. "neon_edge") to an enum value. Unknown/null -> NONE. */
@@ -174,6 +191,11 @@ enum class VisualEffect {
             "face_morph" -> FACE_MORPH
             "fire_book" -> FIRE_BOOK
             "stickers_react" -> STICKERS_REACT
+            "bokeh_lights" -> BOKEH_LIGHTS
+            "particle_flow" -> PARTICLE_FLOW
+            "rain_fall" -> RAIN_FALL
+            "paint_splash" -> PAINT_SPLASH
+            "finger_draw" -> FINGER_DRAW
             else -> NONE
         }
     }
@@ -1608,6 +1630,197 @@ object EffectShaders {
         }
     """.trimIndent()
 
+    // ---- Phase 9 shaders (see the enum's Phase 9 comment for the overall plan) ----
+
+    // Bokeh Lights  -  soft out-of-focus glow orbs drifting slowly across the
+    // frame, like light through a shallow-depth-of-field lens. Pure uTime, no
+    // tracker needed. FIXED_COUNT procedural orbs (hashed per-index position/
+    // size/color/speed) rather than a real depth-of-field blur of actual scene
+    // highlights - a genuine bokeh blur needs the GPU to sample a wide kernel
+    // around bright source pixels, which is a much heavier multi-tap technique;
+    // this is the same "ambient mood overlay" category as AURA_GLOW/SILENCE_RIPPLE,
+    // just orbs instead of rings.
+    private const val BOKEH_COUNT = 10
+    private val bokehLights = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform float uTime;
+
+        float hash1(float n) { return fract(sin(n) * 43758.5453); }
+
+        void main() {
+            vec4 base = texture2D(uTexture, vTexCoord);
+            vec3 glow = vec3(0.0);
+            for (int i = 0; i < $BOKEH_COUNT; i++) {
+                float fi = float(i);
+                // Per-orb randomized starting position, drift direction/speed,
+                // size and hue seed, all derived from the loop index so no
+                // Kotlin-side state is needed - same "hash the index" approach
+                // ROCK_PAPER_SCISSORS-adjacent effects use for per-particle vary.
+                vec2 seed = vec2(hash1(fi * 12.9898), hash1(fi * 78.233 + 4.0));
+                float speed = 0.02 + hash1(fi * 3.7) * 0.03;
+                vec2 pos = fract(seed + vec2(hash1(fi * 5.3) - 0.5, -uTime * speed));
+                float size = 0.05 + hash1(fi * 9.1) * 0.09;
+                float d = distance(vTexCoord, pos);
+                float orb = smoothstep(size, 0.0, d) * 0.5;
+                // Warm/cool alternating palette so it doesn't read as one flat color.
+                vec3 hue = hash1(fi * 2.1) > 0.5
+                    ? vec3(1.0, 0.75, 0.4)
+                    : vec3(0.5, 0.7, 1.0);
+                glow += hue * orb;
+            }
+            gl_FragColor = vec4(base.rgb + glow, base.a);
+        }
+    """.trimIndent()
+
+    // Particle Flow  -  small glowing dust motes drifting diagonally upward,
+    // tiled so it repeats seamlessly (same fract()-of-a-scaled-UV tiling
+    // MOUTH_FIRE-adjacent noise functions in this file already use). Pure
+    // uTime, no tracker needed.
+    private val particleFlow = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform float uTime;
+
+        float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+        void main() {
+            vec4 base = texture2D(uTexture, vTexCoord);
+            float glow = 0.0;
+            // Two overlapping tile scales so it doesn't read as one obvious grid.
+            for (int layer = 0; layer < 2; layer++) {
+                float scale = layer == 0 ? 9.0 : 14.0;
+                float layerSpeed = layer == 0 ? 0.05 : -0.08;
+                vec2 uv = vTexCoord * scale + vec2(0.0, uTime * layerSpeed);
+                vec2 cell = floor(uv);
+                vec2 local = fract(uv) - 0.5;
+                vec2 jitter = vec2(hash2(cell), hash2(cell + 3.7)) - 0.5;
+                float d = length(local - jitter * 0.6);
+                float twinkle = 0.5 + 0.5 * sin(uTime * 2.0 + hash2(cell) * 20.0);
+                glow += smoothstep(0.06, 0.0, d) * twinkle * 0.5;
+            }
+            vec3 particleColor = vec3(0.8, 0.9, 1.0);
+            gl_FragColor = vec4(base.rgb + particleColor * glow, base.a);
+        }
+    """.trimIndent()
+
+    // Rain Fall  -  vertical streaks falling down the frame, plus a slight
+    // cool darkening so it reads as "weather" rather than just lines on top of
+    // the video. Pure uTime, no tracker needed.
+    private val rainFall = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform float uTime;
+
+        float hash1(float n) { return fract(sin(n) * 43758.5453); }
+
+        void main() {
+            vec4 base = texture2D(uTexture, vTexCoord);
+            // Cool, slightly darkened base so falling streaks read clearly
+            // against it, same reasoning as SILENCE_RIPPLE's dark backdrop.
+            vec3 color = mix(base.rgb, base.rgb * vec3(0.75, 0.82, 0.95), 0.5);
+
+            float streaks = 0.0;
+            const int COLUMNS = 40;
+            for (int i = 0; i < COLUMNS; i++) {
+                float fi = float(i);
+                float colX = hash1(fi * 17.13);
+                float speed = 0.6 + hash1(fi * 4.2) * 0.9;
+                float phase = hash1(fi * 8.7);
+                float dropY = fract(uTime * speed * 0.25 + phase);
+                float dx = abs(vTexCoord.x - colX);
+                // Thin column, only lit near the falling drop's current Y and
+                // fading above it into a faint trailing streak.
+                float column = smoothstep(0.0025, 0.0, dx);
+                float trail = smoothstep(0.18, 0.0, dropY - vTexCoord.y) * step(vTexCoord.y, dropY);
+                streaks += column * trail;
+            }
+            vec3 rainColor = vec3(0.75, 0.85, 1.0);
+            gl_FragColor = vec4(color + rainColor * streaks * 0.6, base.a);
+        }
+    """.trimIndent()
+
+    // Paint Splash  -  colorful splash blobs whose visible coverage is driven
+    // directly by uIntensity, which VideoTranscoder/LiveEffectPreviewView feed
+    // from the SAME frame-to-frame motion delta SPLIT_PRISM already uses (see
+    // VideoTranscoder.motionEffects) - move more, more/bigger splashes appear,
+    // same real signal, different visual treatment. Deliberately reads
+    // uIntensity per-frame rather than accumulating persistent splash state in
+    // Kotlin, so a burst of motion shows paint and it fades back out as motion
+    // settles, with no new Kotlin-side buffer needed (lower risk than adding
+    // one, consistent with how MOOD_RING/SMILE_SHATTER stay single-value-driven).
+    private val paintSplash = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform float uIntensity; // repurposed: motion magnitude 0..1
+        uniform float uTime;
+
+        float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        vec2 hash2v(vec2 p) {
+            vec2 q = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+            return fract(sin(q) * 43758.5453);
+        }
+
+        void main() {
+            vec4 base = texture2D(uTexture, vTexCoord);
+            vec3 splashColor = vec3(0.0);
+            float coverage = 0.0;
+            const int CELLS = 14;
+            float cellSize = 1.0 / float(CELLS);
+            vec2 grid = floor(vTexCoord / cellSize);
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    vec2 cell = grid + vec2(float(dx), float(dy));
+                    vec2 jitter = hash2v(cell);
+                    vec2 center = (cell + jitter) * cellSize;
+                    // Each cell only "activates" above its own random threshold,
+                    // so higher uIntensity lights up progressively more cells
+                    // rather than every cell scaling together (reads as real
+                    // splashes appearing, not a uniform fade).
+                    float threshold = hash2(cell + 9.3);
+                    if (uIntensity < threshold) continue;
+                    float d = distance(vTexCoord, center);
+                    float size = 0.02 + hash2(cell + 1.7) * 0.05;
+                    float blob = smoothstep(size, size * 0.3, d);
+                    vec3 hue = fract(hash2(cell + 5.5) + uTime * 0.02) < 0.33 ? vec3(1.0, 0.2, 0.35)
+                        : fract(hash2(cell + 5.5) + uTime * 0.02) < 0.66 ? vec3(0.2, 0.6, 1.0)
+                        : vec3(1.0, 0.85, 0.15);
+                    splashColor += hue * blob;
+                    coverage = max(coverage, blob);
+                }
+            }
+            vec3 outColor = mix(base.rgb, splashColor, coverage * 0.85);
+            gl_FragColor = vec4(outColor, base.a);
+        }
+    """.trimIndent()
+
+    // Finger Draw  -  glowing trail following the index fingertip, in-frame
+    // (see the enum's Phase 9 comment for why this is fingertip-tracked, not
+    // touchscreen-tracked). Structurally identical to gazeTrail above, just a
+    // separate uniform set so it can coexist independently and doesn't repurpose
+    // GAZE_TRAIL's array meant for iris history.
+    private const val FINGER_TRAIL_POINTS = 8
+    private val fingerDraw = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform vec2 uFingerPoints[$FINGER_TRAIL_POINTS];
+        uniform float uFingerAges[$FINGER_TRAIL_POINTS]; // 0 = newest/brightest, 1 = oldest/gone
+        uniform int uFingerCount;
+
+        void main() {
+            vec4 base = texture2D(uTexture, vTexCoord);
+            vec3 trailColor = vec3(1.0, 0.55, 0.9);
+            float glow = 0.0;
+            for (int i = 0; i < $FINGER_TRAIL_POINTS; i++) {
+                if (i >= uFingerCount) break;
+                float d = distance(vTexCoord, uFingerPoints[i]);
+                float fade = 1.0 - uFingerAges[i];
+                glow += smoothstep(0.025, 0.0, d) * fade;
+            }
+            gl_FragColor = vec4(base.rgb + trailColor * glow, base.a);
+        }
+    """.trimIndent()
+
     // Double Take  -  reimagined as a SINGLE-PASS directional streak (multi-tap
     // sampling of the SAME live frame at offset UVs) rather than blending real
     // historical frames. This is a deliberate, safer substitute for a true
@@ -1707,6 +1920,11 @@ object EffectShaders {
         VisualEffect.STICKERS_REACT -> effectVertexShader to stickersReact
         VisualEffect.FACE_MORPH -> effectVertexShader to faceMorphComposite
         VisualEffect.FIRE_BOOK -> effectVertexShader to fireBook
+        VisualEffect.BOKEH_LIGHTS -> effectVertexShader to bokehLights
+        VisualEffect.PARTICLE_FLOW -> effectVertexShader to particleFlow
+        VisualEffect.RAIN_FALL -> effectVertexShader to rainFall
+        VisualEffect.PAINT_SPLASH -> effectVertexShader to paintSplash
+        VisualEffect.FINGER_DRAW -> effectVertexShader to fingerDraw
         VisualEffect.NONE -> throw IllegalArgumentException("VisualEffect.NONE has no shader")
     }
 }    
