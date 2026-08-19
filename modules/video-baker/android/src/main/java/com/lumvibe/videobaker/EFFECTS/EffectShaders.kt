@@ -1,3 +1,5 @@
+package com.lumvibe.videobaker
+
 /**
 * "Phase 1" visual effects  -  the ones that need ONLY the decoded video frame
 * itself, no MediaPipe face/hand tracking, no audio decode, no device motion.
