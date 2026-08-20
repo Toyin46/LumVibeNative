@@ -167,6 +167,16 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
   const { user } = useAuthStore();
   const insets = useSafeAreaInsets();
 
+  // FIX: this custom tab bar never checked per-screen options at all, so
+  // every navigation.getParent()?.setOptions({ tabBarStyle: { display: 'none' } })
+  // call anywhere in the app (cowatch.tsx, create.tsx) was silently doing
+  // nothing — the option was being set correctly, this component just never
+  // read it back. React Navigation's DEFAULT tab bar handles this
+  // automatically; a custom one (like this) has to do it explicitly.
+  const activeOptions = descriptors[state.routes[state.index].key].options;
+  const isHidden = (activeOptions.tabBarStyle as any)?.display === 'none';
+  if (isHidden) return null;
+
   // Bottom padding: respect safe area on iPhone notch/Dynamic Island
   // but keep a minimum of 10px to match Expo managed version
   const bottomPad = Math.max(insets.bottom, 10);
@@ -303,4 +313,4 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: '#000',
   },
-}); 
+});  

@@ -30,12 +30,18 @@ yarn-error.*
 *.pem
 
 # local env files
-.env*.local
+# SECURITY FIX: previously only .env*.local was ignored, so the real .env
+# file (which contains live secrets like the MUX secret key) was NOT
+# excluded from git. If this project is ever pushed to git, even a private
+# repo, that file gets committed and the secrets are exposed in history
+# forever, even if later deleted. Now ALL .env variants are ignored except
+# the example template, which should contain no real values.
+.env
+.env.*
+!.env.example
 
 # typescript
 *.tsbuildinfo
-
-
 
 node_modules
 android/.gradle

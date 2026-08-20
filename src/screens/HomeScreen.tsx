@@ -22,6 +22,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // FIX 1: relative paths replace @/ aliases
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
@@ -1211,6 +1212,10 @@ export default function HomeScreen() {
   const { userProfile, user, loadProfile } = useAuthStore();
   const { t } = useTranslation();
   const userId = user?.id || (user as any)?.id;
+  // ✅ POLISH FIX: replaces hardcoded paddingTop: 60 below, which either
+  // left dead space or got covered by the status bar depending on the
+  // phone's actual notch/status bar height.
+  const insets = useSafeAreaInsets();
 
   const [posts,               setPosts]               = useState<Post[]>([]);
   const [feedItems,           setFeedItems]           = useState<FeedItem[]>([]);
@@ -1250,6 +1255,14 @@ export default function HomeScreen() {
   const isLoadingRef       = useRef(false);
   const weeklyWinnersRef   = useRef<WeeklyWinner[]>([]); // FIX 5: always in sync for feed injection
   const flatListRef  = useRef<FlatList>(null);
+  // ✅ PERFORMANCE FIX: pagination state. Previously the feed always fetched
+  // the newest 50 posts and never fetched anything else — once a user
+  // scrolled past 50 posts there was nothing more to load, no matter how
+  // much content existed.
+  const feedOffsetRef      = useRef(0);
+  const totalPostCountRef  = useRef(0); // keeps ad/winner-card injection continuous across pages
+  const hasMoreFeedRef     = useRef(true);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // ─── FEED CACHE — 30s TTL, bypassed on manual pull-to-refresh ────────────
   const feedCacheRef        = useRef<{ data: FeedItem[]; timestamp: number } | null>(null);
@@ -1289,9 +1302,15 @@ export default function HomeScreen() {
     (AudioModule as any).setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: false, shouldDuckAndroid: true }).catch(() => {})
     .catch((e: unknown) => console.error('Audio mode error:', e));
     Promise.all([loadFeed(), loadUnreadNotifications(), loadWeeklyWinners()]);
-    const postsChannel         = supabase.channel('posts-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, () => { if (!isLoadingRef.current) loadFeed(); }).subscribe();
+    // ✅ PERFORMANCE FIX: these two were calling loadFeed() directly, which
+    // meant ANY insert/update/delete on posts or likes ANYWHERE in the app
+    // triggered a full feed reload (5 queries) on every connected phone
+    // immediately. debouncedLoadFeed already existed in this file but was
+    // never actually wired up here — now realtime events collapse into at
+    // most one reload every 2 seconds instead of one per event.
+    const postsChannel         = supabase.channel('posts-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, () => { if (!isLoadingRef.current) debouncedLoadFeed(); }).subscribe();
     const commentsChannel      = supabase.channel('comments-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'comments' }, () => { if (!isLoadingRef.current && selectedPost) handleComment(selectedPost); }).subscribe();
-    const likesChannel         = supabase.channel('likes-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'likes' }, () => { if (!isLoadingRef.current) loadFeed(); }).subscribe();
+    const likesChannel         = supabase.channel('likes-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'likes' }, () => { if (!isLoadingRef.current) debouncedLoadFeed(); }).subscribe();
     const notificationsChannel = supabase.channel('notifications-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, () => { loadUnreadNotifications(); }).subscribe();
     return () => {
       supabase.removeChannel(postsChannel); supabase.removeChannel(commentsChannel);
@@ -1458,11 +1477,134 @@ export default function HomeScreen() {
 
       feedCacheRef.current = { data: itemsWithAds, timestamp: Date.now() };
       setFeedItems(itemsWithAds);
+      // ✅ PERFORMANCE FIX: record where the next page should start from.
+      feedOffsetRef.current     = postsData.length;
+      totalPostCountRef.current = topPosts.length;
+      hasMoreFeedRef.current    = postsData.length >= 50; // fewer than a full page = no more left
       await loadFollowStatus(userIds);
     } catch (e: any) {
       console.error('Error loading feed:', e);
       Alert.alert('Error', `Failed to load feed: ${e.message || 'Unknown error'}`);
     } finally { clearTimeout(loadTimeout); setLoading(false); setRefreshing(false); isLoadingRef.current = false; }
+  };
+
+  // ✅ PERFORMANCE FIX: new function — fetches the NEXT batch of posts and
+  // appends them, instead of the feed dead-ending at 50 posts. Triggered by
+  // onEndReached on the FlatList below. Mirrors loadFeed's formatting and
+  // scoring logic exactly so paginated posts look identical to the first
+  // page; only the ad/winner-card injection index continues from where the
+  // first page left off instead of restarting at 0.
+  const loadMoreFeed = async () => {
+    if (loadingMore || isLoadingRef.current || !hasMoreFeedRef.current) return;
+    setLoadingMore(true);
+    try {
+      const { data: postsData, error: postsError } = await supabase.from('posts').select('*')
+        .or('is_published.is.null,is_published.eq.true')
+        .or('media_type.is.null,media_type.eq.text,media_type.eq.image,media_type.eq.voice')
+        .not('media_type', 'eq', 'video')
+        .order('created_at', { ascending: false })
+        .range(feedOffsetRef.current, feedOffsetRef.current + 49);
+
+      if (postsError) throw postsError;
+      if (!postsData || postsData.length === 0) {
+        hasMoreFeedRef.current = false;
+        return;
+      }
+
+      // Guard against a post that arrived via realtime insert already being
+      // in the list (e.g. someone posted between the last load and now).
+      const existingIds = new Set(posts.map(p => p.id));
+      const freshPostsData = postsData.filter((p: any) => !existingIds.has(p.id));
+
+      feedOffsetRef.current += postsData.length;
+      hasMoreFeedRef.current = postsData.length >= 50;
+
+      if (freshPostsData.length === 0) return;
+
+      const userIds = [...new Set(freshPostsData.map((p: any) => p.user_id))];
+      const [usersResult, likesResult, commentsResult, followingResult] = await Promise.all([
+        supabase.from('users').select('id, username, display_name, avatar_url, followers_count').in('id', userIds),
+        supabase.from('likes').select('post_id, user_id').in('post_id', freshPostsData.map((p: any) => p.id)),
+        supabase.from('comments').select('post_id').in('post_id', freshPostsData.map((p: any) => p.id)).is('parent_comment_id', null),
+        userId ? supabase.from('follows').select('following_id').eq('follower_id', userId) : Promise.resolve({ data: [] }),
+      ]);
+
+      const usersMap = new Map<string, any>(); usersResult.data?.forEach(u => usersMap.set(u.id, u));
+      const likesMap = new Map<string, { count: number; users: string[] }>();
+      likesResult.data?.forEach(like => { const existing = likesMap.get(like.post_id) || { count: 0, users: [] }; existing.count++; existing.users.push(like.user_id); likesMap.set(like.post_id, existing); });
+      const commentsMap = new Map<string, number>();
+      commentsResult.data?.forEach(comment => { commentsMap.set(comment.post_id, (commentsMap.get(comment.post_id) || 0) + 1); });
+      const followingSet = new Set<string>();
+      (followingResult as any).data?.forEach((f: any) => followingSet.add(f.following_id));
+
+      const formattedPosts: Post[] = freshPostsData.map((post: any) => {
+        const likes    = likesMap.get(post.id) || { count: 0, users: [] };
+        const postUser = usersMap.get(post.user_id);
+        return {
+          id: post.id, user_id: post.user_id,
+          username: postUser?.username || 'unknown',
+          display_name: postUser?.display_name || 'Unknown User',
+          user_photo_url: postUser?.avatar_url,
+          media_url: (() => {
+            const url = post.media_url;
+            if (url && url.includes('/upload/') && !url.includes('q_auto')) {
+              const idx = url.indexOf('/upload/');
+              return url.slice(0, idx + 8) + 'q_auto:good,f_auto/' + url.slice(idx + 8);
+            }
+            return url;
+          })(),
+          media_type: post.media_type,
+          caption: post.caption || '',
+          likes_count: likes.count,
+          comments_count: commentsMap.get(post.id) || 0,
+          views_count: post.views_count || 0,
+          coins_received: post.coins_received || 0,
+          liked_by: likes.users, saved_by: post.saved_by || [],
+          location: post.location, music_url: post.music_url,
+          music_name: post.music_name, music_artist: post.music_artist,
+          created_at: post.created_at, has_watermark: post.has_watermark || false,
+          text_gradient: post.text_gradient, voice_duration: post.voice_duration,
+          video_filter_tint: post.video_filter_tint || null,
+          applied_filter: post.applied_filter || null,
+          video_effect: post.video_effect || null,
+          vibe_type: post.vibe_type || null,
+          cloudinary_public_id: post.cloudinary_public_id || null,
+        };
+      });
+
+      const scoredPosts = formattedPosts.map(post => ({
+        ...post,
+        _score: computeScore(post, followingSet, usersMap.get(post.user_id)?.followers_count || 0, viewerCity),
+      }));
+      scoredPosts.sort((a, b) => (b._score || 0) - (a._score || 0));
+
+      const newItems: FeedItem[] = [];
+      let adCounter = Math.floor(totalPostCountRef.current / 4);
+      scoredPosts.forEach((post, i) => {
+        const runningIndex = totalPostCountRef.current + i;
+        newItems.push(post);
+        if ((runningIndex + 1) % 4 === 0) {
+          newItems.push({ id: `ad_${adCounter}`, isAd: true, adIndex: adCounter });
+          adCounter++;
+        }
+      });
+
+      totalPostCountRef.current += scoredPosts.length;
+      setPosts(prev => [...prev, ...scoredPosts]);
+      setFeedItems(prev => {
+        const updated = [...prev, ...newItems];
+        feedCacheRef.current = { data: updated, timestamp: Date.now() };
+        return updated;
+      });
+      await loadFollowStatus(userIds);
+    } catch (e: any) {
+      console.error('Error loading more feed:', e);
+      // Silent failure on pagination — don't interrupt the person's scrolling
+      // with an alert just because page 2 didn't load; they can retry by
+      // scrolling again since hasMoreFeedRef stays true on this catch path.
+    } finally {
+      setLoadingMore(false);
+    }
   };
 
   const onRefresh = async () => {
@@ -1843,7 +1985,7 @@ export default function HomeScreen() {
           <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700', flex: 1 }}>No internet — pull down to retry when back online</Text>
         </View>
       )}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
         <Text style={styles.headerTitle}>LumVibe</Text>
         <View style={styles.headerIcons}>
           <TouchableOpacity style={styles.headerIconButton} onPress={handleSearchPress}><Feather name="search" size={24} color="#fff" /></TouchableOpacity>
@@ -1863,12 +2005,16 @@ export default function HomeScreen() {
         onViewableItemsChanged={onViewableItemsChanged}
         viewabilityConfig={viewabilityConfig}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.feedContent}
+        contentContainerStyle={[styles.feedContent, { paddingBottom: 20 + insets.bottom }]}
         removeClippedSubviews={true}
         maxToRenderPerBatch={FEED_SETTINGS.maxToRenderPerBatch}
         initialNumToRender={FEED_SETTINGS.initialNumToRender}
         windowSize={FEED_SETTINGS.windowSize}
         updateCellsBatchingPeriod={FEED_SETTINGS.updateCellsBatchingPeriod}
+        // ✅ PERFORMANCE FIX: feed now paginates instead of dead-ending at 50 posts.
+        onEndReached={loadMoreFeed}
+        onEndReachedThreshold={0.6}
+        ListFooterComponent={loadingMore ? <View style={{ paddingVertical: 24 }}><ActivityIndicator size="small" color="#00ff88" /></View> : null}
         ListHeaderComponent={weeklyWinners.length > 0 ? <WinnersBanner winners={weeklyWinners} onUserPress={handleUserPress} isOfficial={winnersAreOfficial} /> : null}
         ListEmptyComponent={<View style={styles.emptyContainer}><Feather name="image" size={64} color="#666" /><Text style={styles.emptyText}>{t.feed.noContent}</Text><Text style={styles.emptySubtext}>{t.feed.noContentSub}</Text></View>}
       />
@@ -1923,7 +2069,7 @@ export default function HomeScreen() {
       {/* COMMENT MODAL */}
       <Modal visible={commentModalVisible} animationType="slide" onRequestClose={() => setCommentModalVisible(false)}>
         <KeyboardAvoidingView style={styles.commentModal} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.commentModalHeader}>
+          <View style={[styles.commentModalHeader, { paddingTop: insets.top + 16 }]}>
             <TouchableOpacity onPress={() => setCommentModalVisible(false)} style={styles.backButton}><Feather name="x" size={24} color="#fff" /></TouchableOpacity>
             <Text style={styles.commentModalTitle}>{t.comments.title}</Text>
             <View style={{ width: 24 }} />
@@ -2050,7 +2196,7 @@ const reportStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   container:              { flex: 1, backgroundColor: '#000' },
-  header:                 { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 60, paddingBottom: 16, backgroundColor: '#000', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
+  header:                 { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 16, backgroundColor: '#000', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
   headerTitle:            { fontSize: 24, fontWeight: 'bold', color: '#00ff88' },
   headerIcons:            { flexDirection: 'row', gap: 16 },
   headerIconButton:       { padding: 4, position: 'relative' },
@@ -2157,7 +2303,7 @@ const styles = StyleSheet.create({
   sendButton:             { backgroundColor: '#00ff88' },
   sendButtonText:         { color: '#000', fontSize: 16, fontWeight: '600' },
   commentModal:           { flex: 1, backgroundColor: '#000' },
-  commentModalHeader:     { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 60, paddingBottom: 16, backgroundColor: '#0a0a0a', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
+  commentModalHeader:     { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 16, backgroundColor: '#0a0a0a', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
   backButton:             { padding: 4 },
   commentModalTitle:      { color: '#fff', fontSize: 18, fontWeight: '600' },
   loadingCommentsContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },

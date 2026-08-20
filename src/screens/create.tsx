@@ -47,7 +47,7 @@ import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
-import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
+import { LiveEffectPreview, LiveEffectPreviewHandle } from '../../modules/video-baker/LiveEffectPreview';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -2743,7 +2743,7 @@ function AIEditPanel({
 
 function DeepARCameraView({
   facing, flash, isActive, fallbackDevice, fallbackRef, cameraMode,
-  selectedArEffect, filterTint, fxTint,
+  selectedArEffect, filterTint, fxTint, onCameraReady,
 }: {
   facing: 'back' | 'front';
   flash: 'off' | 'on';
@@ -2757,6 +2757,10 @@ function DeepARCameraView({
   selectedArEffect?: string;
   filterTint?: string | null;
   fxTint?: string | null;
+  // FIX: real "the native camera session is actually ready" signal, instead
+  // of a blind timeout - see handleStartRecording's isCapturingLiveFx branch
+  // for why this matters (the landscape-after-recording bug).
+  onCameraReady?: () => void;
 }) {
   // ✅ Skia AR fallback state — if Skia crashes on Android, fall back to plain Camera
   const [skiaFailed, setSkiaFailed] = React.useState(false);
@@ -2824,6 +2828,7 @@ function DeepARCameraView({
       video={isVideoMode}
       audio={isVideoMode}
       torch={flash === 'on' ? 'on' : 'off'}
+      onInitialized={() => onCameraReady?.()}
       onError={(e) => {
         if (e.code === 'session/invalid-output-configuration') return;
         console.warn('Camera error:', e.code, e.message);
@@ -4515,6 +4520,25 @@ export default function CreateScreen() {
   const { user } = useAuthStore();
   const navigation = useNavigation(); // TASK 1: replaces expo-router
 
+  // FIX: hide the bottom tab bar while the camera is open. Unlike
+  // cowatch.tsx (which sits inside a nested ChatStack, so .getParent() is
+  // needed to reach the Tab navigator above it), Create is registered
+  // directly as a Tab.Screen with no wrapping Stack (see
+  // src/screens/index.ts) — so useNavigation() here already IS the Tab
+  // navigator's own navigation object, and calling .getParent() would reach
+  // one level too high and silently do nothing. setOptions() goes directly
+  // on navigation itself.
+  // This also required a real fix in MainTabBar.tsx itself — that custom tab
+  // bar never actually read the tabBarStyle option at all, so this call
+  // (and the identical one in cowatch.tsx) was being set correctly but
+  // silently ignored by the one place that renders the bar.
+  useEffect(() => {
+    navigation.setOptions({ tabBarStyle: { display: 'none' } } as any);
+    return () => {
+      navigation.setOptions({ tabBarStyle: undefined } as any);
+    };
+  }, [navigation]);
+
   // TASK 7: Offline detection
   const [isOffline, setIsOffline] = useState(false);
   useEffect(() => {
@@ -4532,7 +4556,14 @@ export default function CreateScreen() {
   const [cameraMode, setCameraMode]     = useState<CameraMode>('video');
   // Visual-only for now — doesn't yet crop the actual preview/output to these
   // ratios, just labels intent. Wiring real crop is a separate follow-up.
-  const [aspectRatio, setAspectRatio]   = useState<'9:16' | '1:1' | '16:9'>('1:1');
+  // FIX: switched back to '9:16' - a square box can never fill a tall phone
+  // screen edge-to-edge no matter how generous the height cap is; only a
+  // ratio matching the phone's real shape (9:16) can go full-bleed like
+  // Snapchat/TikTok. The earlier switch to '1:1' was solving a different
+  // complaint (the box looking oddly stretched) - now that the SH*0.90 cap
+  // above isn't artificially clamping 9:16 down anymore, this should fix
+  // both: proper full-height fill AND no more distortion.
+  const [aspectRatio, setAspectRatio]   = useState<'9:16' | '1:1' | '16:9'>('9:16');
   const [showAspectMenu, setShowAspectMenu] = useState(false);
   // 'post' = normal feed post (current behaviour). 'story' / 'live' are UI-only
   // placeholders here — they don't yet route to different posting logic.
@@ -4561,6 +4592,32 @@ export default function CreateScreen() {
   // shader effect onto the raw footage afterwards, same as it already does
   // for effects picked from the gallery, so this is the only piece missing.
   const [isCapturingLiveFx, setIsCapturingLiveFx] = useState(false);
+  // FIX (live-effect recording): lets the actual native live-GL recording be
+  // called directly, instead of always falling back to the plain camera.
+  const liveEffectPreviewRef = useRef<LiveEffectPreviewHandle>(null);
+  // FIX: the native camera session starts tearing down the instant
+  // stopRecording() is called, but screenView doesn't switch to 'compose'
+  // until onRecordingFinished actually fires (which isn't instant - the file
+  // still has to finish writing). In that gap the camera view is still
+  // mounted showing whatever's left in its buffer, which can be a garbage/
+  // streaky frame from the teardown - this covers that window with a plain
+  // black screen so the user never sees it.
+  const [isFinalizingRecording, setIsFinalizingRecording] = useState(false);
+  // FIX: camBox and camControls (mode toggle/shutter/filmstrip/Post-Story-Live
+  // tabs) are SEPARATE siblings in camScreen, not nested - camControls is
+  // flex:1, so it only ever gets "whatever's left" after camBox's explicit
+  // height. Guessing a percentage for camBox kept either leaving too much
+  // black space or, after raising it, squeezing camControls down to almost
+  // nothing (the clipped filmstrip). Measuring camControls' REAL rendered
+  // height via onLayout and sizing camBox around that exactly removes the
+  // guesswork entirely - starts at a reasonable fallback before the first
+  // real measurement comes in, then self-corrects.
+  const [controlsHeight, setControlsHeight] = useState(300);
+  // FIX: tracks the real "camera session fully negotiated its format" signal
+  // (Camera's onInitialized) instead of just "the ref exists" - see
+  // handleStartRecording below for why the blind timeout wasn't reliable
+  // enough on slower devices (the landscape-after-recording bug).
+  const cameraReadyRef = useRef(false);
   const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const previewBoxRef = useRef<any>(null);
   // VisionCamera device
@@ -4789,17 +4846,54 @@ export default function CreateScreen() {
     } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + e.message); }
   };
 
+  const recordingViaLiveFxRef = useRef(false);
+
   const handleStartRecording = async () => {
     if (isRecording) return;
+
+    // FIX (live-effect recording): try the REAL live recording first when a
+    // GL effect is active - the effect now shows WHILE recording, not just
+    // baked in afterward. Falls back to the old swap-to-plain-camera
+    // behavior below if this throws for ANY reason, so a bug in the
+    // brand-new native recorder can never leave the record button fully
+    // broken - see LiveRecorder.kt's own "FLAG FOR ON-DEVICE VERIFICATION"
+    // note for why this fallback matters so much here specifically.
+    if (hasLiveGLEffect && liveEffectPreviewRef.current) {
+      try {
+        const videoOnlyPath = `${FileSystem.cacheDirectory}live_video_${Date.now()}.mp4`.replace('file://', '');
+        const pcmPath = `${FileSystem.cacheDirectory}live_audio_${Date.now()}.pcm`.replace('file://', '');
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        await liveEffectPreviewRef.current.startRecording(videoOnlyPath, pcmPath);
+        recordingViaLiveFxRef.current = true;
+        setIsRecording(true);
+        return;
+      } catch (e: any) {
+        console.warn('Live-effect recording failed, falling back to plain camera:', e?.message);
+        recordingViaLiveFxRef.current = false;
+        // falls through to the existing plain-camera path below
+      }
+    }
+
+    // ---- existing plain-camera path (also the fallback for the try above) ----
+    if (isRecording) return;
     // FIX: if a GL shader effect is showing (LiveEffectPreview mounted),
-    // swap to the real Camera first and give it a moment to actually mount
-    // and open its Camera2 session before we try to use cameraRef.current -
-    // otherwise it's still null the instant this state flips. 350ms matches
-    // the isTransitioning debounce this file already uses elsewhere for
-    // camera mode swaps (DeepARCameraView's photo/video transition).
+    // swap to the real Camera first and wait for its REAL onInitialized
+    // signal - not just a fixed delay - before recording. A blind 350ms
+    // wasn't always long enough for the camera session to finish negotiating
+    // its format on slower devices, which is what caused the
+    // landscape-after-recording bug: recording started before the session
+    // had settled into its correct portrait format. 2s is just a safety
+    // ceiling so this can't hang forever if onInitialized never fires.
     if (hasLiveGLEffect && !isCapturingLiveFx) {
+      cameraReadyRef.current = false;
       setIsCapturingLiveFx(true);
-      await new Promise(resolve => setTimeout(resolve, 350));
+      const maxWaitMs = 2000;
+      const pollIntervalMs = 50;
+      let waited = 0;
+      while (!cameraReadyRef.current && waited < maxWaitMs) {
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+        waited += pollIntervalMs;
+      }
     }
     if (!cameraRef.current) {
       setIsCapturingLiveFx(false);
@@ -4825,12 +4919,14 @@ export default function CreateScreen() {
           setMediaType('video');
           setIsRecording(false);
           setIsCapturingLiveFx(false);
+          setIsFinalizingRecording(false);
           setVideoPlaying(false);
           setScreenView('compose');
         },
         onRecordingError: (error: any) => {
           setIsRecording(false);
           setIsCapturingLiveFx(false);
+          setIsFinalizingRecording(false);
           if (!error.message?.includes('stopped')) {
             Alert.alert('Error', 'Could not record video: ' + error.message);
           }
@@ -4844,11 +4940,51 @@ export default function CreateScreen() {
   };
 
   const handleStopRecording = async () => {
-    if (!cameraRef.current || !isRecording) return;
+    if (!isRecording) return;
+
+    // FIX (live-effect recording): if this recording was actually done via
+    // the real live-effect path (see handleStartRecording above), stop it
+    // through LiveEffectPreview instead of the plain Camera - cameraRef
+    // won't even be mounted in this case, since the whole point of this
+    // path is that it never had to swap to the plain camera at all.
+    if (recordingViaLiveFxRef.current) {
+      setIsFinalizingRecording(true);
+      try {
+        const finalOutputPath = `${FileSystem.cacheDirectory}live_final_${Date.now()}.mp4`.replace('file://', '');
+        const resultPath = await liveEffectPreviewRef.current?.stopRecording(finalOutputPath);
+        if (!resultPath) throw new Error('no output path returned');
+        const rawUri = `file://${resultPath}`;
+        let finalUri = rawUri;
+        if (duetMode && duetPartnerUri) {
+          try {
+            finalUri = await mergeDuetVideos(rawUri, duetPartnerUri);
+          } catch { finalUri = rawUri; }
+        }
+        setOriginalMediaUri(finalUri);
+        setMediaUri(finalUri);
+        setMediaType('video');
+        setIsRecording(false);
+        recordingViaLiveFxRef.current = false;
+        setIsFinalizingRecording(false);
+        setVideoPlaying(false);
+        setScreenView('compose');
+      } catch (e: any) {
+        setIsRecording(false);
+        recordingViaLiveFxRef.current = false;
+        setIsFinalizingRecording(false);
+        Alert.alert('Error', 'Could not finish recording: ' + e.message);
+      }
+      return;
+    }
+
+    // ---- existing plain-camera stop path (unchanged) ----
+    if (!cameraRef.current) return;
+    setIsFinalizingRecording(true);
     try {
       await cameraRef.current.stopRecording();
     } catch (e: any) {
       setIsRecording(false);
+      setIsFinalizingRecording(false);
     }
   };
 
@@ -5803,13 +5939,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
     // pure decoration until now - cH was always a fixed SH * 0.72 regardless of
     // what the user picked, which is why the box always looked like the same
     // tall rectangle no matter which option was selected. Now it actually
-    // drives the camera box's real dimensions. Capped at the old SH * 0.72 so
-    // it can never grow taller than the space this screen's layout was already
-    // built and tested for.
+    // drives the camera box's real dimensions.
+    // FIX 2: replaced the percentage-based cap entirely - see controlsHeight's
+    // declaration for why. cH now fills exactly what's left after
+    // camControls' real measured height, so nothing gets clipped and there's
+    // no leftover black space either.
     const rawCH = aspectRatio === '1:1' ? SW
       : aspectRatio === '16:9' ? SW * 9 / 16
       : SW * 16 / 9; // '9:16'
-    const cH = Math.min(rawCH, SH * 0.72);
+    const cH = Math.min(rawCH, SH - controlsHeight);
     return (
       <View style={ms.camScreen}>
         {/* Camera area */}
@@ -5828,6 +5966,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             // recording actually has a camera to record from. See
             // isCapturingLiveFx declaration for the full explanation.
             <LiveEffectPreview
+              ref={liveEffectPreviewRef}
               effect={activeFx?.glShaderEffect ?? null}
               facing={facing}
               style={StyleSheet.absoluteFill}
@@ -5847,7 +5986,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               selectedArEffect={selectedArEffect}
               filterTint={activeFilter?.tintColor || null}
               fxTint={activeFxTint !== 'transparent' ? activeFxTint : null}
+              onCameraReady={() => { cameraReadyRef.current = true; }}
             />
+          )}
+
+          {/* FIX: covers the transient garbage/streaky frame VisionCamera's
+              session can show while tearing down between stopRecording()
+              being called and onRecordingFinished actually firing. */}
+          {isFinalizingRecording && (
+            <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000', zIndex: 50 }]} pointerEvents="none" />
           )}
 
           {/* Animated background — only renders as OVERLAY when selected, camera always shows beneath */}
@@ -5952,52 +6099,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           </View>
 
-          {/* Face AR Effects Panel — emoji overlays */}
-          {showDeepARPanel && (
-            <View style={{ position: 'absolute', bottom: 200, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.92)', paddingVertical: 12, paddingHorizontal: 8, zIndex: 18, borderTopWidth: 1, borderTopColor: '#1a1a1a' }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingHorizontal: 4 }}>
-                <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>✨ AR Stickers</Text>
-                <TouchableOpacity onPress={() => setShowDeepARPanel(false)}><Feather name="x" size={18} color="#666" /></TouchableOpacity>
-              </View>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 4 }}>
-                {AR_EFFECTS.map((eff: any) => {
-                  const isActive = selectedArEffect === eff.id;
-                  return (
-                    <TouchableOpacity
-                      key={eff.id}
-                      style={[ms.arBtn, isActive && ms.arBtnActive]}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setSelectedArEffect(eff.id);
-                      }}
-                    >
-                      <Text style={{ fontSize: 18 }}>{eff.emoji}</Text>
-                      <Text style={[ms.arLabel, isActive && { color: '#00ff88' }]}>{eff.name}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-            </View>
-          )}
-
-          {/* AR Effects strip — emoji overlays (shown when DeepAR panel closed) */}
-          {!showDeepARPanel && (
-          <View style={ms.arStrip}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}>
-              {AR_EFFECTS.map(eff => (
-                <TouchableOpacity
-                  key={eff.id}
-                  style={[ms.arBtn, selectedArEffect === eff.id && ms.arBtnActive]}
-                  onPress={() => { setSelectedArEffect(eff.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
-                >
-                  <Text style={{ fontSize: 18 }}>{eff.emoji}</Text>
-                  <Text style={[ms.arLabel, selectedArEffect === eff.id && { color: '#00ff88' }]}>{eff.name}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-          )}
-
           {/* Animated BG picker */}
           {cameraFeature === 'animatedbg' && (
             <View style={ms.bgStrip}>
@@ -6018,7 +6119,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         </View>
 
         {/* Camera controls bar */}
-        <View style={ms.camControls}>
+        <View
+          style={ms.camControls}
+          onLayout={(e) => {
+            const h = e.nativeEvent.layout.height;
+            // Only update on a real, meaningfully different measurement -
+            // avoids a render loop from tiny sub-pixel fluctuations.
+            if (Math.abs(h - controlsHeight) > 2) setControlsHeight(h);
+          }}
+        >
           {/* Beat Tap Sync — lives here so it NEVER covers the shutter */}
           {showBeatTap && (
             <BeatTapSync activeBurst={activeBurst} onFire={handleBeatTapFire} visible={showBeatTap} />
@@ -6045,6 +6154,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             {cameraMode === 'picture' ? (
               <TouchableOpacity style={ms.shutterBtn} onPress={handleTakePhoto}>
                 <View style={ms.shutterInner} />
+                {/* FIX: Snapchat-style selected-effect badge - shows which
+                    filter/effect is active right on the capture button, using
+                    the same real cover images (FX_IMAGES) already proven in
+                    the filmstrip below, so no new assets are needed. */}
+                {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
+                  <View style={ms.shutterFxBadge}>
+                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  </View>
+                )}
               </TouchableOpacity>
             ) : (
               <TouchableOpacity
@@ -6052,6 +6170,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 onPress={isRecording ? handleStopRecording : handleStartRecording}
               >
                 <View style={[ms.shutterInner, isRecording && ms.shutterInnerRec]} />
+                {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
+                  <View style={ms.shutterFxBadge}>
+                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  </View>
+                )}
               </TouchableOpacity>
             )}
 
@@ -7094,7 +7217,13 @@ const ms = StyleSheet.create({
   bgBtn: { alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 12, padding: 8, minWidth: 70, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
   bgBtnActive: { backgroundColor: 'rgba(0,255,136,0.2)', borderColor: '#00ff88' },
   bgLabel: { color: '#fff', fontSize: 8, fontWeight: '600', marginTop: 2, textAlign: 'center' },
-  camControls: { flex: 1, backgroundColor: '#000', paddingTop: 12 },
+  // FIX: removed flex:1 - with it, camControls' height was just passively
+  // "whatever's left after camBox" (following FROM cH), which made the new
+  // onLayout measurement above circular and unable to converge on the real
+  // content height. Without flex:1, it sizes to its actual children
+  // (mode toggle + shutter row + filmstrip + Post/Story/Live tabs), which is
+  // exactly the real number cH needs.
+  camControls: { backgroundColor: '#000', paddingTop: 12 },
   modeRow: { flexDirection: 'row', justifyContent: 'center', gap: 24, marginBottom: 12 },
   modeBtn: { paddingHorizontal: 16, paddingVertical: 6, borderRadius: 16 },
   modeBtnActive: { backgroundColor: '#00ff8820', borderWidth: 1, borderColor: '#00ff88' },
@@ -7104,6 +7233,13 @@ const ms = StyleSheet.create({
   shutterBtn: { width: 72, height: 72, borderRadius: 36, borderWidth: 4, borderColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   shutterRecording: { borderColor: '#ff4444' },
   shutterInner: { width: 58, height: 58, borderRadius: 29, backgroundColor: '#fff' },
+  // FIX: Snapchat-style badge showing the currently selected effect, sitting
+  // on the shutter button's top-right edge so it's visible without covering
+  // the tap target.
+  shutterFxBadge: {
+    position: 'absolute', top: -6, right: -6, width: 28, height: 28, borderRadius: 14,
+    borderWidth: 2, borderColor: '#00ff88', overflow: 'hidden', backgroundColor: '#111',
+  },
   shutterInnerRec: { width: 28, height: 28, borderRadius: 6, backgroundColor: '#ff4444' },
   studioBtn: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#1a1a1a', alignItems: 'center', justifyContent: 'center', position: 'relative' },
   studioDot: { position: 'absolute', top: 4, right: 4, width: 10, height: 10, borderRadius: 5, backgroundColor: '#00ff88', borderWidth: 2, borderColor: '#000' },

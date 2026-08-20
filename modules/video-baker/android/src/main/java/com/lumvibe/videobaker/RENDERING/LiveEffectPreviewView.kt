@@ -110,6 +110,10 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     private var surfaceH = 0
     private val startTimeNs = System.nanoTime()
 
+    // ---- Recording (see LiveRecorder.kt for why this is a separate class) ----
+    private var liveRecorder: LiveRecorder? = null
+    private var encoderEglSurface: android.opengl.EGLSurface? = null
+
     // ---- Camera2 ----
 
     private var cameraManager: CameraManager? = null
@@ -366,6 +370,68 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
         eglC.setPresentationTime(eglS, System.nanoTime())
         eglC.swapBuffers(eglS)
+
+        // FIX (live-effect recording): if a recording is in progress, draw the
+        // SAME frame again to the encoder's input surface. Deliberately placed
+        // here, after the display draw/swap above is fully complete, so none
+        // of the tracking/display logic above is touched or risked - this is
+        // pure addition. The next drawFrame() call re-selects the display
+        // surface at its very top (eglC.makeCurrent(eglS) above), so there's
+        // no need to restore it here before returning.
+        val rec = liveRecorder
+        val encSurface = encoderEglSurface
+        if (rec != null && rec.isRecording && encSurface != null) {
+            eglC.makeCurrent(encSurface)
+            r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+            eglC.setPresentationTime(encSurface, System.nanoTime())
+            eglC.swapBuffers(encSurface)
+            rec.drainVideo(endOfStream = false)
+        }
+    }
+
+    /**
+     * Starts recording the live effect to an actual video file - called from
+     * LiveEffectPreviewModule.kt. Must be called from the render thread (the
+     * caller wraps this in renderHandler?.post {} - see that module for why).
+     * outputWidth/outputHeight should match the camera's actual capture size
+     * (surfaceW/surfaceH) so the encoder and the live GL rendering agree on
+     * dimensions.
+     */
+    fun startRecording(videoOnlyPath: String, pcmPath: String) {
+        val eglC = eglCore ?: return
+        if (liveRecorder?.isRecording == true) return // already recording, ignore
+        val w = if (surfaceW > 0) surfaceW else 720
+        val h = if (surfaceH > 0) surfaceH else 1280
+        val rec = LiveRecorder(w, h, videoOnlyPath, pcmPath)
+        val inputSurface = rec.startVideo()
+        encoderEglSurface = eglC.createWindowSurface(inputSurface)
+        rec.startAudio()
+        liveRecorder = rec
+    }
+
+    /**
+     * Stops recording and produces the final playable file. Returns the final
+     * output path via [onFinished] - split into two steps internally (see
+     * LiveRecorder.stop()/finalizeRecording() docs) so the fast part happens
+     * immediately and the slightly-slower audio-encode+combine step doesn't
+     * block anything on the render thread. [onFinished] is called on
+     * whatever thread finalizeRecording() actually runs on - the caller
+     * (LiveEffectPreviewModule.kt) is responsible for hopping back to the
+     * correct thread if needed, same as it already does for other results.
+     */
+    fun stopRecording(finalOutputPath: String, onFinished: (String) -> Unit) {
+        val rec = liveRecorder ?: run { onFinished(finalOutputPath); return }
+        rec.stop()
+        encoderEglSurface?.let { eglCore?.releaseSurface(it) }
+        encoderEglSurface = null
+        liveRecorder = null
+        // finalizeRecording() does real (if brief) file I/O and MediaCodec
+        // work - explicitly off the render thread so it can't jank the next
+        // preview frame while it runs.
+        Thread {
+            val result = rec.finalizeRecording(finalOutputPath)
+            onFinished(result)
+        }.start()
     }
 
     /** Throttled bitmap grab for MediaPipe  -  see trackingIntervalMs comment above. */
@@ -638,6 +704,17 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
     private fun stopEverything() {
         renderHandler?.post {
+            // FIX: if the view is torn down mid-recording (user backs out of
+            // the camera screen while recording, for example), stop the
+            // recorder here too so its encoder/muxer/audio thread don't leak.
+            // Not calling finalizeRecording()'s post-process step here - if
+            // the view is being destroyed, nobody's waiting for a result.
+            liveRecorder?.let { rec ->
+                if (rec.isRecording) rec.stop()
+                encoderEglSurface?.let { eglCore?.releaseSurface(it) }
+                encoderEglSurface = null
+                liveRecorder = null
+            }
             captureSession?.close()
             cameraDevice?.close()
             cameraSurface?.release()
@@ -652,4 +729,4 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         trackingThread?.quitSafely()
         renderThread?.quitSafely()
     }
-}  
+}   

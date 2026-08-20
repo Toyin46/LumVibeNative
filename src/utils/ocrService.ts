@@ -1,35 +1,28 @@
-// utils/ocrService.ts - FINAL FIX (No EncodingType errors)
-import * as FileSystem from 'expo-file-system';
+// utils/ocrService.ts
+//
+// SECURITY FIX: GOOGLE_VISION_API_KEY removed from this file — it was
+// hardcoded in plaintext and shipped inside the app bundle, extractable by
+// anyone who decompiled the app. The Vision API call now runs server-side
+// through the ocr-proxy Edge Function (see supabase-edge-functions/ocr-proxy).
 
-const GOOGLE_VISION_API_KEY = 'AIzaSyA8VxZRW6lOSytp6Bh5dSpFf1gGVWdSGwQ'
+import * as FileSystem from 'expo-file-system';
+import { supabase } from '../config/supabase';
 
 export async function extractTextFromId(imageUri: string) {
   try {
-    // FIX: Use string directly instead of EncodingType
     const base64 = await FileSystem.readAsStringAsync(imageUri, {
-      encoding: 'base64', // ✅ Direct string, no TypeScript errors
+      encoding: 'base64',
     });
 
-    const response = await fetch(
-      `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requests: [{
-            image: { content: base64 },
-            features: [
-              { type: 'TEXT_DETECTION', maxResults: 1 },
-              { type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }
-            ]
-          }]
-        })
-      }
-    );
+    const { data, error } = await supabase.functions.invoke('ocr-proxy', {
+      body: { base64Image: base64 },
+    });
 
-    const data = await response.json();
-    
-    if (!data.responses || !data.responses[0].fullTextAnnotation) {
+    if (error) {
+      throw new Error('OCR request failed');
+    }
+
+    if (!data?.responses || !data.responses[0]?.fullTextAnnotation) {
       throw new Error('No text found in image');
     }
 
@@ -43,7 +36,7 @@ export async function extractTextFromId(imageUri: string) {
 
 function parseIdDocument(text: string) {
   const lines = text.split('\n').filter(line => line.trim());
-  
+
   let name = '';
   let dateOfBirth = '';
   let idNumber = '';
@@ -77,4 +70,3 @@ function parseIdDocument(text: string) {
 
   return { name, dateOfBirth, idNumber };
 }
-	

@@ -7,6 +7,7 @@ import {
 import * as Contacts from 'expo-contacts';
 import * as Clipboard from 'expo-clipboard';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from '../locales/LanguageContext';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
@@ -749,6 +750,8 @@ export default function ProfileScreen() {
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
   const [isOffline, setIsOffline] = useState(false);
+  // ✅ POLISH FIX: replaces hardcoded paddingTop: 60 on this screen's headers.
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     const unsub = NetInfo.addEventListener(state => {
@@ -921,17 +924,80 @@ export default function ProfileScreen() {
     try {
       await Promise.race([
         Promise.all([
-          loadUserCurrency(), loadUserCoins(), loadUserStats(), loadUserPosts(),
-          loadSavedPosts(), loadGamificationData(), loadUserBadges(), loadUnlockedFeatures(),
-          loadTransactions(), checkPaystackConnection(), loadReferralData(),
-          loadTheme(), loadMyReferrerStatus(), loadTotalUserCount(), loadSocialLinks(),
-          loadLayoutPreference(),
+          // ✅ PERFORMANCE FIX: loadUserCurrency, loadGamificationData,
+          // loadTheme, loadLayoutPreference, checkPaystackConnection
+          // replaced by one consolidated query — see loadProfileCoreData.
+          loadProfileCoreData(), loadUserCoins(), loadUserStats(), loadUserPosts(),
+          loadSavedPosts(), loadUserBadges(), loadUnlockedFeatures(),
+          loadTransactions(), loadReferralData(),
+          loadMyReferrerStatus(), loadTotalUserCount(), loadSocialLinks(),
         ]),
         timeout,
       ]);
     } catch (e: any) {
       if (e?.message !== 'timeout') console.warn('loadAllData error:', e?.message);
     }
+  };
+
+  // ✅ PERFORMANCE FIX: loadUserCurrency, loadGamificationData, loadTheme,
+  // loadLayoutPreference, and checkPaystackConnection were 5 separate
+  // queries, each fetching one different column from the SAME users row,
+  // all firing together every time the profile screen loads. None of these
+  // 5 are ever called anywhere else independently (checked every call site
+  // in the file), so they're safe to merge into one query. loadUserCoins
+  // and loadUserStats are NOT touched here — those ARE called independently
+  // elsewhere (gift sending, wallet screen, pull-to-refresh) so merging
+  // them would risk breaking those other call sites.
+  const loadProfileCoreData = async () => {
+    if (!user?.id) return;
+    try {
+      const { data } = await supabase
+        .from('users')
+        .select('withdrawal_currency, points, level, current_streak, is_weekly_winner, winner_week_label, winner_points, last_active_date, active_theme, use_new_profile_layout, bank_account_number')
+        .eq('id', user.id)
+        .single();
+      if (!data) return;
+
+      // — was loadUserCurrency —
+      if (data.withdrawal_currency) {
+        const found = Object.values(CURRENCY_BY_TIMEZONE).find(c => c.code === data.withdrawal_currency);
+        if (found) setCurrency(found);
+      }
+
+      // — was loadGamificationData, including its daily-streak side effect —
+      setPoints(data.points || 0);
+      setLevel(data.level || 1);
+      setCurrentStreak(data.current_streak || 0);
+      setIsWeeklyWinner(data.is_weekly_winner || false);
+      setWinnerWeekLabel(data.winner_week_label || '');
+      setWinnerPoints(data.winner_points || 0);
+      try {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const lastDate  = data.last_active_date || '';
+        if (lastDate !== todayStr) {
+          const yesterday = new Date();
+          yesterday.setDate(yesterday.getDate() - 1);
+          const yesterdayStr = yesterday.toISOString().split('T')[0];
+          const newStreak = lastDate === yesterdayStr ? (data.current_streak || 0) + 1 : 1;
+          const DAILY_LOGIN_POINTS = 5;
+          const newPoints = (data.points || 0) + DAILY_LOGIN_POINTS;
+          await supabase.from('users').update({ last_active_date: todayStr, current_streak: newStreak, points: newPoints }).eq('id', user.id);
+          setPoints(newPoints);
+          setCurrentStreak(newStreak);
+        }
+      } catch (streakErr) {
+        console.warn('Daily streak update skipped:', streakErr);
+      }
+
+      // — was loadTheme —
+      if (data.active_theme && THEMES[data.active_theme]) setActiveThemeId(data.active_theme);
+
+      // — was loadLayoutPreference —
+      setUseNewLayout(data.use_new_profile_layout || false);
+
+      // — was checkPaystackConnection —
+      setPaystackConnected(!!(data.bank_account_number));
+    } catch {}
   };
 
   const loadUserCurrency = async () => {
@@ -1922,7 +1988,7 @@ export default function ProfileScreen() {
         {/* ── Classic Layout ── */}
         {!useNewLayout && (
           <>
-            <View style={s.topBar}>
+            <View style={[s.topBar, { paddingTop: insets.top + 16 }]}>
               {navigation.canGoBack?.()
                 ? (
                   <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -2113,7 +2179,7 @@ export default function ProfileScreen() {
         {/* ── New Layout ── */}
         {useNewLayout && (
           <>
-            <View style={[s.newHeader, { backgroundColor: theme.background }]}>
+            <View style={[s.newHeader, { backgroundColor: theme.background, paddingTop: insets.top + 16 }]}>
               <TouchableOpacity onPress={() => setSettingsVisible(true)}>
                 <Feather name="settings" size={22} color="#fff" />
               </TouchableOpacity>
@@ -3151,7 +3217,7 @@ const s = StyleSheet.create({
   glowBadge:           { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1 },
   glowBadgeText:       { fontSize: 11, fontWeight: '700' },
   actions:             { flexDirection: 'row', gap: 8 },
-  topBar:              { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 60, paddingBottom: 10 },
+  topBar:              { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 10 },
   topBarIcons:         { flexDirection: 'row', alignItems: 'center', gap: 18 },
   waveBg:              { position: 'absolute', top: 0, left: 0, right: 0, height: 220, borderRadius: 0 },
   avatarSection:        { alignItems: 'center', paddingTop: 8, marginBottom: 10, position: 'relative' },
@@ -3191,7 +3257,7 @@ const s = StyleSheet.create({
   postThumbOverlay:    { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000066', zIndex: 1 },
   emptyState:          { alignItems: 'center', paddingVertical: 40, gap: 12 },
   emptyText:           { color: '#555', fontSize: 14 },
-  newHeader:           { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 60, paddingBottom: 12 },
+  newHeader:           { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 12 },
   newHeaderTitle:      { fontSize: 18, fontWeight: 'bold' },
   newProfileRow:       { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 16, gap: 16 },
   newStatsRow:         { flex: 1, flexDirection: 'row', justifyContent: 'space-around' },
