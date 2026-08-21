@@ -30,6 +30,15 @@ export interface LiveEffectPreviewProps {
   effect?: string | null;
   facing?: 'front' | 'back';
   style?: ViewStyle;
+  /**
+   * NEW - Two Hand Frame's gesture auto-capture. Fires once when the user
+   * holds both hands in the frame shape for ~1.2s (see LiveEffectPreviewView.kt's
+   * frameHoldRequiredSec). filePath is a JPEG already written to disk at that
+   * path - nothing further needed on the native side, just read/move/upload
+   * it from here. Only relevant while the TWO_HAND_FRAME effect is selected;
+   * won't fire for any other effect.
+   */
+  onFrameCaptured?: (filePath: string) => void;
 }
 
 export interface LiveEffectPreviewHandle {
@@ -59,6 +68,7 @@ const NativeLiveEffectPreviewModule = requireNativeModule('LiveEffectPreview');
 
 export const LiveEffectPreview = forwardRef<LiveEffectPreviewHandle, LiveEffectPreviewProps>(
   (props, ref) => {
+    const { onFrameCaptured, ...nativeProps } = props;
     const nativeRef = useRef<any>(null);
 
     useImperativeHandle(ref, () => ({
@@ -79,6 +89,19 @@ export const LiveEffectPreview = forwardRef<LiveEffectPreviewHandle, LiveEffectP
       },
     }), []);
 
-    return <NativeView {...props} ref={nativeRef} />;
+    // NEW: Events("onFrameCaptured") on the native side (see
+    // LiveEffectPreviewModule.kt) delivers { path: string } wrapped in the
+    // standard RN synthetic-event shape, i.e. event.nativeEvent.path - not
+    // the raw string. Unwrapped here so the prop this component exposes is a
+    // plain (filePath: string) => void, matching the doc comment above,
+    // rather than leaking that wrapping detail out to callers. FLAG FOR
+    // ON-DEVICE VERIFICATION alongside the matching native-side comments:
+    // confirm event.nativeEvent is actually where the payload lands for your
+    // installed expo-modules-core version before relying on this.
+    const handleFrameCaptured = onFrameCaptured
+      ? (event: { nativeEvent: { path: string } }) => onFrameCaptured(event.nativeEvent.path)
+      : undefined;
+
+    return <NativeView {...nativeProps} onFrameCaptured={handleFrameCaptured} ref={nativeRef} />;
   }
 ); 

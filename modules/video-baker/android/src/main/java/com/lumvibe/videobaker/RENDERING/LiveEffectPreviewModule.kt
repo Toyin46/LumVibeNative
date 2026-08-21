@@ -21,6 +21,13 @@ class LiveEffectPreviewModule : Module() {
         Name("LiveEffectPreview")
 
         View(LiveEffectPreviewView::class) {
+            // NEW: Two Hand Frame's auto-capture. FLAG FOR ON-DEVICE
+            // VERIFICATION alongside the matching comment in
+            // LiveEffectPreviewView.kt - confirm this event actually reaches
+            // your onFrameCaptured handler in LiveEffectPreview.tsx once you
+            // add one; the JS side doesn't listen for this yet.
+            Events("onFrameCaptured")
+
             // create.tsx passes the same fx.id string it already uses for
             // FX_LIST / glShaderEffect (e.g. "fx_gl_mood_ring")  -  VisualEffect.fromKey
             // is the exact same lookup EffectShaders/VideoTranscoder use for baking,

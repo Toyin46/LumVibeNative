@@ -2,7 +2,9 @@ package com.lumvibe.videobaker
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.opengl.GLES20
 import android.hardware.camera2.*
 import android.os.Handler
 import android.os.HandlerThread
@@ -22,6 +24,7 @@ import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenterResult
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import java.nio.ByteBuffer
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import expo.modules.kotlin.viewevent.EventDispatcher
 
 /**
 * Live camera preview with the SAME effect shaders as VideoTranscoder's bake
@@ -78,6 +81,30 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // never reaches the renderer at all.
     private var pendingEffect: VisualEffect = VisualEffect.NONE
 
+    // NEW: Two Hand Frame auto-capture event, fired when the hold-to-confirm
+    // gesture completes (see onHandResult's TWO_HAND_FRAME case). FLAG FOR
+    // ON-DEVICE VERIFICATION, same caution as the recording feature's own
+    // comments below: this view is a plain SurfaceView, not an ExpoView
+    // subclass, and EventDispatcher's exact requirements can vary by installed
+    // expo-modules-core version. If this doesn't compile/fire as-is, the
+    // fallback is a plain settable callback field instead
+    // (var onFrameCapturedCallback: ((String) -> Unit)? = null) with the
+    // module's findView() pattern (already used by startLiveRecording below)
+    // registering it - less idiomatic but guaranteed to work with any version.
+    private val onFrameCaptured by EventDispatcher<Map<String, String>>()
+
+    // NEW: Two Hand Frame auto-capture handoff. FIX: originally read pixels via
+    // its own separately-queued renderHandler.post call, which could run AFTER
+    // a swap - the exact "back buffer contents undefined post-swap" trap
+    // already documented and fixed for tracking readback below. This is now
+    // just a flag; the actual read happens at drawFrame's one safe pre-swap
+    // point (see the pendingPhotoCapturePath check there).
+    @Volatile private var pendingPhotoCapturePath: String? = null
+
+    private fun capturePhotoAndEmit(outputPath: String) {
+        pendingPhotoCapturePath = outputPath
+    }
+
     /** Same VisualEffect enum EffectShaders/FrameRenderer already use  -  no new effect vocabulary. */
     fun setEffect(effect: VisualEffect) {
         pendingEffect = effect
@@ -109,6 +136,13 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     private var surfaceW = 0
     private var surfaceH = 0
     private val startTimeNs = System.nanoTime()
+    // FIX (EGL crash): remembers what setupEgl() last actually built for, so a
+    // repeat surfaceChanged() call with the identical surface/size can be
+    // recognized as a genuine no-op instead of tearing everything down and
+    // rebuilding for no reason.
+    private var setupSurface: Surface? = null
+    private var setupW = 0
+    private var setupH = 0
 
     // ---- Recording (see LiveRecorder.kt for why this is a separate class) ----
     private var liveRecorder: LiveRecorder? = null
@@ -156,6 +190,92 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // (468 left / 473 right, from the refined 478-point mesh) - see
     // onFaceResult's GAZE_TRAIL case below.
     private val gazeHistory = ArrayDeque<Pair<Float, Float>>()
+    // FIX: VOICE_HALO/THERMAL_PULSE/DEPTH_BLOOM had NOTHING feeding them live -
+    // AudioAmplitudeReader.kt only decodes a FINISHED file (analyze(inputPath)),
+    // it has no live-microphone mode, so on live camera these three effects sat
+    // at whatever default effectIntensity happened to be, permanently flat. New
+    // LiveAudioReader.kt is a real AudioRecord mic tap for this path specifically.
+    private var liveAudioReader: LiveAudioReader? = null
+    // FIX: initial pass only caught 3 of what should have been 5 audio-driven
+    // effects - AURA_GLOW and SILENCE_RIPPLE were missed entirely (they don't
+    // crash or look obviously broken since faceBox still gets set generically,
+    // so their flatness is easy to miss without checking VideoTranscoder's
+    // audioScoreEffects/silenceEffects sets directly, which is what caught
+    // this). SILENCE_RIPPLE is inverted - VideoTranscoder uses 1-amplitude for
+    // it specifically (intensifies as things go QUIET, opposite of the other
+    // four), split into its own set rather than lumped in with the rest.
+    private val audioDirectEffects = setOf(VisualEffect.VOICE_HALO, VisualEffect.THERMAL_PULSE, VisualEffect.DEPTH_BLOOM, VisualEffect.AURA_GLOW)
+    private val audioInvertedEffects = setOf(VisualEffect.SILENCE_RIPPLE)
+    // FIX: DOUBLE_TAKE was a hardcoded no-op even live, on the reasoning that "a
+    // still photo has no motion" - true for the bake path, false here, since live
+    // camera genuinely has consecutive frames. Real yaw-delta history, same
+    // pattern as gazeHistory/fingerHistory above.
+    private var lastYawDeg: Float? = null
+    // FIX: BLINK_FREEZE never triggered live at all - captureFreezeFrame()/
+    // drawFrozenFrame() exist in FrameRenderer and work correctly, but nothing
+    // in the live path ever called them. Same hold-state/duration/punch-curve
+    // as VideoTranscoder's bake-path implementation, just keyed to wall-clock
+    // elapsedSec instead of presentationTimeUs since there's no decoded
+    // timeline here, only the live camera's own clock.
+    @Volatile private var freezeActive = false
+    private var freezeStartSec = 0f
+    private val freezeDurationSec = 0.3f
+    // FIX: hand-gesture effects state. onHandResult previously only ever read
+    // result.landmarks()[0] even though the tracker is configured for 2 hands
+    // (setNumHands(2)) - TWO_HAND_FRAME and CLAP_BURST structurally cannot
+    // work without both hands' positions, so that discarded second hand was
+    // the actual root cause for both, not a tuning issue.
+    private val BOOM_DECAY_PER_SEC = 4.87f // same constant/reasoning as VideoTranscoder's
+    @Volatile private var boomEnergy = 0f
+    @Volatile private var clapBoomEnergy = 0f
+    @Volatile private var tapBoomEnergy = 0f
+    private var lastFrameTimeNs = 0L
+    private var lastPalmPos: Pair<Float, Float>? = null
+    private var lastPalmTimeMs: Long? = null
+    private var confettiCooldown = false
+    private var lastTapFingerPos: Pair<Float, Float>? = null
+    private var lastTapTimeMs: Long? = null
+    private var tapCooldown = false
+    private var lastClapDistance: Float? = null
+    private var clapCooldown = false
+    // TWO_HAND_FRAME auto-capture: per your call, forming the frame triggers a
+    // photo, but only after a deliberate hold (not the instant hands line up)
+    // to avoid false-positive captures from a hand just passing through frame.
+    private var frameHoldStartSec: Float? = null
+    private val frameHoldRequiredSec = 1.2f
+    @Volatile private var frameCaptureRequested = false
+    private val confettiParticles = ParticleSystem()
+    private val palmMagicParticles = ParticleSystem(gravity = -0.15f)
+    private val clapBurstParticles = ParticleSystem()
+    // FIX: MOUTH_WORDS/ROCK_PAPER_SCISSORS/STICKERS_REACT/FACE_MORPH state -
+    // all four had zero live signal before. Word/label decision state
+    // (currentMouthWord etc) is only ever touched from trackingHandler's
+    // thread (onFaceResult/onHandResult both run there), so these are plain
+    // fields, not @Volatile - texture IDs are only touched from the render
+    // thread (built + read there), same single-thread-per-field discipline.
+    private var currentMouthWord: String? = null
+    private var lastBuiltMouthWord: String? = null
+    private var mouthWordTextureId = 0
+    private var mouthWordWidthPx = 0f
+    private var mouthWordHeightPx = 0f
+    private var mouthWordAnchorX = 0.5f
+    private var mouthWordAnchorY = 0.5f
+    private var currentRpsLabel: String? = null
+    private var lastBuiltRpsLabel: String? = null
+    private var rpsTextureId = 0
+    private var rpsWidthPx = 0f
+    private var rpsHeightPx = 0f
+    private var rpsAnchorX = 0.5f
+    private var rpsAnchorY = 0.5f
+    private val stickersParticles = ParticleSystem(gravity = -0.2f)
+    // NEW: Mouth Fire's real embers. Strong negative gravity (buoyancy, not
+    // "falling up" - embers accelerate upward like heat plume, same
+    // repurposing of the gravity param PALM_MAGIC/STICKERS_REACT already use
+    // for float-upward instead of fall-down) so even the spawnBurst's mostly-
+    // random initial angle gets pulled into a convincing upward stream within
+    // a few frames.
+    private val mouthFireParticles = ParticleSystem(gravity = -0.9f)
+    private var faceMorphFrameCounter = 0
     private val fingerHistory = ArrayDeque<Pair<Float, Float>>()
 
     init {
@@ -198,10 +318,49 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         renderHandler?.post {
             setupTrackers()
         }
+
+        liveAudioReader = LiveAudioReader(context).also { it.start() }
     }
 
     private fun setupEgl() {
         val surface = displaySurface ?: return
+
+        // FIX (EGL crash - root cause): surfaceChanged() is NOT a one-time
+        // event. It re-fires on rotation, on the app backgrounding/
+        // foregrounding, and as a genuine duplicate on some devices right
+        // after surfaceCreated(). This function used to unconditionally build
+        // a brand-new EglCore + EGLSurface + camera + SurfaceTexture on every
+        // single call, without ever releasing the previous set. A second
+        // eglCreateWindowSurface/eglMakeCurrent against a Surface that
+        // already has a live EGL producer attached to it fails - that is
+        // exactly the "eglMakeCurrent failed" RuntimeException from the crash
+        // screenshot - and each occurrence also leaked a camera handle and a
+        // full GL context.
+        //
+        // Two-part fix:
+        //  1. If this is a genuine no-op (same surface, same size, already
+        //     set up), skip entirely - nothing changed, nothing to rebuild.
+        //  2. Otherwise, fully release whatever setupEgl() built last time
+        //     BEFORE building the new set, via teardownEgl() below.
+        if (eglCore != null && surface == setupSurface && surfaceW == setupW && surfaceH == setupH) {
+            return
+        }
+        // Don't tear down EGL/camera out from under an in-progress recording.
+        // LiveRecorder owns its own separate encoder surface (encoderEglSurface),
+        // so it isn't directly destroyed by this, but ripping out the shared
+        // eglCore/renderer/camera mid-recording would still corrupt whatever
+        // is currently being recorded. A resize firing mid-recording is rare;
+        // skipping is safer than guessing at a live re-setup.
+        if (liveRecorder?.isRecording == true) {
+            android.util.Log.w("LiveEffectPreview", "setupEgl() re-triggered during an active recording - skipping re-setup to avoid corrupting it")
+            return
+        }
+        teardownEgl()
+
+        setupSurface = surface
+        setupW = surfaceW
+        setupH = surfaceH
+
         eglCore = EglCore()
         eglSurface = eglCore!!.createWindowSurface(surface)
         eglCore!!.makeCurrent(eglSurface!!)
@@ -234,6 +393,32 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         openCamera()
     }
 
+    // FIX (EGL crash): released here, BEFORE setupEgl() creates the
+    // replacement set - see setupEgl()'s doc for why this was missing.
+    // Deliberately does NOT touch liveRecorder/encoderEglSurface (that's a
+    // separate, independently-owned surface - see LiveRecorder.kt) or the
+    // MediaPipe trackers/threads (those don't depend on the display surface
+    // at all and stay alive across a resize).
+    private fun teardownEgl() {
+        captureSession?.close()
+        captureSession = null
+        cameraDevice?.close()
+        cameraDevice = null
+        cameraSurface?.release()
+        cameraSurface = null
+        cameraSurfaceTexture?.release()
+        cameraSurfaceTexture = null
+        if (cameraTexId != -1) {
+            GlUtil.deleteTexture(cameraTexId)
+            cameraTexId = -1
+        }
+        eglSurface?.let { eglCore?.releaseSurface(it) }
+        eglSurface = null
+        renderer = null
+        eglCore?.release()
+        eglCore = null
+    }
+
     private fun setupTrackers() {
         // FIX: each tracker now gets its OWN try/catch. Previously all three were
         // built inside one shared try/catch, in sequence (face, then hand, then
@@ -250,6 +435,12 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").build())
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setOutputFaceBlendshapes(true)
+                // FIX: was missing entirely. Without this, facialTransformationMatrixes()
+                // is always absent on the live path, so headPoseDegreesFrom() would return
+                // null forever regardless of anything else wired below - HEAD_TILT_ZOOM,
+                // DOUBLE_TAKE, and SPIN_EFFECT would all stay silently dead even after
+                // fixing their onFaceResult cases, since they'd never get real pose data.
+                .setOutputFacialTransformationMatrixes(true)
                 .setResultListener { result, _ -> onFaceResult(result) }
                 .setErrorListener { /* transient  -  next frame will retry, nothing to surface here */ }
                 .build()
@@ -346,6 +537,19 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // ---- Render loop (driven by camera's onFrameAvailable, not a fixed timer  -
     //      matches whatever FPS the camera actually delivers) ----
 
+    // NEW: packs a ParticleSystem's current state into FrameRenderer's fixed-
+    // size uniform arrays - same shape VideoTranscoder feeds after calling
+    // .update()/.toUniforms() in the bake path, just called every live frame
+    // instead of every decoded frame.
+    private fun pushParticles(r: FrameRenderer, system: ParticleSystem) {
+        val u = system.toUniforms()
+        r.particlePositions = u.positions
+        r.particleRotations = u.rotations
+        r.particleLifeRemaining = u.lifeRemaining
+        r.particleColorIndices = u.colorIndices
+        r.particleCount = u.count
+    }
+
     private fun drawFrame() {
         val eglC = eglCore ?: return
         val eglS = eglSurface ?: return
@@ -356,10 +560,106 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         tex.updateTexImage()
         tex.getTransformMatrix(texMatrix)
 
-        val elapsedSec = (System.nanoTime() - startTimeNs) / 1_000_000_000f
-        r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+        // FIX: VOICE_HALO/THERMAL_PULSE/DEPTH_BLOOM/AURA_GLOW's real signal
+        // (direct amplitude) + SILENCE_RIPPLE's (inverted - see the set
+        // declarations above for why), read every frame - cheap, just a
+        // volatile float read, no thread hop needed since LiveAudioReader's
+        // own read thread already did the smoothing work.
+        val amp = liveAudioReader?.currentAmplitude() ?: 0f
+        if (r.currentEffect in audioDirectEffects) {
+            r.effectIntensity = amp
+        } else if (r.currentEffect in audioInvertedEffects) {
+            r.effectIntensity = 1f - amp
+        }
 
-        // FIX: must read pixels for tracking BEFORE swapBuffers, not after  -  on
+        // FIX: FIST_BUMP_BOOM/CLAP_BURST/TAP_SHOCKWAVE's decay + THROW_CONFETTI/
+        // PALM_MAGIC/CLAP_BURST's particle simulation, advanced every real
+        // frame - same exp(-BOOM_DECAY_PER_SEC*dt) decay VideoTranscoder uses,
+        // just driven by actual wall-clock time between frames instead of
+        // presentationTimeUs (there's no decoded timeline here).
+        val nowNs = System.nanoTime()
+        val frameDtSec = if (lastFrameTimeNs == 0L) 0f else ((nowNs - lastFrameTimeNs) / 1_000_000_000f).coerceIn(0f, 0.2f)
+        lastFrameTimeNs = nowNs
+        val boomDecayFactor = kotlin.math.exp(-BOOM_DECAY_PER_SEC * frameDtSec)
+        boomEnergy *= boomDecayFactor
+        clapBoomEnergy *= boomDecayFactor
+        tapBoomEnergy *= boomDecayFactor
+        confettiParticles.update(frameDtSec)
+        palmMagicParticles.update(frameDtSec)
+        clapBurstParticles.update(frameDtSec)
+        stickersParticles.update(frameDtSec)
+        mouthFireParticles.update(frameDtSec)
+        when (r.currentEffect) {
+            VisualEffect.FIST_BUMP_BOOM -> r.boomEnergy = boomEnergy
+            VisualEffect.CLAP_BURST -> {
+                r.boomEnergy = clapBoomEnergy
+                pushParticles(r, clapBurstParticles)
+            }
+            VisualEffect.TAP_SHOCKWAVE -> r.boomEnergy = tapBoomEnergy
+            VisualEffect.THROW_CONFETTI -> pushParticles(r, confettiParticles)
+            VisualEffect.PALM_MAGIC -> pushParticles(r, palmMagicParticles)
+            VisualEffect.STICKERS_REACT -> pushParticles(r, stickersParticles)
+            VisualEffect.MOUTH_FIRE -> pushParticles(r, mouthFireParticles)
+            else -> {}
+        }
+
+        val elapsedSec = (System.nanoTime() - startTimeNs) / 1_000_000_000f
+        // FIX: BLINK_FREEZE's hold - mirrors VideoTranscoder's exact punch curve
+        // (quick zoom-in for the first half of the hold, ease back for the second,
+        // giving a "photo capture" snap rather than a flat static zoom).
+        if (freezeActive && elapsedSec - freezeStartSec < freezeDurationSec) {
+            val freezeProgress = (elapsedSec - freezeStartSec) / freezeDurationSec
+            val punch = if (freezeProgress < 0.5f) freezeProgress * 2f else (1f - freezeProgress) * 2f
+            r.drawFrozenFrame(1f + punch * 0.15f)
+        } else {
+            if (freezeActive) freezeActive = false // hold just ended this frame
+            // FIX: capture happens every frame BLINK_FREEZE is selected (cheap -
+            // just grabs the current frame into FrameRenderer's own buffer), same
+            // as the bake path, so that whichever frame the blink actually lands
+            // on already has itself captured and ready the instant it triggers.
+            if (r.currentEffect == VisualEffect.BLINK_FREEZE) r.captureFreezeFrame()
+            r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+            // FIX: MOUTH_WORDS/ROCK_PAPER_SCISSORS overlay draw - was never
+            // drawn live even on the rare chance the texture got built, since
+            // nothing called drawWatermarkAt for either. Same reused
+            // drawWatermarkAt call the bake path uses for both.
+            if (r.currentEffect == VisualEffect.MOUTH_WORDS && mouthWordTextureId != 0) {
+                val bubbleLeft = mouthWordAnchorX * surfaceW - mouthWordWidthPx / 2f
+                val bubbleTop = mouthWordAnchorY * surfaceH - mouthWordHeightPx - (0.03f * surfaceH)
+                r.drawWatermarkAt(mouthWordTextureId, bubbleLeft, bubbleTop, mouthWordWidthPx, mouthWordHeightPx, surfaceW, surfaceH)
+            }
+            if (r.currentEffect == VisualEffect.ROCK_PAPER_SCISSORS && rpsTextureId != 0) {
+                val bubbleLeft = rpsAnchorX * surfaceW - rpsWidthPx / 2f
+                val bubbleTop = rpsAnchorY * surfaceH - rpsHeightPx - (0.05f * surfaceH)
+                r.drawWatermarkAt(rpsTextureId, bubbleLeft, bubbleTop, rpsWidthPx, rpsHeightPx, surfaceW, surfaceH)
+            }
+        }
+
+        // NEW: Two Hand Frame auto-capture - this IS the safe pre-swap read
+        // point (see the comment right below on why post-swap is unsafe).
+        // Only the GPU readback happens here on the render thread; JPEG
+        // encode + file write + event emission are handed off to
+        // trackingHandler so a slow encode never stalls the render loop.
+        pendingPhotoCapturePath?.let { path ->
+            pendingPhotoCapturePath = null
+            try {
+                val bitmap = GlUtil.readPixelsAsBitmap(surfaceW, surfaceH)
+                trackingHandler?.post {
+                    try {
+                        java.io.FileOutputStream(path).use { out ->
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                        }
+                        post { onFrameCaptured(mapOf("path" to path)) }
+                    } catch (e: Exception) {
+                        android.util.Log.e("LiveEffectPreview", "Two Hand Frame: JPEG encode/save failed", e)
+                    } finally {
+                        bitmap.recycle()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("LiveEffectPreview", "Two Hand Frame: pixel readback failed", e)
+            }
+        }
         // most EGL drivers the back buffer's contents become UNDEFINED right
         // after a swap (no EGL_BUFFER_PRESERVED here), so reading post-swap risks
         // grabbing garbage or a blank frame. That silently starves MediaPipe of
@@ -524,6 +824,21 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
     // ---- Async tracking callbacks  -  cheap, just stash numbers for next drawFrame() ----
 
+    // NEW: mirrors FaceTracker.headPoseDegrees() exactly (same column-major
+    // matrix decomposition, same [roll, pitch, yaw] order) - duplicated rather
+    // than calling FaceTracker directly for the same reason the bounding-box
+    // computation above is duplicated (see its comment): this file works from
+    // the raw FaceLandmarkerResult rather than holding a FaceTracker instance.
+    // If FaceTracker's math ever changes, this needs to change with it.
+    private fun headPoseDegreesFrom(result: FaceLandmarkerResult): FloatArray? {
+        val matrices = result.facialTransformationMatrixes().orElse(null)
+        val m = matrices?.firstOrNull() ?: return null
+        val yaw = Math.toDegrees(kotlin.math.atan2((-m[8]).toDouble(), m[0].toDouble())).toFloat()
+        val pitch = Math.toDegrees(kotlin.math.asin(m[9].toDouble().coerceIn(-1.0, 1.0))).toFloat()
+        val roll = Math.toDegrees(kotlin.math.atan2(m[1].toDouble(), m[5].toDouble())).toFloat()
+        return floatArrayOf(roll, pitch, yaw)
+    }
+
     private fun onFaceResult(result: FaceLandmarkerResult) {
         val r = renderer ?: return
         if (result.faceLandmarks().isEmpty()) return
@@ -549,6 +864,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         var mouthX = 0.5f
         var mouthY = 0.6f
         var mouthUpdated = false
+        var blinkTriggered = false
         when (r.currentEffect) {
             VisualEffect.MOOD_RING, VisualEffect.SMILE_SHATTER -> {
                 val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
@@ -568,9 +884,75 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                     else -> 0f
                 }
             }
+            // FIX: was completely unwired live - r.headTiltZoom/headTiltPan never
+            // changed from their defaults, so the effect showed no zoom/pan at all
+            // no matter how you tilted your head. Same roll->zoom/pan mapping
+            // VideoTranscoder uses (see its HEAD_TILT_ZOOM case) for a matching feel
+            // between live preview and the baked-photo/video result.
+            VisualEffect.HEAD_TILT_ZOOM -> {
+                val pose = headPoseDegreesFrom(result)
+                val roll = pose?.get(0) ?: 0f
+                val maxRollDeg = 25f
+                val maxZoom = 1.35f
+                val t = (kotlin.math.abs(roll) / maxRollDeg).coerceIn(0f, 1f)
+                r.headTiltZoom = 1f + t * (maxZoom - 1f)
+                r.headTiltPan = floatArrayOf((roll / maxRollDeg).coerceIn(-1f, 1f) * 0.15f, 0f)
+            }
+            // FIX: previously hardcoded to a no-op live, on the (correct-for-bake,
+            // wrong-for-live) reasoning that "a still photo has no motion to
+            // compare against." Live camera has real consecutive frames, so this
+            // now does the real thing per the "build the real ghost trail" design
+            // decision: compares this frame's yaw against lastYawDeg every call.
+            VisualEffect.DOUBLE_TAKE -> {
+                val pose = headPoseDegreesFrom(result)
+                val yaw = pose?.get(2)
+                if (yaw != null && lastYawDeg != null) {
+                    val yawDelta = yaw - lastYawDeg!!
+                    val speed = (kotlin.math.abs(yawDelta) / 15f).coerceIn(0f, 1f)
+                    intensityOverride = speed
+                    r.doubleTakeDirection = kotlin.math.sign(yawDelta)
+                } else {
+                    intensityOverride = 0f
+                }
+                if (yaw != null) lastYawDeg = yaw
+            }
+            // FIX: was completely unwired live - r.effectIntensity never reflected
+            // an actually-raised eyebrow, so the effect either never triggered or
+            // stayed stuck at whatever intensity the previously-selected effect
+            // left behind. Same three blendshapes/maxOf VideoTranscoder uses.
+            VisualEffect.RAISE_EYEBROW -> {
+                val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
+                val innerUp = shapes?.firstOrNull { it.categoryName() == "browInnerUp" }?.score() ?: 0f
+                val outerL = shapes?.firstOrNull { it.categoryName() == "browOuterUpLeft" }?.score() ?: 0f
+                val outerR = shapes?.firstOrNull { it.categoryName() == "browOuterUpRight" }?.score() ?: 0f
+                intensityOverride = maxOf(innerUp, outerL, outerR)
+            }
+            // FIX: was completely unwired live - the ring never actually spun
+            // faster/slower with head turn like it's supposed to. Same yaw->speed
+            // mapping VideoTranscoder uses (30deg = "meaningfully turned").
+            VisualEffect.SPIN_EFFECT -> {
+                val pose = headPoseDegreesFrom(result)
+                val yaw = pose?.get(2) ?: 0f
+                intensityOverride = (kotlin.math.abs(yaw) / 30f).coerceIn(0f, 1f)
+            }
+            // FIX: was never triggered live at all - captureFreezeFrame()/
+            // drawFrozenFrame() worked correctly but nothing ever called them.
+            // Same both-eyes-closed gate and !freezeActive re-entry guard as
+            // the bake path (guard matters here even more than there - live
+            // runs continuously, so without it a single sustained blink could
+            // re-trigger the hold every tracking tick).
+            VisualEffect.BLINK_FREEZE -> {
+                val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
+                val left = shapes?.firstOrNull { it.categoryName() == "eyeBlinkLeft" }?.score() ?: 0f
+                val right = shapes?.firstOrNull { it.categoryName() == "eyeBlinkRight" }?.score() ?: 0f
+                if (!freezeActive && left > 0.6f && right > 0.6f) {
+                    blinkTriggered = true
+                }
+            }
             VisualEffect.MOUTH_FIRE -> {
                 val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
-                intensityOverride = shapes?.firstOrNull { it.categoryName() == "jawOpen" }?.score() ?: 0f
+                val jawOpen = shapes?.firstOrNull { it.categoryName() == "jawOpen" }?.score() ?: 0f
+                intensityOverride = jawOpen
                 // Same landmark 13/14 midpoint FaceTracker.mouthCenter() uses in the
                 // bake path  -  see that method's doc for why 13/14 are safe here.
                 if (landmarks.size > 14) {
@@ -580,8 +962,112 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                     mouthY = (upper.y() + lower.y()) / 2f
                     mouthUpdated = true
                 }
+                // FIX (Mouth Fire rewrite, part 1): real rising embers instead of
+                // a purely procedural shader shape - this is the actual "real
+                // particle physics... is what sells fire" upgrade discussed
+                // earlier. Spawned from a jittered x-position across roughly the
+                // mouth's width (landmarks 61/291 = left/right mouth corners) so
+                // embers don't all stream from one single point, only while the
+                // mouth is open enough to be worth it.
+                if (jawOpen > 0.15f && landmarks.size > 291) {
+                    val cornerL = landmarks[61].x()
+                    val cornerR = landmarks[291].x()
+                    val mouthHalfWidth = kotlin.math.abs(cornerR - cornerL) / 2f
+                    val emberCount = (1 + (jawOpen * 2.5f).toInt()).coerceAtMost(3)
+                    val emberX = mouthX
+                    val emberY = mouthY
+                    val emberHalfWidth = mouthHalfWidth
+                    renderHandler?.post {
+                        repeat(emberCount) {
+                            val jitterX = emberX + (kotlin.random.Random.nextFloat() - 0.5f) * emberHalfWidth * 1.6f
+                            mouthFireParticles.spawnBurst(jitterX, emberY, count = 1, speed = 0.25f, lifetimeSec = 0.7f)
+                        }
+                    }
+                }
             }
             else -> {}
+        }
+
+        // FIX: MOUTH_WORDS was completely unwired live. Same hysteresis logic
+        // as the bake path (only clear the active word once jawOpen drops well
+        // below trigger, only pick a new word while none is active - prevents
+        // flicker if jawOpen oscillates right around the threshold). Outside
+        // the when() above since it needs its own texture-rebuild side effect,
+        // not just a single intensityOverride float.
+        if (r.currentEffect == VisualEffect.MOUTH_WORDS) {
+            val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
+            val jawOpen = shapes?.firstOrNull { it.categoryName() == "jawOpen" }?.score() ?: 0f
+            val smileL = shapes?.firstOrNull { it.categoryName() == "mouthSmileLeft" }?.score() ?: 0f
+            val smileR = shapes?.firstOrNull { it.categoryName() == "mouthSmileRight" }?.score() ?: 0f
+            val smile = maxOf(smileL, smileR)
+            val browUp = shapes?.firstOrNull { it.categoryName() == "browInnerUp" }?.score() ?: 0f
+            if (currentMouthWord != null && jawOpen < 0.25f) {
+                currentMouthWord = null
+            } else if (currentMouthWord == null) {
+                currentMouthWord = when {
+                    jawOpen > 0.6f && smile > 0.3f -> "HAHA!"
+                    jawOpen > 0.5f && browUp > 0.4f -> "OMG!"
+                    jawOpen > 0.4f -> "WOW!"
+                    else -> null
+                }
+            }
+            if (landmarks.size > 14) {
+                val upper = landmarks[13]; val lower = landmarks[14]
+                mouthWordAnchorX = (upper.x() + lower.x()) / 2f
+                mouthWordAnchorY = (upper.y() + lower.y()) / 2f
+            }
+            val wordToBuild = currentMouthWord
+            if (wordToBuild != null && wordToBuild != lastBuiltMouthWord) {
+                lastBuiltMouthWord = wordToBuild
+                renderHandler?.post {
+                    if (mouthWordTextureId != 0) GLES20.glDeleteTextures(1, intArrayOf(mouthWordTextureId), 0)
+                    val color = when (wordToBuild) {
+                        "HAHA!" -> Color.rgb(255, 214, 51)
+                        "OMG!" -> Color.rgb(255, 71, 153)
+                        else -> Color.rgb(64, 200, 255)
+                    }
+                    val bubble = OverlayBuilder.buildWordBubble(wordToBuild, color, surfaceH * 0.06f)
+                    mouthWordTextureId = bubble.textureId
+                    mouthWordWidthPx = bubble.widthPx
+                    mouthWordHeightPx = bubble.heightPx
+                }
+            } else if (wordToBuild == null && lastBuiltMouthWord != null) {
+                lastBuiltMouthWord = null
+                renderHandler?.post {
+                    if (mouthWordTextureId != 0) { GLES20.glDeleteTextures(1, intArrayOf(mouthWordTextureId), 0); mouthWordTextureId = 0 }
+                }
+            }
+        }
+
+        // FIX: STICKERS_REACT was completely unwired live - same smile
+        // threshold + spawn-near-upper-right-of-face as the bake path.
+        if (r.currentEffect == VisualEffect.STICKERS_REACT) {
+            val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
+            val smileL = shapes?.firstOrNull { it.categoryName() == "mouthSmileLeft" }?.score() ?: 0f
+            val smileR = shapes?.firstOrNull { it.categoryName() == "mouthSmileRight" }?.score() ?: 0f
+            if (maxOf(smileL, smileR) > 0.35f) {
+                val spawnX = maxX - (maxX - minX) * 0.15f
+                val spawnY = minY + (maxY - minY) * 0.2f
+                renderHandler?.post { stickersParticles.spawnBurst(spawnX, spawnY, count = 1, speed = 0.12f, lifetimeSec = 1.2f) }
+            }
+        }
+
+        // FIX: FACE_MORPH was completely unwired live - same 2-frame throttle
+        // and mesh-bitmap build as the bake path (FaceMeshRenderer.buildMeshBitmap
+        // is a real per-vertex mesh build, not free - see its own doc for why
+        // throttling matters).
+        if (r.currentEffect == VisualEffect.FACE_MORPH) {
+            faceMorphFrameCounter++
+            if (faceMorphFrameCounter % 2 == 0) {
+                val w = surfaceW; val h = surfaceH
+                if (w > 0 && h > 0) {
+                    val meshBitmap = FaceMeshRenderer.buildMeshBitmap(w, h, landmarks, splitX = 0.5f)
+                    renderHandler?.post {
+                        r.uploadSecondaryTexture(meshBitmap)
+                        meshBitmap.recycle()
+                    }
+                }
+            }
         }
 
         // GAZE_TRAIL  -  outside the when() above (not blendshape-driven, doesn't
@@ -616,12 +1102,54 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             r.faceBox = floatArrayOf(minX, minY, maxX, maxY)
             intensityOverride?.let { r.effectIntensity = it }
             if (mouthUpdated) r.mouthCenter = floatArrayOf(mouthX, mouthY)
+            if (blinkTriggered) {
+                freezeActive = true
+                freezeStartSec = (System.nanoTime() - startTimeNs) / 1_000_000_000f
+            }
             if (gazeFlat != null) {
                 r.gazePoints = gazeFlat
                 r.gazeAges = gazeAgesArr!!
                 r.gazeCount = gazeCountVal
             }
         }
+    }
+
+    // NEW: mirror HandTracker's pure classification logic exactly (same
+    // tip-vs-knuckle-distance-from-wrist heuristic, same finger indices) -
+    // duplicated rather than instantiating a HandTracker here for the same
+    // reason headPoseDegreesFrom() duplicates FaceTracker's math above:
+    // HandTracker's constructor builds its OWN HandLandmarker model instance,
+    // and this view already has its own (liveHandLandmarker) - instantiating
+    // a second one would double the hand-tracking model's memory/init cost
+    // for zero benefit.
+    private fun isExtendedFrom(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>, tipIdx: Int): Boolean {
+        val wrist = lm[0]; val tip = lm[tipIdx]; val knuckle = lm[tipIdx - 3]
+        fun d(x1: Float, y1: Float, x2: Float, y2: Float) = kotlin.math.sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2))
+        return d(tip.x(), tip.y(), wrist.x(), wrist.y()) >= d(knuckle.x(), knuckle.y(), wrist.x(), wrist.y())
+    }
+    private fun isFistFrom(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Boolean =
+        !isExtendedFrom(lm, 8) && !isExtendedFrom(lm, 12) && !isExtendedFrom(lm, 16) && !isExtendedFrom(lm, 20)
+    private fun isOpenPalmFrom(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Boolean =
+        isExtendedFrom(lm, 8) && isExtendedFrom(lm, 12) && isExtendedFrom(lm, 16) && isExtendedFrom(lm, 20)
+    // NEW: mirrors HandTracker.classifyGesture() exactly (same four-finger-only
+    // classification, thumb deliberately excluded - see HandTracker's own doc
+    // for why). Local RPS label enum, not HandTracker.HandGesture, to avoid
+    // needing a HandTracker import just for one enum type.
+    private fun classifyGestureFrom(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): String {
+        val index = isExtendedFrom(lm, 8); val middle = isExtendedFrom(lm, 12)
+        val ring = isExtendedFrom(lm, 16); val pinky = isExtendedFrom(lm, 20)
+        return when {
+            !index && !middle && !ring && !pinky -> "ROCK"
+            index && middle && ring && pinky -> "PAPER"
+            index && middle && !ring && !pinky -> "SCISSORS"
+            else -> "UNKNOWN"
+        }
+    }
+    private fun palmCenterFrom(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Pair<Float, Float> {
+        val idxs = intArrayOf(0, 5, 9, 13, 17)
+        var sx = 0f; var sy = 0f
+        for (i in idxs) { sx += lm[i].x(); sy += lm[i].y() }
+        return (sx / idxs.size) to (sy / idxs.size)
     }
 
     private fun onHandResult(result: HandLandmarkerResult) {
@@ -667,6 +1195,172 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 r.fingerCount = fingerCountVal
             }
         }
+
+        // FIX: everything below is genuinely new - these six effects had zero
+        // live signal before. Uses ALL detected hands (result.landmarks()),
+        // not just hand[0] - the actual root cause for TWO_HAND_FRAME/
+        // CLAP_BURST, which structurally need both hands' positions and
+        // silently couldn't work no matter what else got wired.
+        val allHands = result.landmarks()
+        val nowMs = (System.nanoTime() - startTimeNs) / 1_000_000L
+
+        when (r.currentEffect) {
+            VisualEffect.FIST_BUMP_BOOM -> {
+                val first = allHands.firstOrNull()
+                if (first != null && isFistFrom(first)) {
+                    val palm = palmCenterFrom(first)
+                    renderHandler?.post {
+                        boomEnergy = 1f
+                        r.boomCenter = floatArrayOf(palm.first, palm.second)
+                    }
+                }
+            }
+            VisualEffect.TWO_HAND_FRAME -> {
+                if (allHands.size >= 2) {
+                    val c1 = palmCenterFrom(allHands[0])
+                    val c2 = palmCenterFrom(allHands[1])
+                    val spread = kotlin.math.abs(c1.first - c2.first) + kotlin.math.abs(c1.second - c2.second)
+                    val framed = spread > 0.15f
+                    val nowSec = nowMs / 1000f
+                    renderHandler?.post {
+                        r.frameRect = floatArrayOf(
+                            minOf(c1.first, c2.first), minOf(c1.second, c2.second),
+                            maxOf(c1.first, c2.first), maxOf(c1.second, c2.second)
+                        )
+                        r.effectIntensity = if (framed) 1f else 0f
+                        // Hold-to-confirm auto-capture (design decision: 1.2s
+                        // hold, not instant, to avoid a hand just passing
+                        // through frame accidentally triggering a photo).
+                        if (framed) {
+                            val start = frameHoldStartSec ?: nowSec.also { frameHoldStartSec = it }
+                            if (!frameCaptureRequested && nowSec - start >= frameHoldRequiredSec) {
+                                frameCaptureRequested = true
+                                val path = "${context.cacheDir.absolutePath}/two_hand_frame_${System.currentTimeMillis()}.jpg"
+                                capturePhotoAndEmit(path)
+                            }
+                        } else {
+                            frameHoldStartSec = null
+                            frameCaptureRequested = false
+                        }
+                    }
+                } else {
+                    renderHandler?.post {
+                        r.effectIntensity = 0f
+                        frameHoldStartSec = null
+                        frameCaptureRequested = false
+                    }
+                }
+            }
+            VisualEffect.THROW_CONFETTI -> {
+                val first = allHands.firstOrNull()
+                if (first != null) {
+                    val palm = palmCenterFrom(first)
+                    val prevPos = lastPalmPos
+                    val prevTs = lastPalmTimeMs
+                    if (prevPos != null && prevTs != null && nowMs > prevTs) {
+                        val dtSec = (nowMs - prevTs) / 1000f
+                        val dx = palm.first - prevPos.first
+                        val dy = palm.second - prevPos.second
+                        val velocity = kotlin.math.sqrt(dx * dx + dy * dy) / dtSec
+                        if (!confettiCooldown && velocity > 1.8f) {
+                            renderHandler?.post { confettiParticles.spawnBurst(palm.first, palm.second, count = 16, speed = 0.9f, lifetimeSec = 1.1f) }
+                            confettiCooldown = true
+                        } else if (confettiCooldown && velocity < 0.6f) {
+                            confettiCooldown = false
+                        }
+                    }
+                    lastPalmPos = palm
+                    lastPalmTimeMs = nowMs
+                }
+            }
+            VisualEffect.PALM_MAGIC -> {
+                val first = allHands.firstOrNull()
+                if (first != null && isOpenPalmFrom(first)) {
+                    val palm = palmCenterFrom(first)
+                    renderHandler?.post { palmMagicParticles.spawnBurst(palm.first, palm.second, count = 2, speed = 0.15f, lifetimeSec = 1.4f) }
+                }
+            }
+            VisualEffect.CLAP_BURST -> {
+                if (allHands.size >= 2) {
+                    val c1 = palmCenterFrom(allHands[0])
+                    val c2 = palmCenterFrom(allHands[1])
+                    val dist = kotlin.math.sqrt((c1.first - c2.first) * (c1.first - c2.first) + (c1.second - c2.second) * (c1.second - c2.second))
+                    val prevDist = lastClapDistance
+                    val closingFast = prevDist != null && prevDist > 0.25f && dist < 0.08f
+                    if (!clapCooldown && closingFast) {
+                        val midX = (c1.first + c2.first) / 2f
+                        val midY = (c1.second + c2.second) / 2f
+                        renderHandler?.post {
+                            clapBurstParticles.spawnBurst(midX, midY, count = 14, speed = 0.7f, lifetimeSec = 0.8f)
+                            r.boomCenter = floatArrayOf(midX, midY)
+                            clapBoomEnergy = 1f
+                        }
+                        clapCooldown = true
+                    } else if (clapCooldown && dist > 0.3f) {
+                        clapCooldown = false
+                    }
+                    lastClapDistance = dist
+                }
+            }
+            VisualEffect.TAP_SHOCKWAVE -> {
+                val first = allHands.firstOrNull()
+                if (first != null && first.size > 8) {
+                    val fingertip = first[8].x() to first[8].y()
+                    val prevPos = lastTapFingerPos
+                    val prevTs = lastTapTimeMs
+                    if (prevPos != null && prevTs != null && nowMs > prevTs) {
+                        val dtSec = (nowMs - prevTs) / 1000f
+                        val dx = fingertip.first - prevPos.first
+                        val dy = fingertip.second - prevPos.second
+                        val velocity = kotlin.math.sqrt(dx * dx + dy * dy) / dtSec
+                        if (!tapCooldown && velocity > 2.2f) {
+                            renderHandler?.post {
+                                r.boomCenter = floatArrayOf(fingertip.first, fingertip.second)
+                                tapBoomEnergy = 1f
+                            }
+                            tapCooldown = true
+                        } else if (tapCooldown && velocity < 0.6f) {
+                            tapCooldown = false
+                        }
+                    }
+                    lastTapFingerPos = fingertip
+                    lastTapTimeMs = nowMs
+                }
+            }
+            // FIX: was completely unwired live - same gesture->label mapping
+            // and "cache texture until label changes" pattern as MOUTH_WORDS,
+            // driven by hand shape instead of blendshapes. Clears the label
+            // texture the moment no hand is detected, same as the bake path,
+            // so a stale label doesn't sit frozen over nothing.
+            VisualEffect.ROCK_PAPER_SCISSORS -> {
+                val first = allHands.firstOrNull()
+                if (first != null) {
+                    val gesture = classifyGestureFrom(first)
+                    if (gesture != "UNKNOWN") currentRpsLabel = gesture
+                    val palm = palmCenterFrom(first)
+                    rpsAnchorX = palm.first
+                    rpsAnchorY = palm.second
+                    val labelToBuild = currentRpsLabel
+                    if (labelToBuild != null && labelToBuild != lastBuiltRpsLabel) {
+                        lastBuiltRpsLabel = labelToBuild
+                        renderHandler?.post {
+                            if (rpsTextureId != 0) GLES20.glDeleteTextures(1, intArrayOf(rpsTextureId), 0)
+                            val bubble = OverlayBuilder.buildWordBubble(labelToBuild, Color.rgb(255, 255, 255), surfaceH * 0.055f)
+                            rpsTextureId = bubble.textureId
+                            rpsWidthPx = bubble.widthPx
+                            rpsHeightPx = bubble.heightPx
+                        }
+                    }
+                } else if (rpsTextureId != 0 || currentRpsLabel != null) {
+                    currentRpsLabel = null
+                    lastBuiltRpsLabel = null
+                    renderHandler?.post {
+                        if (rpsTextureId != 0) { GLES20.glDeleteTextures(1, intArrayOf(rpsTextureId), 0); rpsTextureId = 0 }
+                    }
+                }
+            }
+            else -> {}
+        }
     }
 
     private fun onSegmentationResult(result: ImageSegmenterResult) {
@@ -703,6 +1397,8 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // ---- Teardown ----
 
     private fun stopEverything() {
+        liveAudioReader?.stop()
+        liveAudioReader = null
         renderHandler?.post {
             // FIX: if the view is torn down mid-recording (user backs out of
             // the camera screen while recording, for example), stop the

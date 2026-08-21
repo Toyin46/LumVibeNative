@@ -96,6 +96,14 @@ object GlUtil {
         return texId
     }
 
+    /** NEW — releases a texture id created by createExternalTexture()/createTexture2D().
+     * Needed by LiveEffectPreviewView's EGL teardown/rebuild path so the camera's
+     * external texture doesn't leak a GL texture object every time the surface
+     * is torn down and rebuilt (rotation, backgrounding, etc). */
+    fun deleteTexture(texId: Int) {
+        GLES20.glDeleteTextures(1, intArrayOf(texId), 0)
+    }
+
     /**
      * NEW — Phase 2 only. Reads back the currently-bound framebuffer as a Bitmap, so it
      * can be fed into MediaPipe's Face Landmarker (which needs a Bitmap/MPImage, not a

@@ -879,12 +879,28 @@ object EffectShaders {
     // falloff beyond the flame's hard boundary  -  same "ambient light halo"
     // technique that already made VOICE_HALO read as glowing rather than drawn.
     // Uniforms, wiring, and orientation are all unchanged from before.
+    // MOUTH_FIRE rewrite (part 2 - fragment shader). Two real changes from the
+    // original single-band version: (1) the flame body now blends across 4
+    // color stops (white-hot core -> yellow -> orange -> deep red edge)
+    // instead of one flat core/outer mix - a single lerp reads as a flat
+    // painted shape no matter how good the silhouette is, real fire's color
+    // gradient is the thing that actually sells "hot"; (2) real embers -
+    // uParticlePos/Life/ColorIdx are the SAME uniforms/upload path
+    // throwConfetti established (FrameRenderer's upload is generic per-shader,
+    // guarded by glGetUniformLocation >= 0, so reusing the names here is safe
+    // and free). Embers are colored by their OWN remaining life (white-hot
+    // when freshly spawned, cooling through yellow/orange/red as they rise and
+    // fade) rather than a discrete palette pick - that's what makes them read
+    // as individual cooling sparks instead of confetti-colored dots.
     private val mouthFire = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
         uniform vec2 uMouthCenter; // normalized 0..1
         uniform float uIntensity;  // repurposed: jawOpen score 0..1
         uniform float uTime;
+        uniform vec2 uParticlePos[$PARTICLE_MAX];
+        uniform float uParticleLife[$PARTICLE_MAX];
+        uniform int uParticleCount;
 
         float hash(vec2 p) {
             return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -901,18 +917,41 @@ object EffectShaders {
             return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
         }
 
+        // 2-octave FBM (was a single valueNoise() sample) - one octave of noise
+        // wobbles the whole flame as a rigid unit; layering a finer, faster
+        // second octave on top is what gives real fire its "licking/flickering"
+        // look instead of the whole silhouette just swaying side to side.
+        float flameNoise(vec2 p) {
+            float n = valueNoise(p) * 0.65;
+            n += valueNoise(p * 2.3 + vec2(0.0, uTime * 1.7)) * 0.35;
+            return n;
+        }
+
+        vec3 flameGradient(float t) {
+            // t: 0 at the mouth (hottest), 1 at the tip (coolest). 4 stops
+            // instead of the original 2 - white-hot base, through yellow and
+            // orange, cooling to a deep red at the very tip.
+            vec3 white = vec3(1.0, 0.98, 0.85);
+            vec3 yellow = vec3(1.0, 0.85, 0.25);
+            vec3 orange = vec3(1.0, 0.45, 0.05);
+            vec3 red = vec3(0.65, 0.08, 0.02);
+            if (t < 0.25) return mix(white, yellow, t / 0.25);
+            if (t < 0.6) return mix(yellow, orange, (t - 0.25) / 0.35);
+            return mix(orange, red, (t - 0.6) / 0.4);
+        }
+
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
             float openAmount = clamp(uIntensity, 0.0, 1.0);
 
-            float wobble = (valueNoise(vec2(vTexCoord.x * 8.0, uTime * 6.0)) - 0.5) * 0.05;
+            float wobble = (flameNoise(vec2(vTexCoord.x * 8.0, uTime * 6.0)) - 0.5) * 0.05;
             vec2 flameSpace = vec2(vTexCoord.x - uMouthCenter.x - wobble, vTexCoord.y - uMouthCenter.y);
 
             float height = 0.14 + openAmount * 0.16;
             float width = 0.05 + openAmount * 0.03;
             float t = clamp(-flameSpace.y / height, 0.0, 1.0); // 0 at mouth, 1 at tip
             float coreWidth = width * (1.0 - t) * (1.0 - t);
-            float edgeNoise = valueNoise(vec2(vTexCoord.x * 12.0, vTexCoord.y * 12.0 - uTime * 4.0)) * 0.02;
+            float edgeNoise = flameNoise(vec2(vTexCoord.x * 12.0, vTexCoord.y * 12.0 - uTime * 4.0)) * 0.02;
 
             // Soft-edged boundary (smoothstep, ~0.015 falloff band) instead of a
             // hard step() cutoff  -  this alone removes most of the "cutout" look.
@@ -922,9 +961,7 @@ object EffectShaders {
             float belowTip = smoothstep(-height - 0.02, -height + 0.02, flameSpace.y);
             float inFlame = withinWidth * aboveMouth * belowTip;
 
-            vec3 flameCore = vec3(1.0, 0.95, 0.6);
-            vec3 flameOuter = vec3(1.0, 0.45, 0.05);
-            vec3 flameColor = mix(flameOuter, flameCore, 1.0 - t);
+            vec3 flameColor = flameGradient(t);
             float flameAlpha = inFlame * openAmount;
 
             // Ambient glow beyond the flame's own silhouette  -  distance-based
@@ -934,7 +971,22 @@ object EffectShaders {
             float glow = exp(-distFromCore * distFromCore * 400.0) * aboveMouth * belowTip;
             vec3 glowColor = vec3(1.0, 0.5, 0.1) * glow * openAmount * 0.35;
 
-            gl_FragColor = vec4(base.rgb + flameColor * flameAlpha + glowColor, base.a);
+            vec3 addColor = flameColor * flameAlpha + glowColor;
+
+            // Real embers - small soft circles, colored/sized by their own
+            // remaining life so each one visibly cools and shrinks as it rises,
+            // rather than every ember looking identical until it just vanishes.
+            for (int i = 0; i < $PARTICLE_MAX; i++) {
+                if (i >= uParticleCount) break;
+                float life = uParticleLife[i]; // 1 = just spawned, 0 = about to fade out
+                float d = distance(vTexCoord, uParticlePos[i]);
+                float radius = mix(0.003, 0.009, life);
+                float ember = smoothstep(radius, radius * 0.3, d);
+                vec3 emberColor = flameGradient(1.0 - life); // hottest when freshly spawned
+                addColor += emberColor * ember * life * 0.9;
+            }
+
+            gl_FragColor = vec4(base.rgb + addColor, base.a);
         }
     """.trimIndent()
 
