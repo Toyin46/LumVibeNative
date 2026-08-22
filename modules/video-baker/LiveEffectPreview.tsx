@@ -19,7 +19,7 @@
 // Expo SDK version - see LiveEffectPreviewModule.kt's own note on this).
 
 import { requireNativeViewManager, requireNativeModule } from 'expo-modules-core';
-import React, { forwardRef, useImperativeHandle, useRef } from 'react';
+import React, { forwardRef, useImperativeHandle, useRef, useEffect } from 'react';
 import { findNodeHandle, ViewStyle } from 'react-native';
 
 export interface LiveEffectPreviewProps {
@@ -89,19 +89,28 @@ export const LiveEffectPreview = forwardRef<LiveEffectPreviewHandle, LiveEffectP
       },
     }), []);
 
-    // NEW: Events("onFrameCaptured") on the native side (see
-    // LiveEffectPreviewModule.kt) delivers { path: string } wrapped in the
-    // standard RN synthetic-event shape, i.e. event.nativeEvent.path - not
-    // the raw string. Unwrapped here so the prop this component exposes is a
-    // plain (filePath: string) => void, matching the doc comment above,
-    // rather than leaking that wrapping detail out to callers. FLAG FOR
-    // ON-DEVICE VERIFICATION alongside the matching native-side comments:
-    // confirm event.nativeEvent is actually where the payload lands for your
-    // installed expo-modules-core version before relying on this.
-    const handleFrameCaptured = onFrameCaptured
-      ? (event: { nativeEvent: { path: string } }) => onFrameCaptured(event.nativeEvent.path)
-      : undefined;
+    // FIX: originally wired as a per-view prop event (event.nativeEvent.path),
+    // matching the native side's original EventDispatcher approach - but that
+    // required LiveEffectPreviewView to extend ExpoView, which it doesn't
+    // (confirmed against Expo's own docs, not assumed), so it was switched to
+    // sendEvent() on the native side instead. sendEvent() is a MODULE-level
+    // event, not a view-level one, so this needs to be a module event
+    // subscription (addListener/removeListeners - the standard Expo Modules
+    // EventEmitter pattern, automatically available on any module that
+    // declares Events(...) at its top level) instead of a view prop.
+    // CAVEAT: being module-level, not view-level, this fires for ANY mounted
+    // LiveEffectPreview instance, not specifically this one - fine for your
+    // single live-camera-screen use case, but worth knowing if you ever
+    // render more than one of these at once.
+    useEffect(() => {
+      if (!onFrameCaptured) return;
+      const subscription = NativeLiveEffectPreviewModule.addListener(
+        'onFrameCaptured',
+        (event: { path: string }) => onFrameCaptured(event.path)
+      );
+      return () => subscription.remove();
+    }, [onFrameCaptured]);
 
-    return <NativeView {...nativeProps} onFrameCaptured={handleFrameCaptured} ref={nativeRef} />;
+    return <NativeView {...nativeProps} ref={nativeRef} />;
   }
 ); 

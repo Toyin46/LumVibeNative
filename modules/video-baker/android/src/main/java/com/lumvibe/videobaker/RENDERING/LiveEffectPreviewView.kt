@@ -24,7 +24,6 @@ import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenterResult
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import java.nio.ByteBuffer
 import com.google.mediapipe.framework.image.BitmapImageBuilder
-import expo.modules.kotlin.viewevent.EventDispatcher
 
 /**
 * Live camera preview with the SAME effect shaders as VideoTranscoder's bake
@@ -81,17 +80,16 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // never reaches the renderer at all.
     private var pendingEffect: VisualEffect = VisualEffect.NONE
 
-    // NEW: Two Hand Frame auto-capture event, fired when the hold-to-confirm
-    // gesture completes (see onHandResult's TWO_HAND_FRAME case). FLAG FOR
-    // ON-DEVICE VERIFICATION, same caution as the recording feature's own
-    // comments below: this view is a plain SurfaceView, not an ExpoView
-    // subclass, and EventDispatcher's exact requirements can vary by installed
-    // expo-modules-core version. If this doesn't compile/fire as-is, the
-    // fallback is a plain settable callback field instead
-    // (var onFrameCapturedCallback: ((String) -> Unit)? = null) with the
-    // module's findView() pattern (already used by startLiveRecording below)
-    // registering it - less idiomatic but guaranteed to work with any version.
-    private val onFrameCaptured by EventDispatcher<Map<String, String>>()
+    // NEW: Two Hand Frame auto-capture. FIX: originally used expo-modules-
+    // kotlin's EventDispatcher property delegate, but checked against Expo's
+    // own documentation/examples and every one of them requires the
+    // enclosing class to extend ExpoView(context, appContext) - this class
+    // extends plain SurfaceView(context), so that was a real, confirmed
+    // mismatch, not a hypothetical risk. Replaced with a plain callback field
+    // instead; LiveEffectPreviewModule.kt wires it to sendEvent(), which only
+    // needs appContext (already proven accessible/working in that file's
+    // AsyncFunctions) and carries no ExpoView requirement at all.
+    var onFrameCapturedListener: ((Map<String, String>) -> Unit)? = null
 
     // NEW: Two Hand Frame auto-capture handoff. FIX: originally read pixels via
     // its own separately-queued renderHandler.post call, which could run AFTER
@@ -143,6 +141,22 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     private var setupSurface: Surface? = null
     private var setupW = 0
     private var setupH = 0
+    // FIX (real root cause of the eglMakeCurrent crash from device testing):
+    // openCamera()'s callbacks (onOpened, onConfigured) run on cameraHandler's
+    // OWN thread, fully async, with zero coordination against setupEgl()/
+    // teardownEgl() on renderHandler's thread. If a resize/rotation triggers
+    // a second setupEgl() cycle while the FIRST camera is still mid-opening,
+    // that stale callback can land AFTER teardown has already moved on -
+    // assigning a now-irrelevant camera device into live fields and racing
+    // against the new EGL surface. My earlier fix (the no-op guard + full
+    // teardown-before-rebuild above) closed the "double-create without
+    // releasing" problem, but not this one - this is a genuinely different
+    // race. Standard fix for this exact class of Camera2 bug: a monotonic
+    // generation counter. Every real setupEgl() cycle gets its own id;
+    // any async camera callback that fires after a newer cycle has already
+    // started checks its stamped generation against the current one and
+    // discards itself if stale, instead of touching shared state.
+    @Volatile private var setupGeneration = 0
 
     // ---- Recording (see LiveRecorder.kt for why this is a separate class) ----
     private var liveRecorder: LiveRecorder? = null
@@ -390,7 +404,13 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         }
         cameraSurface = Surface(cameraSurfaceTexture)
 
-        openCamera()
+        // NEW: mint a fresh generation for the camera this cycle is about to
+        // open, and pass it through - openCamera()'s async callbacks stamp
+        // themselves with this value and check it against setupGeneration
+        // before touching anything, so a stale callback from a superseded
+        // cycle can't corrupt current state.
+        val myGeneration = ++setupGeneration
+        openCamera(myGeneration)
     }
 
     // FIX (EGL crash): released here, BEFORE setupEgl() creates the
@@ -400,6 +420,12 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // MediaPipe trackers/threads (those don't depend on the display surface
     // at all and stay alive across a resize).
     private fun teardownEgl() {
+        // NEW: bump the generation FIRST, before releasing anything below -
+        // any openCamera() callback already in flight for the OLD generation
+        // that fires from this point on (even mid-teardown) will see its
+        // stamped generation no longer matches and discard itself instead of
+        // racing the teardown/rebuild happening here.
+        setupGeneration++
         captureSession?.close()
         captureSession = null
         cameraDevice?.close()
@@ -485,15 +511,20 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
     // ---- Camera2 ----
 
-    private fun openCamera() {
+    private fun openCamera(generation: Int) {
         cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val camId = findCameraId(pendingFacing) ?: return
         try {
             @Suppress("MissingPermission") // caller's RN layer must have already requested CAMERA permission
             cameraManager!!.openCamera(camId, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
+                    // FIX: stale-generation guard - see setupGeneration's doc.
+                    // If a newer setupEgl() cycle has already started, this
+                    // device belongs to a torn-down cycle; close it and stop,
+                    // don't assign it into cameraDevice/start a session.
+                    if (generation != setupGeneration) { device.close(); return }
                     cameraDevice = device
-                    startCaptureSession(device)
+                    startCaptureSession(device, generation)
                 }
                 override fun onDisconnected(device: CameraDevice) { device.close() }
                 override fun onError(device: CameraDevice, error: Int) { device.close() }
@@ -510,13 +541,15 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         }
     }
 
-    private fun startCaptureSession(device: CameraDevice) {
+    private fun startCaptureSession(device: CameraDevice, generation: Int) {
+        if (generation != setupGeneration) { return } // stale - superseded before this even started
         val target = cameraSurface ?: return
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         builder.addTarget(target)
 
         device.createCaptureSession(listOf(target), object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
+                if (generation != setupGeneration) { session.close(); return } // same stale-guard, see above
                 captureSession = session
                 session.setRepeatingRequest(builder.build(), null, cameraHandler)
             }
@@ -531,7 +564,10 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         cameraDevice?.close()
         captureSession = null
         cameraDevice = null
-        openCamera()
+        // Same generation discipline as setupEgl() - this is a fresh camera
+        // cycle too (used for the front/back flip), so it needs its own id.
+        val myGeneration = ++setupGeneration
+        openCamera(myGeneration)
     }
 
     // ---- Render loop (driven by camera's onFrameAvailable, not a fixed timer  -
@@ -649,7 +685,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                         java.io.FileOutputStream(path).use { out ->
                             bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
                         }
-                        post { onFrameCaptured(mapOf("path" to path)) }
+                        post { onFrameCapturedListener?.invoke(mapOf("path" to path)) }
                     } catch (e: Exception) {
                         android.util.Log.e("LiveEffectPreview", "Two Hand Frame: JPEG encode/save failed", e)
                     } finally {
@@ -1400,6 +1436,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         liveAudioReader?.stop()
         liveAudioReader = null
         renderHandler?.post {
+            // FIX: same stale-callback protection as teardownEgl() above -
+            // without this, an async openCamera() callback already in flight
+            // could still fire after this teardown and assign a live camera
+            // device into fields this block just closed.
+            setupGeneration++
             // FIX: if the view is torn down mid-recording (user backs out of
             // the camera screen while recording, for example), stop the
             // recorder here too so its encoder/muxer/audio thread don't leak.
@@ -1412,11 +1453,17 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 liveRecorder = null
             }
             captureSession?.close()
+            captureSession = null
             cameraDevice?.close()
+            cameraDevice = null
             cameraSurface?.release()
+            cameraSurface = null
             cameraSurfaceTexture?.release()
+            cameraSurfaceTexture = null
             eglSurface?.let { eglCore?.releaseSurface(it) }
+            eglSurface = null
             eglCore?.release()
+            eglCore = null
         }
         liveFaceLandmarker?.close()
         liveHandLandmarker?.close()

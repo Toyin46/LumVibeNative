@@ -20,20 +20,40 @@ class LiveEffectPreviewModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("LiveEffectPreview")
 
-        View(LiveEffectPreviewView::class) {
-            // NEW: Two Hand Frame's auto-capture. FLAG FOR ON-DEVICE
-            // VERIFICATION alongside the matching comment in
-            // LiveEffectPreviewView.kt - confirm this event actually reaches
-            // your onFrameCaptured handler in LiveEffectPreview.tsx once you
-            // add one; the JS side doesn't listen for this yet.
-            Events("onFrameCaptured")
+        // FIX (replacing the EventDispatcher approach from earlier - checked
+        // against Expo's own docs/examples and every one of them declares
+        // EventDispatcher inside a class extending ExpoView(context,
+        // appContext). LiveEffectPreviewView extends plain SurfaceView(context),
+        // not ExpoView - that mismatch was a real, confirmed compile risk, not
+        // a hypothetical one, so given what a failed build costs you right
+        // now I'm not leaving it as "verify on device." Switched to
+        // sendEvent(), a module-level event emission that only needs
+        // appContext - which this file already proves is accessible and
+        // working, since the AsyncFunctions below already call
+        // appContext.findView successfully. Declared at the module's top
+        // level (not inside View{} - that's specifically for ExpoView's
+        // EventDispatcher mechanism) since this is module-scoped, not
+        // view-scoped.
+        Events("onFrameCaptured")
 
+        View(LiveEffectPreviewView::class) {
             // create.tsx passes the same fx.id string it already uses for
             // FX_LIST / glShaderEffect (e.g. "fx_gl_mood_ring")  -  VisualEffect.fromKey
             // is the exact same lookup EffectShaders/VideoTranscoder use for baking,
             // so a live preview key and a bake-time key are guaranteed to mean the
             // same effect.
             Prop("effect") { view: LiveEffectPreviewView, key: String? ->
+                // FIX: wires the view's plain callback field to this module's
+                // sendEvent the first time ANY prop is set on this view
+                // instance - piggybacked on this specific setter because it's
+                // the one call path this codebase already proves fires
+                // reliably per view (the entire effect-selection system
+                // already depends on it), rather than a separate view-
+                // lifecycle hook I couldn't verify exists in your installed
+                // SDK version.
+                if (view.onFrameCapturedListener == null) {
+                    view.onFrameCapturedListener = { data -> sendEvent("onFrameCaptured", data) }
+                }
                 view.setEffect(VisualEffect.fromKey(key))
             }
 
