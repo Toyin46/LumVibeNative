@@ -49,7 +49,26 @@ object FaceMeshRenderer {
         val bitmap = Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
-        val filtered = landmarks.filterIndexed { i, lm -> i % STRIDE == 0 && lm.x() < splitX }
+        // FIX (confirmed real bug from your screenshot - the mesh only
+        // covered a small chunk near the mouth/chin, not "half the face"):
+        // splitX was compared directly against each landmark's x() in
+        // CAMERA-FRAME coordinate space (0..1 across the WHOLE image), not
+        // relative to where the face itself actually sits. A face is rarely
+        // dead-center in a handheld selfie, so "x < 0.5" was grabbing
+        // whatever arbitrary sliver of the face happened to fall left of the
+        // frame's exact horizontal center - could be a tenth of the face,
+        // could be nearly all of it, depending entirely on framing. Fixed by
+        // computing the split relative to the FACE'S OWN bounding box, so
+        // splitX=0.5 now genuinely means "the middle of the face," always,
+        // regardless of where the face sits in the camera frame. Both call
+        // sites (live + bake) already pass 0.5f expecting exactly that
+        // meaning, so this fix applies to both without touching either.
+        if (landmarks.isEmpty()) return bitmap
+        val faceMinX = landmarks.minOf { it.x() }
+        val faceMaxX = landmarks.maxOf { it.x() }
+        val faceSplitThreshold = faceMinX + (faceMaxX - faceMinX) * splitX
+
+        val filtered = landmarks.filterIndexed { i, lm -> i % STRIDE == 0 && lm.x() < faceSplitThreshold }
         if (filtered.isEmpty()) return bitmap
 
         val pxPoints = filtered.map { it.x() * width to it.y() * height }

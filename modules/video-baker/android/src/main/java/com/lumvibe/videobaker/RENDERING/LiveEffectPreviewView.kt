@@ -98,9 +98,23 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // just a flag; the actual read happens at drawFrame's one safe pre-swap
     // point (see the pendingPhotoCapturePath check there).
     @Volatile private var pendingPhotoCapturePath: String? = null
+    // NEW: JS-initiated capture (Photo mode's shutter button) needs to await
+    // an actual result, unlike the gesture-triggered path above which just
+    // fires an event. Same underlying read, just also resolves/rejects this
+    // when present, instead of only emitting onFrameCaptured.
+    @Volatile private var pendingPhotoCapturePromise: expo.modules.kotlin.Promise? = null
 
     private fun capturePhotoAndEmit(outputPath: String) {
         pendingPhotoCapturePath = outputPath
+    }
+
+    /** JS-initiated single-photo capture, used by Photo mode's shutter button
+     * when a GL effect is active (the regular Camera component isn't mounted
+     * in that case, so its own takePhoto() can't be used - see create.tsx's
+     * handleTakePhoto for the full story on why this exists). */
+    fun capturePhotoNow(outputPath: String, promise: expo.modules.kotlin.Promise) {
+        pendingPhotoCapturePath = outputPath
+        pendingPhotoCapturePromise = promise
     }
 
     /** Same VisualEffect enum EffectShaders/FrameRenderer already use  -  no new effect vocabulary. */
@@ -247,11 +261,15 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     private var lastPalmPos: Pair<Float, Float>? = null
     private var lastPalmTimeMs: Long? = null
     private var confettiCooldown = false
-    private var lastTapFingerPos: Pair<Float, Float>? = null
+    private var lastTapFingerPos: Triple<Float, Float, Float>? = null
     private var lastTapTimeMs: Long? = null
     private var tapCooldown = false
     private var lastClapDistance: Float? = null
     private var clapCooldown = false
+    // FIX: FIST_BUMP_BOOM was missing this entirely (unlike its siblings
+    // CLAP_BURST/TAP_SHOCKWAVE, which already had a cooldown gate) - see the
+    // fix at its actual trigger site for what this caused.
+    private var fistCooldown = false
     // TWO_HAND_FRAME auto-capture: per your call, forming the frame triggers a
     // photo, but only after a deliberate hold (not the instant hands line up)
     // to avoid false-positive captures from a hand just passing through frame.
@@ -394,6 +412,22 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // means the mask simply reads as "no effect yet" for those first few frames
         // instead of corrupting the pipeline.
         renderer?.ensureSecondaryTexture()
+        // FIX (major, confirmed root cause of the Neon Edge/Ink Wash "crack"
+        // pattern, and part of why Aura Glow/Depth Bloom/Split Prism looked
+        // unpolished): setFrameSize() was NEVER called anywhere on the live
+        // path - only VideoTranscoder's bake path called it. frameWidth/
+        // frameHeight stayed stuck at FrameRenderer's 1x1 DEFAULT for the
+        // entire live session. Every shader that reads uTexelSize (all 5
+        // effects above) was computing texel offsets of a full 1.0/1.0 -
+        // sampling a full image-width away for every single "neighbor" pixel,
+        // instead of one real pixel away. That's the actual cause of the
+        // grid/moire pattern: wildly out-of-range coordinates on an external
+        // OES camera texture is undefined-behavior territory on real GPU
+        // drivers, and this is what it looks like on your device. Using
+        // surfaceW/surfaceH here matches exactly what setDefaultBufferSize
+        // configures the camera capture buffer to below, so this is the
+        // correct real size, not an approximation.
+        renderer?.setFrameSize(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))
         // Apply whatever effect was requested before the renderer existed  -  see
         // pendingEffect's doc for why this line is the actual fix, not just belt-and-braces.
         renderer?.setEffect(pendingEffect)
@@ -649,12 +683,18 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             r.drawFrozenFrame(1f + punch * 0.15f)
         } else {
             if (freezeActive) freezeActive = false // hold just ended this frame
-            // FIX: capture happens every frame BLINK_FREEZE is selected (cheap -
-            // just grabs the current frame into FrameRenderer's own buffer), same
-            // as the bake path, so that whichever frame the blink actually lands
-            // on already has itself captured and ready the instant it triggers.
-            if (r.currentEffect == VisualEffect.BLINK_FREEZE) r.captureFreezeFrame()
+            // FIX (confirmed from your screenshot showing a flat color instead
+            // of a frozen photo — this was actually TWO stacked bugs, not one):
+            // (1) captureFreezeFrame() was called BEFORE drawEffectFrame(), so
+            // glCopyTexImage2D grabbed whatever stale/empty content was
+            // already in the framebuffer instead of the real camera image —
+            // fixed by reordering below. (2) glCopyTexImage2D's copy region
+            // uses frameWidth/frameHeight, which were stuck at FrameRenderer's
+            // 1x1 default the entire live session (see the setFrameSize fix
+            // above) — meaning even with (1) fixed, it would have copied a
+            // single 1x1 pixel, not the full photo. Both are now fixed.
             r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+            if (r.currentEffect == VisualEffect.BLINK_FREEZE) r.captureFreezeFrame()
             // FIX: MOUTH_WORDS/ROCK_PAPER_SCISSORS overlay draw - was never
             // drawn live even on the rare chance the texture got built, since
             // nothing called drawWatermarkAt for either. Same reused
@@ -678,6 +718,8 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // trackingHandler so a slow encode never stalls the render loop.
         pendingPhotoCapturePath?.let { path ->
             pendingPhotoCapturePath = null
+            val promise = pendingPhotoCapturePromise
+            pendingPhotoCapturePromise = null
             try {
                 val bitmap = GlUtil.readPixelsAsBitmap(surfaceW, surfaceH)
                 trackingHandler?.post {
@@ -685,15 +727,20 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                         java.io.FileOutputStream(path).use { out ->
                             bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
                         }
-                        post { onFrameCapturedListener?.invoke(mapOf("path" to path)) }
+                        post {
+                            onFrameCapturedListener?.invoke(mapOf("path" to path))
+                            promise?.resolve(path)
+                        }
                     } catch (e: Exception) {
-                        android.util.Log.e("LiveEffectPreview", "Two Hand Frame: JPEG encode/save failed", e)
+                        android.util.Log.e("LiveEffectPreview", "Photo capture: JPEG encode/save failed", e)
+                        post { promise?.reject("ERR_PHOTO_SAVE", "Failed to encode/save photo", e) }
                     } finally {
                         bitmap.recycle()
                     }
                 }
             } catch (e: Exception) {
-                android.util.Log.e("LiveEffectPreview", "Two Hand Frame: pixel readback failed", e)
+                android.util.Log.e("LiveEffectPreview", "Photo capture: pixel readback failed", e)
+                promise?.reject("ERR_PHOTO_READBACK", "Failed to read frame pixels", e)
             }
         }
         // most EGL drivers the back buffer's contents become UNDEFINED right
@@ -835,9 +882,37 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val ts = now
         trackingHandler?.post {
             val mpImage = BitmapImageBuilder(bitmap).build()
-            if (wantsFace) liveFaceLandmarker?.detectAsync(mpImage, ts)
-            if (wantsHand) liveHandLandmarker?.detectAsync(mpImage, ts)
-            if (wantsSeg) liveSegmenter?.segmentAsync(mpImage, ts)
+            // FIX (major finding, explains two symptoms at once): none of
+            // these three calls had any error handling. MediaPipe's
+            // "failed precondition" exception (the one from your crash
+            // screenshot) throws SYNCHRONOUSLY from inside detectAsync/
+            // segmentAsync, not from some later callback - an uncaught
+            // exception on a background HandlerThread kills that thread's
+            // Looper PERMANENTLY. Once that happens, this entire posted
+            // block never runs again for the rest of the session, which
+            // means tracking-dependent effects (Gold Skin's segmentation
+            // mask, any face/hand effect) silently stop receiving updates
+            // forever - exactly "shows the effect for a second, then
+            // reverts to plain camera." It also explains why the crash was
+            // intermittent: sometimes the exception propagates all the way
+            // up and visibly crashes the app; other times it just silently
+            // kills this one thread instead, with no visible error at all.
+            // Wrapping each call individually so one tracker's failure
+            // can't take down the others, and so a single bad frame just
+            // gets logged and skipped instead of permanently breaking
+            // tracking for the rest of the session.
+            if (wantsFace) {
+                try { liveFaceLandmarker?.detectAsync(mpImage, ts) }
+                catch (e: Exception) { android.util.Log.e("LiveEffectPreview", "face detectAsync failed, skipping this frame", e) }
+            }
+            if (wantsHand) {
+                try { liveHandLandmarker?.detectAsync(mpImage, ts) }
+                catch (e: Exception) { android.util.Log.e("LiveEffectPreview", "hand detectAsync failed, skipping this frame", e) }
+            }
+            if (wantsSeg) {
+                try { liveSegmenter?.segmentAsync(mpImage, ts) }
+                catch (e: Exception) { android.util.Log.e("LiveEffectPreview", "segmentAsync failed, skipping this frame", e) }
+            }
         }
     }
 
@@ -1243,12 +1318,23 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         when (r.currentEffect) {
             VisualEffect.FIST_BUMP_BOOM -> {
                 val first = allHands.firstOrNull()
-                if (first != null && isFistFrom(first)) {
-                    val palm = palmCenterFrom(first)
+                val isFist = first != null && isFistFrom(first)
+                // FIX: was re-triggering boomEnergy=1f on EVERY tracking tick
+                // the fist stayed closed - since that happens roughly every
+                // 70-100ms, faster than the energy could meaningfully decay,
+                // this meant a held fist looked like a constant, sustained
+                // glow instead of one sharp impact on the moment the fist
+                // closes. Same edge-trigger + cooldown pattern its siblings
+                // (CLAP_BURST/TAP_SHOCKWAVE) already correctly use.
+                if (isFist && !fistCooldown) {
+                    val palm = palmCenterFrom(first!!)
                     renderHandler?.post {
                         boomEnergy = 1f
                         r.boomCenter = floatArrayOf(palm.first, palm.second)
                     }
+                    fistCooldown = true
+                } else if (!isFist) {
+                    fistCooldown = false
                 }
             }
             VisualEffect.TWO_HAND_FRAME -> {
@@ -1311,9 +1397,28 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             }
             VisualEffect.PALM_MAGIC -> {
                 val first = allHands.firstOrNull()
-                if (first != null && isOpenPalmFrom(first)) {
+                if (first != null && isOpenPalmFrom(first) && first.size > 20) {
+                    // FIX (real coverage bug you reported): was always
+                    // spawning from a single palm-center point, which is why
+                    // it read as "one touch" instead of covering the hand.
+                    // ParticleSystem has a shared, fixed particle budget
+                    // across all effects (can't just spawn far more per
+                    // tick without exceeding it and causing thrash/eviction),
+                    // so the real fix is spreading spawns ACROSS the palm and
+                    // all 5 fingertips over successive ticks, rather than
+                    // clustering every spawn at one point - same total spawn
+                    // rate, genuinely covers the whole hand shape over time.
                     val palm = palmCenterFrom(first)
-                    renderHandler?.post { palmMagicParticles.spawnBurst(palm.first, palm.second, count = 2, speed = 0.15f, lifetimeSec = 1.4f) }
+                    val handPoints = listOf(
+                        palm,
+                        first[4].x() to first[4].y(),   // thumb tip
+                        first[8].x() to first[8].y(),   // index tip
+                        first[12].x() to first[12].y(), // middle tip
+                        first[16].x() to first[16].y(), // ring tip
+                        first[20].x() to first[20].y()  // pinky tip
+                    )
+                    val spawnPoint = handPoints.random()
+                    renderHandler?.post { palmMagicParticles.spawnBurst(spawnPoint.first, spawnPoint.second, count = 2, speed = 0.12f, lifetimeSec = 1.4f) }
                 }
             }
             VisualEffect.CLAP_BURST -> {
@@ -1322,7 +1427,13 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                     val c2 = palmCenterFrom(allHands[1])
                     val dist = kotlin.math.sqrt((c1.first - c2.first) * (c1.first - c2.first) + (c1.second - c2.second) * (c1.second - c2.second))
                     val prevDist = lastClapDistance
-                    val closingFast = prevDist != null && prevDist > 0.25f && dist < 0.08f
+                    // FIX: tightened from >0.25/<0.08 - at a sparse ~70-100ms
+                    // tracking rate, the exact instant hands are closest can
+                    // easily fall BETWEEN two samples, meaning neither one ever
+                    // sees the "very close" moment. Widened the window so a
+                    // real clap is much more likely to be caught by at least
+                    // one sample.
+                    val closingFast = prevDist != null && prevDist > 0.2f && dist < 0.12f
                     if (!clapCooldown && closingFast) {
                         val midX = (c1.first + c2.first) / 2f
                         val midY = (c1.second + c2.second) / 2f
@@ -1341,21 +1452,31 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             VisualEffect.TAP_SHOCKWAVE -> {
                 val first = allHands.firstOrNull()
                 if (first != null && first.size > 8) {
-                    val fingertip = first[8].x() to first[8].y()
+                    val tip = first[8]
+                    val fingertip = Triple(tip.x(), tip.y(), tip.z())
                     val prevPos = lastTapFingerPos
                     val prevTs = lastTapTimeMs
                     if (prevPos != null && prevTs != null && nowMs > prevTs) {
                         val dtSec = (nowMs - prevTs) / 1000f
                         val dx = fingertip.first - prevPos.first
                         val dy = fingertip.second - prevPos.second
-                        val velocity = kotlin.math.sqrt(dx * dx + dy * dy) / dtSec
-                        if (!tapCooldown && velocity > 2.2f) {
+                        val dz = fingertip.third - prevPos.third
+                        val lateralVelocity = kotlin.math.sqrt(dx * dx + dy * dy) / dtSec
+                        // FIX: a real "tap"/poke is motion TOWARD the camera
+                        // (Z-depth), not sideways - the original code could only
+                        // ever catch a fast horizontal/vertical swipe, never an
+                        // actual poke, since a poke barely moves in X/Y at all.
+                        // depthVelocity catches the poke directly; lateralVelocity
+                        // is kept (threshold loosened slightly) as a fallback for
+                        // a fast swipe-style tap too.
+                        val depthVelocity = kotlin.math.abs(dz) / dtSec
+                        if (!tapCooldown && (lateralVelocity > 1.6f || depthVelocity > 0.9f)) {
                             renderHandler?.post {
                                 r.boomCenter = floatArrayOf(fingertip.first, fingertip.second)
                                 tapBoomEnergy = 1f
                             }
                             tapCooldown = true
-                        } else if (tapCooldown && velocity < 0.6f) {
+                        } else if (tapCooldown && lateralVelocity < 0.6f && depthVelocity < 0.3f) {
                             tapCooldown = false
                         }
                     }

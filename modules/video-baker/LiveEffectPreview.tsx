@@ -59,6 +59,13 @@ export interface LiveEffectPreviewHandle {
    * show a short "processing" state rather than assume it's instant.
    */
   stopRecording: (finalOutputPath: string) => Promise<string>;
+  /**
+   * NEW - fixes create.tsx's handleTakePhoto silently doing nothing while a
+   * GL effect is active. Captures a single JPEG from the live effect preview
+   * right now and resolves with the actual file path once it's written.
+   * outputPath is the caller-chosen destination (should not already exist).
+   */
+  capturePhoto: (outputPath: string) => Promise<string>;
 }
 
 const NativeView: React.ComponentType<LiveEffectPreviewProps & { ref?: React.Ref<any> }> =
@@ -85,6 +92,14 @@ export const LiveEffectPreview = forwardRef<LiveEffectPreviewHandle, LiveEffectP
           throw new Error('LiveEffectPreview: could not resolve native view tag - is the view mounted?');
         }
         const resultPath: string = await NativeLiveEffectPreviewModule.stopLiveRecording(tag, finalOutputPath);
+        return resultPath;
+      },
+      capturePhoto: async (outputPath: string) => {
+        const tag = findNodeHandle(nativeRef.current);
+        if (tag == null) {
+          throw new Error('LiveEffectPreview: could not resolve native view tag - is the view mounted?');
+        }
+        const resultPath: string = await NativeLiveEffectPreviewModule.captureLivePhoto(tag, outputPath);
         return resultPath;
       },
     }), []);

@@ -1142,10 +1142,14 @@ object EffectShaders {
         }
 
         void main() {
-            // Bursty timing: mostly calm, with irregular glitch windows  -
-            // reads as "a signal problem," not a constant, tiring effect.
-            float burstPhase = fract(uTime * 0.4);
-            float burstActive = step(0.75, hash(floor(uTime * 0.4)));
+            // FIX: burst was only ~25% likely per ~2.5s window, meaning a quick
+            // test had a real chance of landing entirely in a calm window and
+            // looking like nothing was happening. Shortened the window and
+            // raised the probability so a burst is very likely within the
+            // first second or two of selecting the effect, while keeping the
+            // bursty (not constant/tiring) character intact.
+            float burstPhase = fract(uTime * 0.8);
+            float burstActive = step(0.4, hash(floor(uTime * 0.8)));
             float burstStrength = burstActive * smoothstep(0.0, 0.15, burstPhase) * smoothstep(1.0, 0.85, burstPhase);
 
             // Blocky horizontal row displacement  -  classic signal-glitch look.
@@ -1663,6 +1667,15 @@ object EffectShaders {
     // visually rich burst, still cheap for a fixed-size uniform array + shader loop
     // on lower-end GPUs per section 19's performance requirement).
     private const val PARTICLE_MAX = 24
+    // FIX (design gap, not a tracking bug): the iris tracking itself (landmarks
+    // 468/473, the rolling history buffer) was already correct - matches
+    // FaceTracker's own established pattern. What didn't match the reference
+    // image was this shader: it drew separate fading DOTS at each history
+    // point, which reads as a sparkle trail, not the continuous glowing line/
+    // streak the reference shows. Rewritten to draw actual line SEGMENTS
+    // between consecutive points (distance-to-segment instead of distance-to-
+    // point, for each of the 7 gaps between 8 points) so it reads as one
+    // continuous flowing streak following the eye's movement.
     private val gazeTrail = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1670,15 +1683,29 @@ object EffectShaders {
         uniform float uGazeAges[$GAZE_TRAIL_POINTS]; // 0 = newest/brightest, 1 = oldest/gone
         uniform int uGazeCount; // how many entries in uGazePoints are valid this frame
 
+        // Shortest distance from p to the line segment a-b.
+        float distToSegment(vec2 p, vec2 a, vec2 b) {
+            vec2 ab = b - a;
+            float t = clamp(dot(p - a, ab) / max(dot(ab, ab), 0.00001), 0.0, 1.0);
+            return distance(p, a + ab * t);
+        }
+
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
             vec3 particleColor = vec3(0.6, 0.85, 1.0);
             float glow = 0.0;
-            for (int i = 0; i < $GAZE_TRAIL_POINTS; i++) {
-                if (i >= uGazeCount) break;
-                float d = distance(vTexCoord, uGazePoints[i]);
+            for (int i = 0; i < $GAZE_TRAIL_POINTS - 1; i++) {
+                if (i + 1 >= uGazeCount) break;
+                float d = distToSegment(vTexCoord, uGazePoints[i], uGazePoints[i + 1]);
                 float fade = 1.0 - uGazeAges[i];
-                glow += smoothstep(0.02, 0.0, d) * fade;
+                glow += smoothstep(0.014, 0.0, d) * fade;
+            }
+            // Bright core exactly at the newest (current eye) position, on top
+            // of the streak - an anchor point so it clearly reads as tracking
+            // the eye right now, not just a fading trail with nothing current.
+            if (uGazeCount > 0) {
+                float dCore = distance(vTexCoord, uGazePoints[0]);
+                glow += smoothstep(0.02, 0.0, dCore) * 1.4;
             }
             gl_FragColor = vec4(base.rgb + particleColor * glow, base.a);
         }

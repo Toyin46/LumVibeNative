@@ -699,6 +699,41 @@ const FX_CATEGORIES = [
   {id:'retro',name:'Retro',emoji:'📼'},{id:'editorial',name:'Editorial',emoji:'🎬'},
   {id:'creative',name:'Creative',emoji:'🎨'},
 ];
+
+// FIX (requested correction): several fx_gl_* entries in FX_IMAGES point at
+// require('../assets/images/filters/fx_gl_X.png') paths whose actual image
+// files either don't exist yet or aren't a real styled cover (per your own
+// report - "vintage etc"). Two different failure modes here, worth being
+// precise about: (1) if the file genuinely doesn't exist on disk, require()
+// fails at METRO BUNDLE TIME - a hard build error, not a runtime glitch, and
+// no amount of onError handling in this component can catch that; (2) if the
+// file exists but is corrupt/blank/a bad placeholder, THAT is a runtime load
+// failure and onError below does catch it. I can't inspect your actual
+// assets/images/filters folder from here to tell which case applies to which
+// file, so this component covers case (2) robustly and gracefully - if you
+// still see specific effects with no cover after building, tell me exactly
+// which ones and I'll remove their require() line entirely and switch them
+// to icon-only, which eliminates the bundle-time risk for good.
+function FxCover({ effect, style, imgStyle }: { effect: FxEffect; style?: any; imgStyle?: any }) {
+  const [failed, setFailed] = React.useState(false);
+  const source = FX_IMAGES[effect.id];
+  if (!source || failed) {
+    return (
+      <View style={[{ backgroundColor: '#1c1c2e', alignItems: 'center', justifyContent: 'center' }, style]}>
+        <Text style={{ fontSize: 22 }}>{effect.emoji}</Text>
+      </View>
+    );
+  }
+  return (
+    <Image
+      source={source}
+      style={[{ width: '100%', height: '100%' }, imgStyle]}
+      resizeMode="cover"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 const FX_OVERLAY_TINTS: Record<string,string> = {
   fx_none:'transparent', fx_vhs:'rgba(180,120,60,0.28)', fx_fire:'rgba(255,80,0,0.32)',
   fx_ice:'rgba(80,160,255,0.30)', fx_neon_burn:'rgba(0,255,180,0.28)',
@@ -4831,6 +4866,33 @@ export default function CreateScreen() {
 
   // ─── Camera actions (VisionCamera) ───────────────────
   const handleTakePhoto = async () => {
+    // FIX (real bug you reported): this always called cameraRef.current.
+    // takePhoto() — but the regular <Camera> component isn't even mounted
+    // while a GL effect is selected (<LiveEffectPreview> replaces it in the
+    // render tree), so cameraRef.current was null and this function's very
+    // first line silently returned, doing nothing. Same branch-then-fallback
+    // pattern handleStartRecording already uses correctly below: try the
+    // live-effect capture path first when a GL effect is active, and only
+    // fall through to the regular camera if that's not the case (or if it
+    // genuinely fails for some reason), so this can never end up MORE broken
+    // than it already was.
+    if (hasLiveGLEffect && liveEffectPreviewRef.current) {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        const outputPath = `${FileSystem.cacheDirectory}live_photo_${Date.now()}.jpg`.replace('file://', '');
+        const resultPath = await liveEffectPreviewRef.current.capturePhoto(outputPath);
+        const uri = Platform.OS === 'android' ? `file://${resultPath}` : resultPath;
+        setOriginalMediaUri(uri);
+        setMediaUri(uri);
+        setMediaType('image');
+        setScreenView('compose');
+        return;
+      } catch (e: any) {
+        console.warn('Live-effect photo capture failed, falling back to plain camera:', e?.message);
+        // falls through to the existing plain-camera path below
+      }
+    }
+
     if (!cameraRef.current) return;
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -6160,7 +6222,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                     the filmstrip below, so no new assets are needed. */}
                 {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
                   <View style={ms.shutterFxBadge}>
-                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                    <FxCover effect={FX_EFFECTS.find(e => e.id === selectedFx)!} style={{ width: '100%', height: '100%' }} />
                   </View>
                 )}
               </TouchableOpacity>
@@ -6172,7 +6234,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 <View style={[ms.shutterInner, isRecording && ms.shutterInnerRec]} />
                 {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
                   <View style={ms.shutterFxBadge}>
-                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                    <FxCover effect={FX_EFFECTS.find(e => e.id === selectedFx)!} style={{ width: '100%', height: '100%' }} />
                   </View>
                 )}
               </TouchableOpacity>
@@ -6219,7 +6281,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 onPress={() => { setSelectedFx(f.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
               >
                 <View style={[ms.filterThumb, selectedFx === f.id && ms.filterThumbActive, { overflow: 'hidden' }]}>
-                  <Image source={FX_IMAGES[f.id]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  <FxCover effect={f} style={{ width: '100%', height: '100%' }} />
                   {selectedFx === f.id && (
                     <View style={ms.filterThumbCheck}><Feather name="check" size={11} color="#000" /></View>
                   )}
@@ -6817,11 +6879,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   if (fx.glShaderEffect === 'hand_portal') pickPortalScene();
                 }}
               >
-                {FX_IMAGES[fx.id] ? (
-                  <Image source={FX_IMAGES[fx.id]} style={ms.fxCardImg} resizeMode="cover" />
-                ) : (
-                  <Text style={{ fontSize: 22 }}>{fx.emoji}</Text>
-                )}
+                <FxCover effect={fx} style={ms.fxCardImg} imgStyle={ms.fxCardImg} />
                 <Text style={[ms.fxCardName, selectedFx === fx.id && { color: '#00ff88' }]}>{fx.name}</Text>
                 <Text style={ms.fxCardDesc} numberOfLines={1}>{fx.desc}</Text>
                 {/* Now that LiveEffectPreview handles GL shader effects, selecting one

@@ -100,5 +100,21 @@ class LiveEffectPreviewModule : Module() {
                 }
             }
         }
+        // NEW: fixes handleTakePhoto's real bug in create.tsx - it always
+        // called cameraRef.current.takePhoto(), but the regular Camera
+        // component isn't even mounted while a GL effect is active
+        // (LiveEffectPreview replaces it), so that call silently no-op'd on
+        // its own null-check. This gives Photo mode a real capture path for
+        // that case, same tag+path+promise shape as recording above.
+        AsyncFunction("captureLivePhoto") { viewTag: Int, outputPath: String, promise: expo.modules.kotlin.Promise ->
+            val view = appContext.findView(viewTag) as? LiveEffectPreviewView
+            if (view == null) {
+                promise.reject("ERR_NO_VIEW", "LiveEffectPreview view not found for tag $viewTag", null)
+                return@AsyncFunction
+            }
+            view.post {
+                view.capturePhotoNow(outputPath, promise)
+            }
+        }
     }
 }  
