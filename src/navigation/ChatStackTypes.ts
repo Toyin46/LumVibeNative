@@ -4,11 +4,17 @@
 // expo-router folder structure, converted to React Navigation screen
 // names. Same pattern as MarketplaceStackTypes.ts.
 //
-// ⚠️ STATUS: Cowatch and GroupInfo are referenced by navigate() calls in
-// the screens below, but their source files haven't been sent/converted
-// yet. They're in this type so other screens can reference them without
-// type errors, but aren't registered as real Stack.Screen entries in
-// ChatStack.tsx until you send those files.
+// ✅ Cowatch is registered as a real Stack.Screen in ChatStack.tsx.
+// ⚠️ GroupInfo is still a TODO — its source file (group/info.tsx) hasn't
+// been sent/converted yet, so it's typed here but not yet registered.
+//
+// ⚠️ Cowatch lives inside this nested stack (the "Messages" tab), so any
+// navigate() call to it from a screen OUTSIDE this stack (e.g. videos.tsx
+// on the "Videos" tab) must use the nested form:
+//   navigation.navigate('Messages', { screen: 'Cowatch', params: {...} })
+// A plain navigation.navigate('Cowatch', ...) from a sibling tab won't
+// find it — and the screen name must match this file exactly ('Cowatch',
+// not 'CoWatch'), since React Navigation route names are case-sensitive.
 
 export type ChatStackParamList = {
     MessagesHome: undefined; // existing inbox screen (screens/messages.tsx)
@@ -18,7 +24,7 @@ export type ChatStackParamList = {
     NewCircle:    undefined;
     GroupChat:    { id: string };
     Circle:       { id: string };
-    Cowatch:      { conversationId: string; otherName: string; otherPhoto: string }; // TODO: needs cowatch.tsx source
+    Cowatch:      { conversationId: string; otherName: string; otherPhoto: string; isAiMatch?: string };
     GroupInfo:    { id: string }; // TODO: needs group/info.tsx source
   }; 
   

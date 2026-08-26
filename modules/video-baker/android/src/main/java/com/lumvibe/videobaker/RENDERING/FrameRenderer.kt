@@ -1,5 +1,6 @@
 package com.lumvibe.videobaker
 
+import android.content.Context
 import android.opengl.GLES20
 import android.opengl.GLES11Ext
 import java.nio.ByteBuffer
@@ -17,7 +18,12 @@ import java.nio.FloatBuffer
 *
 * This is intentionally simple GL  -  no third-party rendering library required.
 */
-class FrameRenderer {
+class FrameRenderer(private val context: Context) {
+    // Lazily created only when MOUTH_FIRE/FIRE_BOOK is actually selected (see
+    // setEffect() below) and released when leaving both, rather than always
+    // running a decoder - MediaPlayer/MediaCodec decoders are a real, limited
+    // system resource, no reason to hold one open for every other effect.
+    private var fireVideoPlayer: FireVideoPlayer? = null
 
     // ---- Video (external texture) shader  -  plain pass-through with color adjust ----
     private val videoVertexShader = """
@@ -127,6 +133,7 @@ class FrameRenderer {
     // center, a reasonable default for a front-camera selfie framing; expose as a
     // var so it can be tuned per-effect-config from the JS side later if needed.
     var sparkOrigin: FloatArray = floatArrayOf(0.62f, 0.40f)
+    var palmCenter: FloatArray = floatArrayOf(0.5f, 0.5f) // PALM_MAGIC's ring core anchor
     // HEAD_TILT_ZOOM's current zoom/pan, computed in VideoTranscoder from
     // FaceTracker.headPoseDegrees() each frame and written here right before draw.
     var headTiltZoom: Float = 1f
@@ -157,9 +164,10 @@ class FrameRenderer {
     var gazeCount: Int = 0
     // FINGER_DRAW's position history  -  same flatten-and-count convention as
     // gazePoints above, just a separate property so it can coexist with
-    // GAZE_TRAIL independently rather than sharing one array.
-    var fingerPoints: FloatArray = FloatArray(16) // 8 points * 2 floats
-    var fingerAges: FloatArray = FloatArray(8)
+    // GAZE_TRAIL independently rather than sharing one array. 16 points now
+    // (was 8) - see EffectShaders.FINGER_TRAIL_POINTS's rewrite comment.
+    var fingerPoints: FloatArray = FloatArray(32) // 16 points * 2 floats
+    var fingerAges: FloatArray = FloatArray(16)
     var fingerCount: Int = 0
     // THROW_CONFETTI's particle burst  -  same flatten-and-count convention as
     // gazePoints/gazeCount above, sized for ParticleSystem.MAX_PARTICLES (24).
@@ -236,6 +244,13 @@ class FrameRenderer {
 
     fun setEffect(effect: VisualEffect) {
         currentEffect = effect
+        val needsFireVideo = effect == VisualEffect.MOUTH_FIRE || effect == VisualEffect.FIRE_BOOK
+        if (needsFireVideo && fireVideoPlayer == null) {
+            fireVideoPlayer = FireVideoPlayer(context)
+        } else if (!needsFireVideo && fireVideoPlayer != null) {
+            fireVideoPlayer?.release()
+            fireVideoPlayer = null
+        }
         if (effect == VisualEffect.NONE) return
         if (effectPrograms.containsKey(effect)) return
         val (vs, fs) = EffectShaders.source(effect)
@@ -295,6 +310,7 @@ class FrameRenderer {
         val uPulseSpeed = GLES20.glGetUniformLocation(program, "uPulseSpeed")
         val uGlowColor = GLES20.glGetUniformLocation(program, "uGlowColor")
         val uSparkOrigin = GLES20.glGetUniformLocation(program, "uSparkOrigin")
+        val uPalmCenter = GLES20.glGetUniformLocation(program, "uPalmCenter")
         val uZoom = GLES20.glGetUniformLocation(program, "uZoom")
         val uPan = GLES20.glGetUniformLocation(program, "uPan")
         val uFaceBox = GLES20.glGetUniformLocation(program, "uFaceBox")
@@ -319,6 +335,8 @@ class FrameRenderer {
         val uParticleCount = GLES20.glGetUniformLocation(program, "uParticleCount")
         val uDirection = GLES20.glGetUniformLocation(program, "uDirection")
         val uMouthCenter = GLES20.glGetUniformLocation(program, "uMouthCenter")
+        val uFireTexture = GLES20.glGetUniformLocation(program, "uFireTexture")
+        val uFireTexMatrix = GLES20.glGetUniformLocation(program, "uFireTexMatrix")
 
         GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
         GLES20.glUniform1i(uTexture, 0)
@@ -330,6 +348,7 @@ class FrameRenderer {
         if (uPulseSpeed >= 0) GLES20.glUniform1f(uPulseSpeed, duotonePulseSpeed)
         if (uGlowColor >= 0) GLES20.glUniform3fv(uGlowColor, 1, neonGlowColor, 0)
         if (uSparkOrigin >= 0) GLES20.glUniform2fv(uSparkOrigin, 1, sparkOrigin, 0)
+        if (uPalmCenter >= 0) GLES20.glUniform2fv(uPalmCenter, 1, palmCenter, 0)
         if (uZoom >= 0) GLES20.glUniform1f(uZoom, headTiltZoom.coerceAtLeast(1f))
         if (uPan >= 0) GLES20.glUniform2fv(uPan, 1, headTiltPan, 0)
         if (uFaceBox >= 0) GLES20.glUniform4fv(uFaceBox, 1, faceBox, 0)
@@ -342,8 +361,8 @@ class FrameRenderer {
         if (uGazePoints >= 0) GLES20.glUniform2fv(uGazePoints, 8, gazePoints, 0)
         if (uGazeAges >= 0) GLES20.glUniform1fv(uGazeAges, 8, gazeAges, 0)
         if (uGazeCount >= 0) GLES20.glUniform1i(uGazeCount, gazeCount.coerceIn(0, 8))
-        if (uFingerPoints >= 0) GLES20.glUniform2fv(uFingerPoints, 8, fingerPoints, 0)
-        if (uFingerAges >= 0) GLES20.glUniform1fv(uFingerAges, 8, fingerAges, 0)
+        if (uFingerPoints >= 0) GLES20.glUniform2fv(uFingerPoints, 16, fingerPoints, 0)
+        if (uFingerAges >= 0) GLES20.glUniform1fv(uFingerAges, 16, fingerAges, 0)
         if (uFingerCount >= 0) GLES20.glUniform1i(uFingerCount, fingerCount.coerceIn(0, 8))
         if (uParticlePos >= 0) GLES20.glUniform2fv(uParticlePos, 24, particlePositions, 0)
         if (uParticleRot >= 0) GLES20.glUniform1fv(uParticleRot, 24, particleRotations, 0)
@@ -360,6 +379,34 @@ class FrameRenderer {
             if (uMaskTexture >= 0) GLES20.glUniform1i(uMaskTexture, 1)
             if (uPortalTexture >= 0) GLES20.glUniform1i(uPortalTexture, 1)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0) // restore, so the next draw's unit-0 bind isn't stale
+        }
+        // Fire video (MOUTH_FIRE/FIRE_BOOK only) - unit 2, separate from the
+        // mask/portal unit above since FIRE_BOOK wants both simultaneously
+        // (uPortalTexture for the book image, uFireTexture for the flame body).
+        if (uFireTexture >= 0) {
+            val fvp = fireVideoPlayer
+            if (fvp != null && fvp.hasFrame) {
+                fvp.updateTexImage()
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, fvp.textureId)
+                GLES20.glUniform1i(uFireTexture, 2)
+                if (uFireTexMatrix >= 0) {
+                    GLES20.glUniformMatrix4fv(uFireTexMatrix, 1, false, fvp.getTransformMatrix(), 0)
+                }
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            } else {
+                // First call(s), before the decoder has produced anything yet:
+                // SurfaceTexture.updateTexImage() throws IllegalStateException
+                // when no new frame is available, which FireVideoPlayer already
+                // catches+logs internally - so this is safe, just noisy in
+                // Logcat for the brief window before MediaPlayer finishes
+                // preparing. If that noise becomes a real problem, the proper
+                // fix is an OnFrameAvailableListener (VideoTranscoder's own
+                // FrameWaiter class in this same module is exactly that
+                // pattern) instead of polling every frame - not done here to
+                // keep this first pass smaller and lower-risk.
+                fvp?.updateTexImage()
+            }
         }
 
         drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
@@ -512,5 +559,7 @@ class FrameRenderer {
             GLES20.glDeleteTextures(1, intArrayOf(secondaryTextureId), 0)
             secondaryTextureId = 0
         }
+        fireVideoPlayer?.release()
+        fireVideoPlayer = null
     }
 }    

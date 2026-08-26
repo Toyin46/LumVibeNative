@@ -1,3 +1,6 @@
+import type { NavigatorScreenParams } from '@react-navigation/native';
+import type { ChatStackParamList } from './ChatStackTypes';
+
 export type RootStackParamList = {
   Main:                undefined;
   Auth:                undefined;
@@ -23,7 +26,10 @@ export type MainTabParamList = {
   Home:     undefined;
   Explore:  undefined;
   Create:   undefined;
-  Messages: undefined;
+  // NavigatorScreenParams lets callers on other tabs (e.g. videos.tsx)
+  // navigate straight into a nested ChatStack screen with typed params:
+  // navigation.navigate('Messages', { screen: 'Cowatch', params: {...} })
+  Messages: NavigatorScreenParams<ChatStackParamList> | undefined;
   Videos:   undefined;
   Market:   undefined;
   Profile:  undefined;

@@ -281,12 +281,17 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     private val clapBurstParticles = ParticleSystem()
     // FIX: MOUTH_WORDS/ROCK_PAPER_SCISSORS/STICKERS_REACT/FACE_MORPH state -
     // all four had zero live signal before. Word/label decision state
-    // (currentMouthWord etc) is only ever touched from trackingHandler's
+    // (mouthWordCascade below) is only ever touched from trackingHandler's
     // thread (onFaceResult/onHandResult both run there), so these are plain
     // fields, not @Volatile - texture IDs are only touched from the render
     // thread (built + read there), same single-thread-per-field discipline.
-    private var currentMouthWord: String? = null
-    private var lastBuiltMouthWord: String? = null
+    // REWRITTEN for the multi-word cascade (was single-word state: current
+    // MouthWord and a matching lastBuilt tracking variable). Each entry is
+    // (word, color, spawnTimeMs).
+    // Same single-thread-per-field discipline as before - only ever touched
+    // from trackingHandler's thread.
+    private val mouthWordCascade = mutableListOf<Triple<String, Int, Long>>()
+    private var lastMouthWordSpawnMs = 0L
     private var mouthWordTextureId = 0
     private var mouthWordWidthPx = 0f
     private var mouthWordHeightPx = 0f
@@ -299,6 +304,19 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     private var rpsHeightPx = 0f
     private var rpsAnchorX = 0.5f
     private var rpsAnchorY = 0.5f
+    // ADDED: Stickers React's Surprise/Laugh reactions - text+emoji bubbles,
+    // same single-word hysteresis pattern MOUTH_WORDS used before its cascade
+    // rewrite (this effect's reference shows one reaction at a time, not a
+    // flowing stream, so the simpler single-bubble pattern is the right fit
+    // here, not a copy of the cascade). Smile/Love (hearts) are unchanged -
+    // this only adds two more reactions alongside them.
+    private var currentStickerText: String? = null
+    private var lastBuiltStickerText: String? = null
+    private var stickerTextureId = 0
+    private var stickerWidthPx = 0f
+    private var stickerHeightPx = 0f
+    private var stickerAnchorX = 0.5f
+    private var stickerAnchorY = 0.5f
     private val stickersParticles = ParticleSystem(gravity = -0.2f)
     // NEW: Mouth Fire's real embers. Strong negative gravity (buoyancy, not
     // "falling up" - embers accelerate upward like heat plume, same
@@ -397,7 +415,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         eglSurface = eglCore!!.createWindowSurface(surface)
         eglCore!!.makeCurrent(eglSurface!!)
 
-        renderer = FrameRenderer().apply { setup() }
+        renderer = FrameRenderer(context).apply { setup() }
         // ROOT CAUSE FIX: VideoTranscoder (bake/compose path) always calls
         // ensureSecondaryTexture() right here, immediately after setup() -- this line
         // was simply missing on the live-preview path. Without it, secondaryTextureId
@@ -709,6 +727,13 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 val bubbleTop = rpsAnchorY * surfaceH - rpsHeightPx - (0.05f * surfaceH)
                 r.drawWatermarkAt(rpsTextureId, bubbleLeft, bubbleTop, rpsWidthPx, rpsHeightPx, surfaceW, surfaceH)
             }
+            // ADDED: draw call for Stickers React's new Surprise/Laugh text
+            // bubble - same drawWatermarkAt reuse as the two blocks above.
+            if (r.currentEffect == VisualEffect.STICKERS_REACT && stickerTextureId != 0) {
+                val bubbleLeft = stickerAnchorX * surfaceW - stickerWidthPx / 2f
+                val bubbleTop = stickerAnchorY * surfaceH - stickerHeightPx - (0.02f * surfaceH)
+                r.drawWatermarkAt(stickerTextureId, bubbleLeft, bubbleTop, stickerWidthPx, stickerHeightPx, surfaceW, surfaceH)
+            }
         }
 
         // NEW: Two Hand Frame auto-capture - this IS the safe pre-swap read
@@ -785,7 +810,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         if (liveRecorder?.isRecording == true) return // already recording, ignore
         val w = if (surfaceW > 0) surfaceW else 720
         val h = if (surfaceH > 0) surfaceH else 1280
-        val rec = LiveRecorder(w, h, videoOnlyPath, pcmPath)
+        val rec = LiveRecorder(context, w, h, videoOnlyPath, pcmPath)
         val inputSurface = rec.startVideo()
         encoderEglSurface = eglC.createWindowSurface(inputSurface)
         rec.startAudio()
@@ -975,6 +1000,9 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         var mouthX = 0.5f
         var mouthY = 0.6f
         var mouthUpdated = false
+        var sparkX = 0f
+        var sparkY = 0f
+        var sparkUpdated = false
         var blinkTriggered = false
         when (r.currentEffect) {
             VisualEffect.MOOD_RING, VisualEffect.SMILE_SHATTER -> {
@@ -989,10 +1017,23 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 val right = shapes?.firstOrNull { it.categoryName() == "eyeBlinkRight" }?.score() ?: 0f
                 // Same "clean single-eye wink" gate VideoTranscoder uses  -  plain
                 // |L - R| would also fire on a full double-blink.
+                val winkedLeft = left > 0.6f && right < 0.3f
+                val winkedRight = right > 0.6f && left < 0.3f
                 intensityOverride = when {
-                    left > 0.6f && right < 0.3f -> left
-                    right > 0.6f && left < 0.3f -> right
+                    winkedLeft -> left
+                    winkedRight -> right
                     else -> 0f
+                }
+                // Real anchor now too - was a fixed screen-space point before.
+                // Same landmark indices (159 left / 386 right) FaceTracker.
+                // eyeCenter() uses for the other two paths, mirrored directly
+                // here since this function reads raw landmarks rather than
+                // going through FaceTracker (see the faceBox comment above).
+                if ((winkedLeft || winkedRight) && landmarks.size > 386) {
+                    val idx = if (winkedLeft) 159 else 386
+                    sparkX = landmarks[idx].x()
+                    sparkY = landmarks[idx].y()
+                    sparkUpdated = true
                 }
             }
             // FIX: was completely unwired live - r.headTiltZoom/headTiltPan never
@@ -1105,6 +1146,14 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // flicker if jawOpen oscillates right around the threshold). Outside
         // the when() above since it needs its own texture-rebuild side effect,
         // not just a single intensityOverride float.
+        // REWRITTEN for the multi-word cascade - matches the app's own
+        // reference image (several words flowing up and away from the mouth
+        // over time), not a single static bubble. Word SELECTION logic is
+        // unchanged (still real jawOpen/smile/browUp combinations, not
+        // arbitrary) - what changed is that a NEW instance spawns every
+        // ~450ms while the mouth stays open, instead of once, and every
+        // still-alive instance (< 1.8s old) gets composited together each
+        // frame via OverlayBuilder.buildWordCascade.
         if (r.currentEffect == VisualEffect.MOUTH_WORDS) {
             val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
             val jawOpen = shapes?.firstOrNull { it.categoryName() == "jawOpen" }?.score() ?: 0f
@@ -1112,54 +1161,109 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             val smileR = shapes?.firstOrNull { it.categoryName() == "mouthSmileRight" }?.score() ?: 0f
             val smile = maxOf(smileL, smileR)
             val browUp = shapes?.firstOrNull { it.categoryName() == "browInnerUp" }?.score() ?: 0f
-            if (currentMouthWord != null && jawOpen < 0.25f) {
-                currentMouthWord = null
-            } else if (currentMouthWord == null) {
-                currentMouthWord = when {
-                    jawOpen > 0.6f && smile > 0.3f -> "HAHA!"
-                    jawOpen > 0.5f && browUp > 0.4f -> "OMG!"
-                    jawOpen > 0.4f -> "WOW!"
-                    else -> null
-                }
-            }
+
             if (landmarks.size > 14) {
                 val upper = landmarks[13]; val lower = landmarks[14]
                 mouthWordAnchorX = (upper.x() + lower.x()) / 2f
                 mouthWordAnchorY = (upper.y() + lower.y()) / 2f
             }
-            val wordToBuild = currentMouthWord
-            if (wordToBuild != null && wordToBuild != lastBuiltMouthWord) {
-                lastBuiltMouthWord = wordToBuild
-                renderHandler?.post {
-                    if (mouthWordTextureId != 0) GLES20.glDeleteTextures(1, intArrayOf(mouthWordTextureId), 0)
-                    val color = when (wordToBuild) {
-                        "HAHA!" -> Color.rgb(255, 214, 51)
-                        "OMG!" -> Color.rgb(255, 71, 153)
-                        else -> Color.rgb(64, 200, 255)
-                    }
-                    val bubble = OverlayBuilder.buildWordBubble(wordToBuild, color, surfaceH * 0.06f)
-                    mouthWordTextureId = bubble.textureId
-                    mouthWordWidthPx = bubble.widthPx
-                    mouthWordHeightPx = bubble.heightPx
+
+            val nowMs = System.currentTimeMillis()
+            val word = when {
+                jawOpen > 0.6f && smile > 0.3f -> "HAHA!"
+                jawOpen > 0.5f && browUp > 0.4f -> "OMG!"
+                jawOpen > 0.4f -> "WOW!"
+                else -> null
+            }
+            if (word != null && nowMs - lastMouthWordSpawnMs > 450L) {
+                lastMouthWordSpawnMs = nowMs
+                val color = when (word) {
+                    "HAHA!" -> Color.rgb(255, 214, 51)
+                    "OMG!" -> Color.rgb(255, 71, 153)
+                    else -> Color.rgb(64, 200, 255)
                 }
-            } else if (wordToBuild == null && lastBuiltMouthWord != null) {
-                lastBuiltMouthWord = null
-                renderHandler?.post {
-                    if (mouthWordTextureId != 0) { GLES20.glDeleteTextures(1, intArrayOf(mouthWordTextureId), 0); mouthWordTextureId = 0 }
+                mouthWordCascade.add(Triple(word, color, nowMs))
+                if (mouthWordCascade.size > 5) mouthWordCascade.removeAt(0) // cap concurrent words
+            }
+            mouthWordCascade.removeAll { nowMs - it.third > 1800L }
+
+            val activeWords = mouthWordCascade.map { (text, color, spawnMs) ->
+                OverlayBuilder.CascadeWord(text, color, (nowMs - spawnMs) / 1800f)
+            }
+            renderHandler?.post {
+                if (mouthWordTextureId != 0) { GLES20.glDeleteTextures(1, intArrayOf(mouthWordTextureId), 0); mouthWordTextureId = 0 }
+                if (activeWords.isNotEmpty()) {
+                    val cascade = OverlayBuilder.buildWordCascade(activeWords, surfaceH * 0.06f)
+                    if (cascade != null) {
+                        mouthWordTextureId = cascade.textureId
+                        mouthWordWidthPx = cascade.widthPx
+                        mouthWordHeightPx = cascade.heightPx
+                    }
                 }
             }
         }
 
         // FIX: STICKERS_REACT was completely unwired live - same smile
         // threshold + spawn-near-upper-right-of-face as the bake path.
+        // REWRITTEN to add Surprise and Laugh (the app's reference shows 5
+        // reactions total; only Smile and Love existed before this) with a
+        // clean priority order so they don't fire redundantly over each
+        // other: Surprise (jawOpen+browUp) and Laugh (jawOpen+smile) are
+        // checked first; Smile's own trigger now excludes high jawOpen so it
+        // doesn't ALSO fire every time Laugh does.
         if (r.currentEffect == VisualEffect.STICKERS_REACT) {
             val shapes = result.faceBlendshapes().orElse(null)?.firstOrNull()
             val smileL = shapes?.firstOrNull { it.categoryName() == "mouthSmileLeft" }?.score() ?: 0f
             val smileR = shapes?.firstOrNull { it.categoryName() == "mouthSmileRight" }?.score() ?: 0f
-            if (maxOf(smileL, smileR) > 0.35f) {
+            val smile = maxOf(smileL, smileR)
+            val jawOpen = shapes?.firstOrNull { it.categoryName() == "jawOpen" }?.score() ?: 0f
+            val browUp = shapes?.firstOrNull { it.categoryName() == "browInnerUp" }?.score() ?: 0f
+
+            val reactionText = when {
+                jawOpen > 0.5f && browUp > 0.4f -> "\uD83D\uDE2E WOW!"       // 😮 surprised
+                jawOpen > 0.4f && smile > 0.3f -> "\uD83D\uDE02 HA HA"       // 😂 laughing
+                else -> null
+            }
+            if (currentStickerText != null && jawOpen < 0.25f) {
+                currentStickerText = null
+            } else if (currentStickerText == null && reactionText != null) {
+                currentStickerText = reactionText
+            }
+            if (landmarks.size > 14) {
+                stickerAnchorX = (landmarks[13].x() + landmarks[14].x()) / 2f
+                stickerAnchorY = minY // above the face, same spirit as MOUTH_WORDS sitting above the mouth
+            }
+            val textToBuild = currentStickerText
+            if (textToBuild != null && textToBuild != lastBuiltStickerText) {
+                lastBuiltStickerText = textToBuild
+                renderHandler?.post {
+                    if (stickerTextureId != 0) GLES20.glDeleteTextures(1, intArrayOf(stickerTextureId), 0)
+                    val bubble = OverlayBuilder.buildWordBubble(textToBuild, Color.rgb(255, 220, 90), surfaceH * 0.055f)
+                    stickerTextureId = bubble.textureId
+                    stickerWidthPx = bubble.widthPx
+                    stickerHeightPx = bubble.heightPx
+                }
+            } else if (textToBuild == null && lastBuiltStickerText != null) {
+                lastBuiltStickerText = null
+                renderHandler?.post {
+                    if (stickerTextureId != 0) { GLES20.glDeleteTextures(1, intArrayOf(stickerTextureId), 0); stickerTextureId = 0 }
+                }
+            }
+
+            // Smile (hearts) now excludes high jawOpen, so it doesn't also
+            // fire every time Laugh does above.
+            if (smile > 0.35f && jawOpen < 0.4f) {
                 val spawnX = maxX - (maxX - minX) * 0.15f
                 val spawnY = minY + (maxY - minY) * 0.2f
                 renderHandler?.post { stickersParticles.spawnBurst(spawnX, spawnY, count = 1, speed = 0.12f, lifetimeSec = 1.2f) }
+            }
+            // ADDED: Love reaction, mirroring the video-bake path exactly -
+            // see that file's STICKERS_REACT block for the full reasoning.
+            val pucker = shapes?.firstOrNull { it.categoryName() == "mouthPucker" }?.score() ?: 0f
+            if (pucker > 0.45f && landmarks.size > 14) {
+                val mouthX = (landmarks[13].x() + landmarks[14].x()) / 2f
+                val mouthY = (landmarks[13].y() + landmarks[14].y()) / 2f
+                renderHandler?.post { stickersParticles.spawnBurst(mouthX, mouthY, count = 1, speed = 0.1f, lifetimeSec = 1.3f) }
             }
         }
 
@@ -1213,6 +1317,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             r.faceBox = floatArrayOf(minX, minY, maxX, maxY)
             intensityOverride?.let { r.effectIntensity = it }
             if (mouthUpdated) r.mouthCenter = floatArrayOf(mouthX, mouthY)
+            if (sparkUpdated) r.sparkOrigin = floatArrayOf(sparkX, sparkY)
             if (blinkTriggered) {
                 freezeActive = true
                 freezeStartSec = (System.nanoTime() - startTimeNs) / 1_000_000_000f
@@ -1286,12 +1391,15 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         if (r.currentEffect == VisualEffect.FINGER_DRAW && hand.size > 8) {
             val tip = hand[8]
             fingerHistory.addFirst(Pair(tip.x(), tip.y()))
-            while (fingerHistory.size > 8) fingerHistory.removeLast()
-            val flat = FloatArray(16)
-            val ages = FloatArray(8)
+            // 16 points now (was 8) - see EffectShaders.FINGER_TRAIL_POINTS's
+            // rewrite comment for why (too few points/no segment-connecting
+            // to read as a smooth drawn curve).
+            while (fingerHistory.size > 16) fingerHistory.removeLast()
+            val flat = FloatArray(32)
+            val ages = FloatArray(16)
             fingerHistory.forEachIndexed { i, (x, y) ->
                 flat[i * 2] = x; flat[i * 2 + 1] = y
-                ages[i] = i / 8f
+                ages[i] = i / 16f
             }
             fingerFlat = flat
             fingerAgesArr = ages
@@ -1418,7 +1526,14 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                         first[20].x() to first[20].y()  // pinky tip
                     )
                     val spawnPoint = handPoints.random()
-                    renderHandler?.post { palmMagicParticles.spawnBurst(spawnPoint.first, spawnPoint.second, count = 2, speed = 0.12f, lifetimeSec = 1.4f) }
+                    renderHandler?.post {
+                        palmMagicParticles.spawnBurst(spawnPoint.first, spawnPoint.second, count = 2, speed = 0.12f, lifetimeSec = 1.4f)
+                        // Real palm position for the new ring core (see
+                        // palmMagicSparkle's rewrite comment) - the exact
+                        // value already computed above for particle spawning,
+                        // no new tracking logic needed.
+                        r.palmCenter = floatArrayOf(palm.first, palm.second)
+                    }
                 }
             }
             VisualEffect.CLAP_BURST -> {

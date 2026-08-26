@@ -33,7 +33,18 @@ export default {
       "expo-localization",
       "expo-secure-store",
       "expo-video",
-      "expo-web-browser"
+      "expo-web-browser",
+      // ✅ NEW: this is the actual fix for "Audio device module is not
+      // initialized — did you remember to call LiveKitReactNative.setup
+      // in your Application.onCreate?" With EAS builds (no android/
+      // folder to hand-edit), this plugin does that native setup call for
+      // you automatically at build time. Needs a new EAS build to take
+      // effect — a reload won't pick up a native config plugin change.
+      ["@livekit/react-native-expo-plugin", { "android": { "audioType": "communication" } }],
+      "@config-plugins/react-native-webrtc",
+      // ✅ NEW: needed for expo-notifications' Android channel/icon setup
+      // (the call-ringing push notifications added to chat/[id].tsx).
+      "expo-notifications"
     ]
   }
 }; 

@@ -23,7 +23,7 @@ package com.lumvibe.videobaker
 object EffectRequirements {
     private val faceScoreEffects = setOf(VisualEffect.MOOD_RING, VisualEffect.WINK_SPARK, VisualEffect.SMILE_SHATTER)
     private val facePoseEffects = setOf(VisualEffect.HEAD_TILT_ZOOM, VisualEffect.DOUBLE_TAKE, VisualEffect.SPIN_EFFECT)
-    private val faceBoxEffects = setOf(VisualEffect.VOICE_HALO, VisualEffect.RAISE_EYEBROW, VisualEffect.SPIN_EFFECT)
+    private val faceBoxEffects = setOf(VisualEffect.VOICE_HALO, VisualEffect.RAISE_EYEBROW, VisualEffect.SPIN_EFFECT, VisualEffect.MOOD_RING, VisualEffect.DOUBLE_TAKE)
     private val irisEffects = setOf(VisualEffect.GAZE_TRAIL)
     private val blinkEffects = setOf(VisualEffect.BLINK_FREEZE)
     private val mouthEffects = setOf(VisualEffect.MOUTH_FIRE, VisualEffect.MOUTH_WORDS)
@@ -39,7 +39,10 @@ object EffectRequirements {
     // heuristic was a real bias problem, not just a style choice). Still
     // needs amplitude too (audioScoreEffects, unchanged below), same as
     // DEPTH_BLOOM already needing both mask AND amplitude.
-    private val segmentationAudioEffects = setOf(VisualEffect.DEPTH_BLOOM, VisualEffect.THERMAL_PULSE)
+    // AURA_GLOW added here (previously audio-only, no mask) so its rewritten
+    // shader can mask the glow to the real person silhouette instead of any
+    // edge in the whole frame - see EffectShaders.auraGlow's own comment.
+    private val segmentationAudioEffects = setOf(VisualEffect.DEPTH_BLOOM, VisualEffect.THERMAL_PULSE, VisualEffect.AURA_GLOW)
     private val segmentationOnlyEffects = setOf(VisualEffect.SPLIT_PRISM, VisualEffect.GOLD_SKIN)
     private val handGestureEffects = setOf(
         VisualEffect.HAND_PORTAL, VisualEffect.FIST_BUMP_BOOM, VisualEffect.TWO_HAND_FRAME, VisualEffect.THROW_CONFETTI,
@@ -83,7 +86,17 @@ object EffectRequirements {
         handResults: List<List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>>?
     ) {
         when (effect) {
-            VisualEffect.MOOD_RING, VisualEffect.SMILE_SHATTER -> {
+            VisualEffect.MOOD_RING -> {
+                // Real smile score, same as before, PLUS the real face box
+                // now that the ring is an actual shape anchored to the face
+                // (was a full-frame hue-shift before, never needed a box).
+                val left = faceResult?.let { faceTracker?.blendshapeScore(it, "mouthSmileLeft") } ?: 0f
+                val right = faceResult?.let { faceTracker?.blendshapeScore(it, "mouthSmileRight") } ?: 0f
+                renderer.effectIntensity = maxOf(left, right)
+                val box = faceResult?.let { faceTracker?.faceBoundingBox(it) }
+                if (box != null) renderer.faceBox = box
+            }
+            VisualEffect.SMILE_SHATTER -> {
                 // Real smile score from the actual photo  -  not a substitute.
                 val left = faceResult?.let { faceTracker?.blendshapeScore(it, "mouthSmileLeft") } ?: 0f
                 val right = faceResult?.let { faceTracker?.blendshapeScore(it, "mouthSmileRight") } ?: 0f
@@ -99,6 +112,15 @@ object EffectRequirements {
                     l > 0.6f && r < 0.3f -> l
                     r > 0.6f && l < 0.3f -> r
                     else -> 0f
+                }
+                // Real anchor position now too - was a fixed screen-space
+                // point before (see winkSpark's own shader doc). Anchored to
+                // whichever eye actually winked in the photo.
+                val winkedLeft = l > 0.6f && r < 0.3f
+                val winkedRight = r > 0.6f && l < 0.3f
+                if (winkedLeft || winkedRight) {
+                    val eye = faceResult?.let { faceTracker?.eyeCenter(it, isLeft = winkedLeft) }
+                    if (eye != null) renderer.sparkOrigin = floatArrayOf(eye.first, eye.second)
                 }
             }
             VisualEffect.HEAD_TILT_ZOOM -> {

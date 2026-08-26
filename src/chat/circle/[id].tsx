@@ -17,9 +17,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
-  StyleSheet, SafeAreaView, StatusBar, Image,
+  StyleSheet, StatusBar, Image,
   ActivityIndicator, Alert, Modal, KeyboardAvoidingView, Platform,
 } from 'react-native';
+// FIX: same issue as chat/[id].tsx — plain react-native's SafeAreaView is
+// iOS-only (a no-op View on Android); the safe-area-context version works
+// on both platforms.
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
@@ -64,6 +68,12 @@ export default function CircleScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<CircleRouteProp>();
   const { id } = route.params;
+
+  // FIX: same missing-tab-bar-hide bug as chat/[id].tsx and group/[id].tsx.
+  useEffect(() => {
+    navigation.getParent()?.setOptions({ tabBarStyle: { display: 'none' } });
+    return () => { navigation.getParent()?.setOptions({ tabBarStyle: undefined }); };
+  }, [navigation]);
 
   const { user } = useAuthStore();
   const channelRef = useRef<RealtimeChannel | null>(null);

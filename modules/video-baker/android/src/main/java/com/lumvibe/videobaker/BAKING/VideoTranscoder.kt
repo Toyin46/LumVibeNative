@@ -121,7 +121,7 @@ class VideoTranscoder {
         val windowSurface = eglCore.createWindowSurface(encoderInputSurface)
         eglCore.makeCurrent(windowSurface)
 
-        val renderer = FrameRenderer()
+        val renderer = FrameRenderer(context)
         renderer.setup()
         renderer.setFrameSize(width, height)
         renderer.brightness = options.brightness
@@ -191,7 +191,7 @@ class VideoTranscoder {
         // sets, not writing a new "if (currentEffect == X)" block each time.
         val faceScoreEffects = setOf(VisualEffect.MOOD_RING, VisualEffect.WINK_SPARK, VisualEffect.SMILE_SHATTER)
         val facePoseEffects = setOf(VisualEffect.HEAD_TILT_ZOOM, VisualEffect.DOUBLE_TAKE, VisualEffect.SPIN_EFFECT) // all read headPoseDegrees
-        val faceBoxEffects = setOf(VisualEffect.VOICE_HALO, VisualEffect.RAISE_EYEBROW, VisualEffect.SPIN_EFFECT) // all need FaceTracker.faceBoundingBox
+        val faceBoxEffects = setOf(VisualEffect.VOICE_HALO, VisualEffect.RAISE_EYEBROW, VisualEffect.SPIN_EFFECT, VisualEffect.DOUBLE_TAKE) // all need FaceTracker.faceBoundingBox
         val irisEffects = setOf(VisualEffect.GAZE_TRAIL) // needs FaceTracker.irisCenter
         val blinkEffects = setOf(VisualEffect.BLINK_FREEZE) // needs both-eye blink blendshapes
         val mouthEffects = setOf(VisualEffect.MOUTH_FIRE, VisualEffect.MOUTH_WORDS) // both need FaceTracker.mouthCenter
@@ -300,13 +300,16 @@ class VideoTranscoder {
         var lastPalmTimestampMs: Long? = null
         var lastConfettiUpdateMs: Long? = null
 
-        // MOUTH_WORDS's state  -  currentMouthWord drives the hysteresis (only
+        // MOUTH_WORDS's state  -  mouthWordCascade holds every active word (see
         // clear on a low "release" threshold, only pick a NEW word while none is
         // active  -  see the per-frame branch below), and the texture/dimensions
         // are cached so the GPU texture only gets rebuilt when the word actually
         // changes, not every frame.
-        var currentMouthWord: String? = null
-        var lastBuiltMouthWord: String? = null
+        // REWRITTEN for the multi-word cascade (was single-word hysteresis
+        // state) - mirrors the live-preview path exactly, see its own comment
+        // for the full reasoning.
+        val mouthWordCascade = mutableListOf<Triple<String, Int, Long>>()
+        var lastMouthWordSpawnMs = 0L
         var mouthWordTextureId = 0
         var mouthWordWidthPx = 0f
         var mouthWordHeightPx = 0f
@@ -357,6 +360,15 @@ class VideoTranscoder {
         // detection  -  see the per-frame branch below).
         val stickersSystem: ParticleSystem? = if (selectedEffect == VisualEffect.STICKERS_REACT) ParticleSystem(gravity = -0.2f) else null
         var lastStickersUpdateMs: Long? = null
+        // ADDED: Surprise/Laugh text+emoji bubbles - mirrors the live-preview
+        // path's state exactly, see its own comment for the full reasoning.
+        var currentStickerText: String? = null
+        var lastBuiltStickerText: String? = null
+        var stickerTextureId = 0
+        var stickerWidthPx = 0f
+        var stickerHeightPx = 0f
+        var stickerAnchorX = 0.5f
+        var stickerAnchorY = 0.5f
 
         // FIRE_BOOK's flame particles  -  fast upward flicker, short lifetime.
         // The book image itself is loaded/uploaded ONCE above (see
@@ -503,7 +515,19 @@ class VideoTranscoder {
                                 if (needsFaceTracker && faceTracker != null) {
                                     val result = faceTracker.detect(frameBitmap, timestampMs)
                                     when (selectedEffect) {
-                                        VisualEffect.MOOD_RING, VisualEffect.SMILE_SHATTER -> {
+                                        VisualEffect.MOOD_RING -> {
+                                            val smile = if (result != null) maxOf(
+                                                faceTracker.blendshapeScore(result, "mouthSmileLeft"),
+                                                faceTracker.blendshapeScore(result, "mouthSmileRight")
+                                            ) else 0f
+                                            renderer.effectIntensity = smile
+                                            // Real face box, now that the ring is an actual shape
+                                            // anchored to the face - same pattern VOICE_HALO/
+                                            // RAISE_EYEBROW use below, mirrored here.
+                                            val box = result?.let { faceTracker.faceBoundingBox(it) }
+                                            if (box != null) renderer.faceBox = box
+                                        }
+                                        VisualEffect.SMILE_SHATTER -> {
                                             val smile = if (result != null) maxOf(
                                                 faceTracker.blendshapeScore(result, "mouthSmileLeft"),
                                                 faceTracker.blendshapeScore(result, "mouthSmileRight")
@@ -517,12 +541,22 @@ class VideoTranscoder {
                                             // open eye actually being open (score below 0.3).
                                             val left = if (result != null) faceTracker.blendshapeScore(result, "eyeBlinkLeft") else 0f
                                             val right = if (result != null) faceTracker.blendshapeScore(result, "eyeBlinkRight") else 0f
+                                            val winkedLeft = left > 0.6f && right < 0.3f
+                                            val winkedRight = right > 0.6f && left < 0.3f
                                             val wink = when {
-                                                left > 0.6f && right < 0.3f -> left
-                                                right > 0.6f && left < 0.3f -> right
+                                                winkedLeft -> left
+                                                winkedRight -> right
                                                 else -> 0f
                                             }
                                             renderer.effectIntensity = wink
+                                            // Real anchor now too - was a fixed screen-space
+                                            // point before. Keep last-known position on frames
+                                            // without a clean wink, same fallback spirit as
+                                            // VOICE_HALO's face box above.
+                                            if (winkedLeft || winkedRight) {
+                                                val eye = result?.let { faceTracker.eyeCenter(it, isLeft = winkedLeft) }
+                                                if (eye != null) renderer.sparkOrigin = floatArrayOf(eye.first, eye.second)
+                                            }
                                         }
                                         VisualEffect.HEAD_TILT_ZOOM -> {
                                             val pose = result?.let { faceTracker.headPoseDegrees(it) }
@@ -554,6 +588,11 @@ class VideoTranscoder {
                                                 renderer.effectIntensity = 0f
                                             }
                                             if (yaw != null) lastYaw = yaw
+                                            // Real face box now too, for the radial zoom-
+                                            // burst's anchor point (see doubleTake's rewrite
+                                            // comment) - same pattern VOICE_HALO uses below.
+                                            val box = result?.let { faceTracker.faceBoundingBox(it) }
+                                            if (box != null) renderer.faceBox = box
                                         }
                                         VisualEffect.VOICE_HALO -> {
                                             val box = result?.let { faceTracker.faceBoundingBox(it) }
@@ -626,45 +665,44 @@ class VideoTranscoder {
                                             val smile = maxOf(smileL, smileR)
                                             val browUp = if (result != null) faceTracker.blendshapeScore(result, "browInnerUp") else 0f
 
-                                            // Hysteresis: only clear the active word once jawOpen drops
-                                            // well below the trigger level, and only pick a NEW word while
-                                            // none is currently active  -  prevents flicker if jawOpen
-                                            // oscillates right around a threshold.
-                                            val releaseThreshold = 0.25f
-                                            if (currentMouthWord != null && jawOpen < releaseThreshold) {
-                                                currentMouthWord = null
-                                            } else if (currentMouthWord == null) {
-                                                currentMouthWord = when {
-                                                    jawOpen > 0.6f && smile > 0.3f -> "HAHA!"   // wide open + smiling = laughing
-                                                    jawOpen > 0.5f && browUp > 0.4f -> "OMG!"    // wide open + raised brows = shocked
-                                                    jawOpen > 0.4f -> "WOW!"                     // open, neither strongly smiling nor browed
-                                                    else -> null
-                                                }
+                                            // REWRITTEN for the multi-word cascade - see the live-preview
+                                            // path's comment for the full reasoning. Driven by the real
+                                            // video timestamp (timestampMs, computed above from
+                                            // presentationTimeUs), NOT wall-clock time - transcoding
+                                            // doesn't run at 1x real-time, so wall-clock would desync the
+                                            // cascade's spawn/fade timing from the actual video content.
+                                            val word = when {
+                                                jawOpen > 0.6f && smile > 0.3f -> "HAHA!"
+                                                jawOpen > 0.5f && browUp > 0.4f -> "OMG!"
+                                                jawOpen > 0.4f -> "WOW!"
+                                                else -> null
                                             }
+                                            if (word != null && timestampMs - lastMouthWordSpawnMs > 450L) {
+                                                lastMouthWordSpawnMs = timestampMs
+                                                val color = when (word) {
+                                                    "HAHA!" -> Color.rgb(255, 214, 51)
+                                                    "OMG!" -> Color.rgb(255, 71, 153)
+                                                    else -> Color.rgb(64, 200, 255)
+                                                }
+                                                mouthWordCascade.add(Triple(word, color, timestampMs))
+                                                if (mouthWordCascade.size > 5) mouthWordCascade.removeAt(0)
+                                            }
+                                            mouthWordCascade.removeAll { timestampMs - it.third > 1800L }
 
-                                            if (currentMouthWord != null && currentMouthWord != lastBuiltMouthWord) {
-                                                // Word changed  -  rebuild the texture. Delete the OLD one
-                                                // first so we don't leak a GPU texture every time the
-                                                // reaction changes across a video.
-                                                if (mouthWordTextureId != 0) {
-                                                    GLES20.glDeleteTextures(1, intArrayOf(mouthWordTextureId), 0)
-                                                }
-                                                val color = when (currentMouthWord) {
-                                                    "HAHA!" -> Color.rgb(255, 214, 51)  // gold
-                                                    "OMG!" -> Color.rgb(255, 71, 153)   // hot pink
-                                                    else -> Color.rgb(64, 200, 255)     // cyan  -  WOW!
-                                                }
-                                                val bubble = OverlayBuilder.buildWordBubble(currentMouthWord!!, color, height * 0.06f)
-                                                mouthWordTextureId = bubble.textureId
-                                                mouthWordWidthPx = bubble.widthPx
-                                                mouthWordHeightPx = bubble.heightPx
-                                                lastBuiltMouthWord = currentMouthWord
-                                            } else if (currentMouthWord == null && mouthWordTextureId != 0) {
-                                                // Word released  -  free the texture rather than holding a
-                                                // dead GPU resource for the rest of the video.
+                                            if (mouthWordTextureId != 0) {
                                                 GLES20.glDeleteTextures(1, intArrayOf(mouthWordTextureId), 0)
                                                 mouthWordTextureId = 0
-                                                lastBuiltMouthWord = null
+                                            }
+                                            if (mouthWordCascade.isNotEmpty()) {
+                                                val activeWords = mouthWordCascade.map { (text, color, spawnMs) ->
+                                                    OverlayBuilder.CascadeWord(text, color, (timestampMs - spawnMs) / 1800f)
+                                                }
+                                                val cascade = OverlayBuilder.buildWordCascade(activeWords, height * 0.06f)
+                                                if (cascade != null) {
+                                                    mouthWordTextureId = cascade.textureId
+                                                    mouthWordWidthPx = cascade.widthPx
+                                                    mouthWordHeightPx = cascade.heightPx
+                                                }
                                             }
 
                                             val mouth = result?.let { faceTracker.mouthCenter(it) }
@@ -678,18 +716,66 @@ class VideoTranscoder {
                                                 val smileL = faceTracker.blendshapeScore(result, "mouthSmileLeft")
                                                 val smileR = faceTracker.blendshapeScore(result, "mouthSmileRight")
                                                 val smile = maxOf(smileL, smileR)
-                                                if (smile > 0.35f) {
-                                                    val box = faceTracker.faceBoundingBox(result)
-                                                    // FIX: faceBoundingBox() returns FloatArray? (can be
-                                                    // null even with a valid result)  -  every other use of
-                                                    // it in this file null-checks before indexing; this one
-                                                    // didn't, which is exactly what broke the build.
-                                                    if (box != null) {
-                                                        // Spawn near the upper-right of the face  -  reads as a
-                                                        // reaction floating up beside it, not glued to a fixed point.
-                                                        val spawnX = box[2] - (box[2] - box[0]) * 0.15f
-                                                        val spawnY = box[1] + (box[3] - box[1]) * 0.2f
-                                                        stickersSystem.spawnBurst(spawnX, spawnY, count = 1, speed = 0.12f, lifetimeSec = 1.2f)
+                                                val jawOpen = faceTracker.blendshapeScore(result, "jawOpen")
+                                                val browUp = faceTracker.blendshapeScore(result, "browInnerUp")
+
+                                                // ADDED: Surprise and Laugh (the app's own reference shows
+                                                // 5 reactions total; only Smile then Love existed before
+                                                // this). Checked first, with a priority order so they don't
+                                                // fire redundantly alongside Smile below - see the
+                                                // live-preview path's comment for the full reasoning.
+                                                val reactionText = when {
+                                                    jawOpen > 0.5f && browUp > 0.4f -> "\uD83D\uDE2E WOW!"
+                                                    jawOpen > 0.4f && smile > 0.3f -> "\uD83D\uDE02 HA HA"
+                                                    else -> null
+                                                }
+                                                if (currentStickerText != null && jawOpen < 0.25f) {
+                                                    currentStickerText = null
+                                                } else if (currentStickerText == null && reactionText != null) {
+                                                    currentStickerText = reactionText
+                                                }
+                                                val box = faceTracker.faceBoundingBox(result)
+                                                if (box != null) {
+                                                    val mouth = faceTracker.mouthCenter(result)
+                                                    stickerAnchorX = mouth?.first ?: ((box[0] + box[2]) / 2f)
+                                                    stickerAnchorY = box[1]
+                                                }
+                                                val textToBuild = currentStickerText
+                                                if (textToBuild != null && textToBuild != lastBuiltStickerText) {
+                                                    if (stickerTextureId != 0) GLES20.glDeleteTextures(1, intArrayOf(stickerTextureId), 0)
+                                                    val bubble = OverlayBuilder.buildWordBubble(textToBuild, Color.rgb(255, 220, 90), height * 0.055f)
+                                                    stickerTextureId = bubble.textureId
+                                                    stickerWidthPx = bubble.widthPx
+                                                    stickerHeightPx = bubble.heightPx
+                                                    lastBuiltStickerText = textToBuild
+                                                } else if (textToBuild == null && stickerTextureId != 0) {
+                                                    GLES20.glDeleteTextures(1, intArrayOf(stickerTextureId), 0)
+                                                    stickerTextureId = 0
+                                                    lastBuiltStickerText = null
+                                                }
+
+                                                // Smile (hearts) now excludes high jawOpen, so it doesn't
+                                                // also fire every time Laugh does above.
+                                                if (smile > 0.35f && jawOpen < 0.4f && box != null) {
+                                                    // Spawn near the upper-right of the face  -  reads as a
+                                                    // reaction floating up beside it, not glued to a fixed point.
+                                                    val spawnX = box[2] - (box[2] - box[0]) * 0.15f
+                                                    val spawnY = box[1] + (box[3] - box[1]) * 0.2f
+                                                    stickersSystem.spawnBurst(spawnX, spawnY, count = 1, speed = 0.12f, lifetimeSec = 1.2f)
+                                                }
+                                                // ADDED: Love reaction (the app's own reference shows 5
+                                                // reactions total - Smile, Surprised, Laugh, Thinking, Love;
+                                                // only Smile existed before this). Reuses the exact same
+                                                // heart-shaped particle rendering as Smile - no new shader
+                                                // shape needed - triggered by a real "kiss" blendshape
+                                                // (mouthPucker) instead of mouthSmile, spawning from the
+                                                // mouth position instead of upper-right of the face box,
+                                                // since a kiss reaction reads as coming from the lips.
+                                                val pucker = faceTracker.blendshapeScore(result, "mouthPucker")
+                                                if (pucker > 0.45f) {
+                                                    val mouth = faceTracker.mouthCenter(result)
+                                                    if (mouth != null) {
+                                                        stickersSystem.spawnBurst(mouth.first, mouth.second, count = 1, speed = 0.1f, lifetimeSec = 1.3f)
                                                     }
                                                 }
                                             }
@@ -787,6 +873,9 @@ class VideoTranscoder {
                                                     // 2 sparkles/frame keeps a steady shimmer without
                                                     // flooding MAX_PARTICLES (24) within a second or two.
                                                     palmMagicSystem.spawnBurst(palm.first, palm.second, count = 2, speed = 0.15f, lifetimeSec = 1.4f)
+                                                    // Real palm position for the new ring core - same
+                                                    // value already computed above, no new tracking.
+                                                    renderer.palmCenter = floatArrayOf(palm.first, palm.second)
                                                 }
                                             }
                                         }
@@ -1099,6 +1188,18 @@ class VideoTranscoder {
                             )
                         }
 
+                        // ADDED: draw call for Stickers React's new Surprise/Laugh
+                        // text bubble - same drawWatermarkAt reuse as the two blocks above.
+                        if (selectedEffect == VisualEffect.STICKERS_REACT && stickerTextureId != 0) {
+                            val bubbleLeft = stickerAnchorX * width - stickerWidthPx / 2f
+                            val bubbleTop = stickerAnchorY * height - stickerHeightPx - (0.02f * height)
+                            renderer.drawWatermarkAt(
+                                stickerTextureId, bubbleLeft, bubbleTop,
+                                stickerWidthPx, stickerHeightPx,
+                                width, height
+                            )
+                        }
+
                         eglCore.setPresentationTime(windowSurface, bufferInfo.presentationTimeUs * 1000)
                         eglCore.swapBuffers(windowSurface)
                     }
@@ -1160,6 +1261,7 @@ class VideoTranscoder {
         captionTextureId?.let { texturesToDelete.add(it) }
         logoTexture?.let { texturesToDelete.add(it.textureId) }
         if (mouthWordTextureId != 0) texturesToDelete.add(mouthWordTextureId)
+        if (stickerTextureId != 0) texturesToDelete.add(stickerTextureId)
         if (rpsTextureId != 0) texturesToDelete.add(rpsTextureId)
         if (texturesToDelete.isNotEmpty()) {
             GLES20.glDeleteTextures(texturesToDelete.size, texturesToDelete.toIntArray(), 0)

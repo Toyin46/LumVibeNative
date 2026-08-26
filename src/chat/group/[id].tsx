@@ -24,9 +24,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
-  StyleSheet, SafeAreaView, StatusBar, KeyboardAvoidingView,
+  StyleSheet, StatusBar, KeyboardAvoidingView,
   Platform, Image, ActivityIndicator, Alert, Modal,
 } from 'react-native';
+// FIX: same issue as chat/[id].tsx — plain react-native's SafeAreaView is
+// iOS-only (a no-op View on Android), which is why this header could clip
+// under the status bar. react-native-safe-area-context's version works on
+// both platforms.
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import { RealtimeChannel } from '@supabase/supabase-js';
@@ -95,6 +100,15 @@ export default function GroupChatScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<GroupChatRouteProp>();
   const { id } = route.params;
+
+  // FIX: same missing-tab-bar-hide bug as chat/[id].tsx — MainTabBar
+  // already knows how to hide itself when a screen asks it to; this
+  // screen just never asked, so the tab bar sat visible at the bottom of
+  // every group chat, eating space the layout didn't budget for.
+  useEffect(() => {
+    navigation.getParent()?.setOptions({ tabBarStyle: { display: 'none' } });
+    return () => { navigation.getParent()?.setOptions({ tabBarStyle: undefined }); };
+  }, [navigation]);
 
   const { user } = useAuthStore();
   const flatRef = useRef<FlatList>(null);
@@ -206,7 +220,18 @@ export default function GroupChatScreen() {
     finally { setSending(false); }
   };
 
+  // FIX (same race as chat/[id].tsx): startRecording awaits mic permission
+  // + prepareToRecordAsync before actually calling record(). A quick
+  // tap-and-release could fire stopRecording before that finishes, so
+  // stopRecording ran on a not-yet-started recorder (no-op), and moments
+  // later startRecording's record() call had nothing left to stop it —
+  // exactly "release the button but it keeps recording."
+  const stopRequestedRef = useRef(false);
+  const isStartingRef    = useRef(false);
+
   const startRecording = async () => {
+    stopRequestedRef.current = false;
+    isStartingRef.current = true;
     try {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
@@ -215,13 +240,17 @@ export default function GroupChatScreen() {
       }
       await AudioModule.setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await audioRecorder.prepareToRecordAsync();
+      if (stopRequestedRef.current) return; // user already let go — don't start at all
       audioRecorder.record();
       setIsRecording(true); setRecDur(0);
       recordTimerRef.current = setInterval(() => setRecDur(p => p + 1), 1000);
     } catch (e) { console.error(e); }
+    finally { isStartingRef.current = false; }
   };
 
   const stopRecording = async () => {
+    stopRequestedRef.current = true;
+    if (isStartingRef.current) return; // nothing recording yet — startRecording will bail itself out
     if (recordTimerRef.current) clearInterval(recordTimerRef.current);
     if (!user?.id) return;
     try {
@@ -343,7 +372,14 @@ export default function GroupChatScreen() {
           <Text style={s.memberCount}>{group?.member_count || 0} members</Text>
         </View>
         <TouchableOpacity style={s.infoBtn}
-          onPress={() => navigation.navigate('GroupInfo', { id })}>
+          onPress={() => {
+            // FIX: GroupInfo isn't registered in ChatStack.tsx yet (see the
+            // TODO there) — navigating to it crashes with the same "not
+            // handled by any navigator" error the old CoWatch bug had.
+            // Guarding it with a clear message instead of a crash until
+            // that screen is built.
+            Alert.alert('Coming soon', 'Group info & member management is on the way.');
+          }}>
           <Ionicons name="information-circle-outline" size={22} color={C.muted} />
         </TouchableOpacity>
       </View>

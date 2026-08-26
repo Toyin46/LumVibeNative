@@ -1,5 +1,8 @@
 package com.lumvibe.videobaker
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaCodec
@@ -9,6 +12,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
 import android.util.Log
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -43,6 +47,7 @@ import java.nio.ByteBuffer
 * else touched this session. Test with a short (2-3s) recording first.
 */
 class LiveRecorder(
+    private val context: Context,
     private val width: Int,
     private val height: Int,
     private val videoOnlyPath: String,
@@ -102,8 +107,29 @@ class LiveRecorder(
         return surface
     }
 
-    /** Starts raw PCM capture on its own thread. Call after startVideo(). */
+    /** Starts raw PCM capture on its own thread. Call after startVideo().
+     *
+     * ADDED: an explicit RECORD_AUDIO permission check, first thing. Previously
+     * this method had no way to distinguish "permission never granted" from
+     * "AudioRecord failed for some other reason" - both fell through to the
+     * same generic try/catch/state-check below and logged near-identical
+     * warnings, so a permission problem and a genuine device/hardware issue
+     * were indistinguishable in Logcat. This mirrors the exact check
+     * LiveAudioReader.kt already does for the same permission on the live
+     * amplitude-reading path - if THAT class's audio-reactive effects
+     * (Voice Halo, Aura Glow, Thermal Pulse) have also been looking flat/silent
+     * on-device, it's very likely the same root cause showing up twice.
+     */
     fun startAudio() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.w(TAG, "RECORD_AUDIO not granted - recording without audio. " +
+                "This is very likely why exported videos have been silent: " +
+                "confirm the permission is actually being requested/granted at " +
+                "runtime, not just declared in the manifest.")
+            return
+        }
         val minBufSize = AudioRecord.getMinBufferSize(
             AUDIO_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )

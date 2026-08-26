@@ -569,6 +569,8 @@ const VideoPost = memo(function VideoPost({
   const [showEndScreen,    setShowEndScreen]    = useState(false);
   // ✅ NEW: three-dot menu state
   const [menuVisible,      setMenuVisible]      = useState(false);
+  // ✅ NEW: Co-Watch / Watch Together bottom-sheet state
+  const [cowatchModalVisible, setCowatchModalVisible] = useState(false);
 
   const isFollowing  = followStatusMap.get(item.user_id) || false;
   const videoRef     = useRef<any>(null);
@@ -672,6 +674,25 @@ const VideoPost = memo(function VideoPost({
 
   const togglePlay = () => { setIsPlaying(prev => !prev); };
   const toggleMute = () => { setIsMuted(prev => !prev); };
+
+  // ✅ NEW: Watch Together bottom-sheet handlers
+  // FIX: 'Cowatch' is registered inside the nested ChatStack (the
+  // "Messages" tab), not as a direct route of the tab navigator that
+  // VideosScreen belongs to — so it must be reached with the nested
+  // navigator syntax below, and the name must match ChatStack.tsx's
+  // registration exactly ('Cowatch', not 'CoWatch').
+  const handleAiMatchMe = useCallback(() => {
+    setCowatchModalVisible(false);
+    navigation.navigate('Messages', {
+      screen: 'Cowatch',
+      params: { conversationId: '', otherName: '', otherPhoto: '', isAiMatch: 'true' },
+    });
+  }, [navigation]);
+
+  const handleWatchWithFriends = useCallback(() => {
+    setCowatchModalVisible(false);
+    navigation.navigate('Messages', { screen: 'MessagesHome' });
+  }, [navigation]);
 
   const videoStyle = { width, height };
 
@@ -858,6 +879,56 @@ const VideoPost = memo(function VideoPost({
         </TouchableOpacity>
       </Modal>
 
+      {/* ✅ NEW: Watch Together bottom sheet — replaces the old Alert.alert.
+          FIX: this must live in VideoPost's own return (same scope as the
+          Co-Watch button and its state/handlers above) — it was previously
+          pasted after the shared report modal in VideosScreen, a different
+          component, which is why cowatchModalVisible/handleAiMatchMe etc.
+          weren't in scope there. */}
+      <Modal visible={cowatchModalVisible} transparent animationType="slide" onRequestClose={() => setCowatchModalVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={cowatchStyles.sheet}>
+            <View style={cowatchStyles.handle} />
+
+            <View style={cowatchStyles.header}>
+              <View style={cowatchStyles.headerIcon}>
+                <Feather name="users" size={22} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={cowatchStyles.title}>Watch Together</Text>
+                <Text style={cowatchStyles.subtitle}>Choose how you'd like to co-watch this video</Text>
+              </View>
+            </View>
+
+            <TouchableOpacity style={[cowatchStyles.option, cowatchStyles.optionFriends]} onPress={handleWatchWithFriends} activeOpacity={0.8}>
+              <View style={[cowatchStyles.optionIcon, cowatchStyles.optionIconFriends]}>
+                <Feather name="users" size={20} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={cowatchStyles.optionTitle}>Watch with Friends</Text>
+                <Text style={cowatchStyles.optionSubtitle}>Invite your friends to join and watch together in real-time.</Text>
+              </View>
+              <Feather name="chevron-right" size={20} color="#00ff88" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[cowatchStyles.option, cowatchStyles.optionAi]} onPress={handleAiMatchMe} activeOpacity={0.8}>
+              <View style={[cowatchStyles.optionIcon, cowatchStyles.optionIconAi]}>
+                <Feather name="cpu" size={20} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={cowatchStyles.optionTitle}>AI Match Me</Text>
+                <Text style={cowatchStyles.optionSubtitle}>Let AI find someone with similar vibes to watch with.</Text>
+              </View>
+              <Feather name="chevron-right" size={20} color="#a78bfa" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={cowatchStyles.cancelBtn} onPress={() => setCowatchModalVisible(false)} activeOpacity={0.7}>
+              <Text style={cowatchStyles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {item.music_name && (
         <View style={styles.musicContainer}>
           <Feather name="music" size={12} color="#00ff88" />
@@ -932,17 +1003,7 @@ const VideoPost = memo(function VideoPost({
         {/* Co-Watch button */}
         <TouchableOpacity
           style={styles.actionButtonRight}
-          onPress={() => {
-            Alert.alert(
-              '👥 Watch Together',
-              'Choose how to co-watch this video',
-              [
-                { text: '🤖 AI Match Me', onPress: () => navigation.navigate('CoWatch', { conversationId: '', otherName: '', otherPhoto: '', isAiMatch: 'true' }) },
-                { text: '👤 Watch with Friend', onPress: () => navigation.navigate('Messages') },
-                { text: 'Cancel', style: 'cancel' },
-              ],
-            );
-          }}
+          onPress={() => setCowatchModalVisible(true)}
           activeOpacity={0.7}
         >
           <View style={styles.iconContainer}>
@@ -1158,26 +1219,6 @@ export default function VideosScreen() {
     catch { return ''; }
   }, []);
 
-  // ✅ PERFORMANCE FIX: any UPDATE on the posts table (e.g. a view count
-  // tick, a coin gift landing) was triggering an immediate full reload for
-  // every connected phone. Debouncing collapses bursts of updates into at
-  // most one reload every 2 seconds.
-  const updateDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const debouncedReload = useCallback(() => {
-    if (updateDebounceRef.current) clearTimeout(updateDebounceRef.current);
-    updateDebounceRef.current = setTimeout(() => {
-      if (!isLoadingRef.current) loadVideos(true);
-    }, 2000);
-  }, []);
-
-  // ✅ PERFORMANCE FIX: pagination state — previously the video feed always
-  // fetched the newest 50 videos and never fetched more, same issue as the
-  // home feed.
-  const feedOffsetRef      = useRef(0);
-  const totalPostCountRef  = useRef(0);
-  const hasMoreFeedRef     = useRef(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-
   useEffect(() => {
     Promise.all([loadVideos(), loadWeeklyWinners()]);
     const videosChannel = supabase.channel('videos-changes')
@@ -1188,13 +1229,10 @@ export default function VideosScreen() {
         }
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'posts' }, () => {
-        debouncedReload();
+        if (!isLoadingRef.current) loadVideos(true);
       })
       .subscribe();
-    return () => {
-      supabase.removeChannel(videosChannel);
-      if (updateDebounceRef.current) clearTimeout(updateDebounceRef.current);
-    };
+    return () => { supabase.removeChannel(videosChannel); };
   }, []);
 
   const onRefresh = useCallback(async () => {
@@ -1350,131 +1388,9 @@ export default function VideosScreen() {
 
       videoCacheRef.current = { data: itemsWithAds, timestamp: Date.now() };
       setFeedItems(itemsWithAds);
-      // ✅ PERFORMANCE FIX: record where the next page should start from.
-      feedOffsetRef.current     = postsData.length;
-      totalPostCountRef.current = topPosts.length;
-      hasMoreFeedRef.current    = postsData.length >= 50;
       await loadFollowStatus(userIds);
     } catch (e: any) { Alert.alert('Error', e.message || 'Failed to load videos'); }
     finally { clearTimeout(loadTimeout); setLoading(false); isLoadingRef.current = false; }
-  };
-
-  // ✅ PERFORMANCE FIX: fetches the next batch of videos when scrolled near
-  // the bottom instead of the feed dead-ending at 50. Mirrors loadVideos'
-  // formatting/scoring exactly; only the ad/winner-card injection index
-  // continues from where the previous page left off.
-  const loadMoreVideos = async () => {
-    if (loadingMore || isLoadingRef.current || !hasMoreFeedRef.current) return;
-    setLoadingMore(true);
-    try {
-      const { data: postsData, error: postsError } = await supabase
-        .from('posts')
-        .select('id,user_id,caption,media_url,watermarked_url,media_type,views_count,coins_received,comments_count,saved_by,liked_by,location,music_name,music_artist,music_url,voice_duration,created_at,has_watermark,applied_filter,video_effect,video_filter_tint,playback_rate,vibe_type,cloudinary_public_id,is_published,marketplace_listing_id,marketplace_price,marketplace_title')
-        .eq('media_type', 'video')
-        .or('is_published.is.null,is_published.eq.true')
-        .order('created_at', { ascending: false })
-        .range(feedOffsetRef.current, feedOffsetRef.current + 49);
-
-      if (postsError) throw postsError;
-      if (!postsData || postsData.length === 0) { hasMoreFeedRef.current = false; return; }
-
-      const existingIds = new Set(posts.map(p => p.id));
-      const freshPostsData = postsData.filter((p: any) => !existingIds.has(p.id));
-
-      feedOffsetRef.current += postsData.length;
-      hasMoreFeedRef.current = postsData.length >= 50;
-
-      if (freshPostsData.length === 0) return;
-
-      const userIds = [...new Set(freshPostsData.map((p: any) => p.user_id))];
-      const postIds = freshPostsData.map((p: any) => p.id);
-
-      const [usersResult, likesResult, commentsResult, followingResult] = await Promise.all([
-        supabase.from('users').select('id, username, display_name, avatar_url, followers_count').in('id', userIds),
-        supabase.from('likes').select('post_id, user_id').in('post_id', postIds),
-        supabase.from('comments').select('post_id').in('post_id', postIds).is('parent_comment_id', null),
-        userId ? supabase.from('follows').select('following_id').eq('follower_id', userId) : Promise.resolve({ data: [] }),
-      ]);
-
-      const usersMap = new Map<string, any>(); usersResult.data?.forEach(u => usersMap.set(u.id, u));
-      const likesMap = new Map<string, { count: number; users: string[] }>();
-      likesResult.data?.forEach(like => { const existing = likesMap.get(like.post_id) || { count: 0, users: [] }; existing.count++; existing.users.push(like.user_id); likesMap.set(like.post_id, existing); });
-      const commentsMap = new Map<string, number>();
-      commentsResult.data?.forEach(c => { commentsMap.set(c.post_id, (commentsMap.get(c.post_id) || 0) + 1); });
-      const followingSet = new Set<string>();
-      (followingResult as any).data?.forEach((f: any) => followingSet.add(f.following_id));
-
-      const formattedPosts: Post[] = freshPostsData.map((p: any) => {
-        const likes    = likesMap.get(p.id) || { count: 0, users: [] };
-        const postUser = usersMap.get(p.user_id);
-        return {
-          id: p.id, user_id: p.user_id,
-          username: postUser?.username || 'unknown', display_name: postUser?.display_name || 'Unknown',
-          user_photo_url: postUser?.avatar_url, media_url: cdnVideoUrl(p.media_url), caption: p.caption || '',
-          likes_count: likes.count, comments_count: p.comments_count ?? commentsMap.get(p.id) ?? 0,
-          views_count: p.views_count || 0, coins_received: p.coins_received || 0,
-          liked_by: likes.users, location: p.location,
-          music_name: p.music_name, music_artist: p.music_artist,
-          music_url: p.music_url || null,
-          voice_duration: p.voice_duration || null,
-          applied_filter: p.applied_filter || 'original',
-          created_at: p.created_at, has_watermark: p.has_watermark || false,
-          watermarked_url: cdnVideoUrl(p.watermarked_url) || null,
-          video_effect: p.video_effect || 'none', video_filter_tint: p.video_filter_tint || null,
-          playback_rate: p.playback_rate || null,
-          vibe_type: p.vibe_type ?? null,
-          vibe_room_id: null,
-        };
-      });
-
-      const newVibeRoomMap = new Map<string, VibeRoomPreview>(vibeRoomMap);
-      try {
-        const { data: vibeRoomsData } = await supabase
-          .from('vibe_rooms')
-          .select('id, post_id, title, status, scheduled_for, viewer_count')
-          .in('post_id', postIds)
-          .neq('status', 'ended');
-        vibeRoomsData?.forEach((vr: any) => {
-          newVibeRoomMap.set(vr.post_id, {
-            id: vr.id, post_id: vr.post_id, title: vr.title,
-            status: vr.status, scheduled_for: vr.scheduled_for,
-            viewer_count: vr.viewer_count || 0,
-          });
-        });
-        setVibeRoomMap(newVibeRoomMap);
-      } catch { /* vibe_rooms table may not exist yet */ }
-
-      const scoredPosts = formattedPosts.map(post => ({
-        ...post,
-        _score: computeVideoScore(post, followingSet, usersMap.get(post.user_id)?.followers_count || 0, viewerCity),
-      }));
-      scoredPosts.sort((a, b) => (b._score || 0) - (a._score || 0));
-
-      const newItems: FeedItem[] = [];
-      let adCounter = Math.floor(totalPostCountRef.current / 4);
-      scoredPosts.forEach((post, i) => {
-        const runningIndex = totalPostCountRef.current + i;
-        newItems.push(post);
-        if ((runningIndex + 1) % 4 === 0) {
-          newItems.push({ id: `ad_${adCounter}`, isAd: true, adIndex: adCounter });
-          adCounter++;
-        }
-      });
-
-      totalPostCountRef.current += scoredPosts.length;
-      setPosts(prev => [...prev, ...scoredPosts]);
-      setFeedItems(prev => {
-        const updated = [...prev, ...newItems];
-        videoCacheRef.current = { data: updated, timestamp: Date.now() };
-        return updated;
-      });
-      await loadFollowStatus(userIds);
-    } catch (e: any) {
-      console.error('Error loading more videos:', e);
-      // Silent — don't interrupt scrolling with an alert for a failed page 2.
-    } finally {
-      setLoadingMore(false);
-    }
   };
 
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
@@ -1894,10 +1810,6 @@ export default function VideosScreen() {
         windowSize={FEED_SETTINGS.windowSize} maxToRenderPerBatch={FEED_SETTINGS.maxToRenderPerBatch}
         initialNumToRender={FEED_SETTINGS.initialNumToRender} updateCellsBatchingPeriod={FEED_SETTINGS.updateCellsBatchingPeriod}
         removeClippedSubviews={true}
-        // ✅ PERFORMANCE FIX: video feed now paginates instead of dead-ending at 50 videos.
-        onEndReached={loadMoreVideos}
-        onEndReachedThreshold={0.6}
-        ListFooterComponent={loadingMore ? <View style={{ paddingVertical: 24, height }}><ActivityIndicator size="small" color="#00ff88" /></View> : null}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -2017,7 +1929,7 @@ export default function VideosScreen() {
       {/* COMMENT MODAL */}
       <Modal visible={commentModalVisible} animationType="slide" onRequestClose={() => setCommentModalVisible(false)}>
         <View style={styles.commentModal}>
-          <View style={[styles.commentModalHeader, { paddingTop: insets.top + 16 }]}>
+          <View style={styles.commentModalHeader}>
             <TouchableOpacity onPress={() => { setCommentModalVisible(false); setReplyingTo(null); }} style={styles.backButton}><Feather name="arrow-left" size={24} color="#fff" /></TouchableOpacity>
             <Text style={styles.commentModalTitle}>{t.comments.title}</Text>
             <View style={{ width: 40 }} />
@@ -2110,6 +2022,25 @@ export default function VideosScreen() {
     </View>
   );
 }
+
+const cowatchStyles = StyleSheet.create({
+  sheet:             { backgroundColor: '#111', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingBottom: 36, paddingTop: 8 },
+  handle:            { width: 40, height: 4, backgroundColor: '#333', borderRadius: 2, alignSelf: 'center', marginBottom: 16 },
+  header:            { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 4, marginBottom: 18 },
+  headerIcon:        { width: 48, height: 48, borderRadius: 14, backgroundColor: '#7c3aed', justifyContent: 'center', alignItems: 'center' },
+  title:             { color: '#fff', fontSize: 19, fontWeight: '700' },
+  subtitle:          { color: '#999', fontSize: 13, marginTop: 2 },
+  option:            { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: '#1a1a1a', borderRadius: 16, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: '#242424' },
+  optionFriends:     { backgroundColor: 'rgba(0,255,136,0.08)', borderColor: 'rgba(0,255,136,0.25)' },
+  optionAi:          { backgroundColor: 'rgba(124,58,237,0.12)', borderColor: 'rgba(167,139,250,0.35)' },
+  optionIcon:        { width: 44, height: 44, borderRadius: 12, backgroundColor: '#2a2a2a', justifyContent: 'center', alignItems: 'center' },
+  optionIconFriends: { backgroundColor: '#00b368' },
+  optionIconAi:      { backgroundColor: '#7c3aed' },
+  optionTitle:       { color: '#fff', fontSize: 15, fontWeight: '700' },
+  optionSubtitle:    { color: '#999', fontSize: 12, marginTop: 3, lineHeight: 16 },
+  cancelBtn:         { marginTop: 4, paddingVertical: 14, alignItems: 'center' },
+  cancelText:        { color: '#888', fontSize: 15, fontWeight: '600' },
+});
 
 const videoShopStyles = StyleSheet.create({
   shopBtn:     { flexDirection: 'row', alignItems: 'center', backgroundColor: '#00ff88', marginTop: 10, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, gap: 6, alignSelf: 'flex-start' },
@@ -2266,7 +2197,7 @@ const styles = StyleSheet.create({
   sendButton:           { backgroundColor: '#00ff88' },
   sendButtonText:       { color: '#000', fontSize: 16, fontWeight: '600' },
   commentModal:         { flex: 1, backgroundColor: '#000' },
-  commentModalHeader:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 16, backgroundColor: '#0a0a0a', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
+  commentModalHeader:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 60, paddingBottom: 16, backgroundColor: '#0a0a0a', borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
   backButton:           { padding: 4 },
   commentModalTitle:    { color: '#fff', fontSize: 18, fontWeight: '600' },
   loadingCommentsContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },

@@ -157,6 +157,87 @@ object OverlayBuilder {
      * every word/color combination (WOW/OMG/HAHA today, any future word later)
      * without duplicating this drawing logic per word.
      */
+    /** One word in an active MOUTH_WORDS cascade: text, color, and how far along
+     * its lifetime it is (0 = just spawned, full size/opacity; 1 = about to
+     * expire, drifted up and faded out). Age is computed by the caller from a
+     * spawn timestamp - this class only cares about the resulting fraction. */
+    data class CascadeWord(val text: String, val color: Int, val ageFraction: Float)
+
+    /**
+     * MOUTH_WORDS's cascade rewrite - composites every currently-active word
+     * onto ONE bitmap (staggered vertical offset and fading alpha by age),
+     * instead of buildWordBubble's single static word. Deliberately keeps the
+     * existing single-texture-per-frame GL architecture unchanged - the flow
+     * is entirely a CPU-side Canvas compositing difference, uploaded as one
+     * texture same as before. Reuses buildWordBubble's exact glow technique
+     * per word (same setShadowLayer approach), just called once per active
+     * word into a shared canvas instead of once per bitmap.
+     *
+     * COST NOTE, stated plainly: unlike buildWordBubble (only rebuilt when the
+     * word changes), this must be rebuilt every frame the cascade is active,
+     * since words are continuously drifting/fading rather than sitting still.
+     * That's a real, ongoing cost for this effect specifically - a handful of
+     * small text draws onto a modest-sized bitmap per frame, not full-frame
+     * work, but worth knowing it's there rather than presenting this as free.
+     */
+    fun buildWordCascade(words: List<CascadeWord>, targetHeightPx: Float): LogoTexture? {
+        if (words.isEmpty()) return null
+
+        val density = targetHeightPx / 60f
+        val textSizePx = 44f * density
+        val strokeWidthPx = 5f * density
+        val glowRadiusPx = 14f * density
+        val riseDistancePx = targetHeightPx * 3.2f // how far a word drifts up over its lifetime
+
+        // Bitmap tall enough to fit the full rise distance above the anchor,
+        // plus padding on every side for stroke/glow.
+        val bmpW = (targetHeightPx * 7f).toInt().coerceAtLeast(1)
+        val bmpH = (riseDistancePx + targetHeightPx * 2f).toInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        for (word in words) {
+            val fade = (1f - word.ageFraction).coerceIn(0f, 1f)
+            val alpha = (fade * 255).toInt()
+            if (alpha <= 2) continue // fully faded, skip the draw entirely
+
+            val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = word.color
+                this.alpha = alpha
+                textSize = textSizePx * (0.85f + 0.15f * fade) // slight shrink as it fades/rises
+                isFakeBoldText = true
+                textAlign = Paint.Align.CENTER
+                setShadowLayer(glowRadiusPx, 0f, 0f, word.color)
+            }
+            val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.BLACK
+                this.alpha = alpha
+                textSize = fillPaint.textSize
+                isFakeBoldText = true
+                textAlign = Paint.Align.CENTER
+                style = Paint.Style.STROKE
+                strokeWidth = strokeWidthPx
+            }
+
+            // Small per-word horizontal drift (deterministic from the word's
+            // own text hash, not random per-frame - a word shouldn't jitter
+            // sideways from one frame to the next) plus the vertical rise.
+            val xJitter = ((word.text.hashCode() % 40) - 20) * density
+            val x = bmpW / 2f + xJitter
+            val y = bmpH - targetHeightPx - (word.ageFraction * riseDistancePx)
+
+            canvas.drawText(word.text, x, y, strokePaint)
+            canvas.drawText(word.text, x, y, fillPaint)
+        }
+
+        val textureId = GlUtil.createTexture2D()
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        val result = LogoTexture(textureId, bmpW.toFloat(), bmpH.toFloat())
+        bitmap.recycle()
+        return result
+    }
+
     fun buildWordBubble(word: String, textColor: Int, targetHeightPx: Float): LogoTexture {
         // Scale factor relative to a 60px-tall reference design, matching the
         // same "density from target size" convention buildWatermarkCard uses above.
@@ -164,12 +245,21 @@ object OverlayBuilder {
         val textSizePx = 48f * density
         val strokeWidthPx = 6f * density
         val paddingPx = 12f * density
+        // REWRITE: added glow (was flat comic-pop text with no glow at all,
+        // which read as a different, simpler style than the luminous reference
+        // this effect is meant to match). Radius is generous on purpose - a
+        // subtle glow reads as barely-there at the small on-screen size this
+        // texture actually renders at.
+        val glowRadiusPx = 16f * density
 
         val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = textColor
             textSize = textSizePx
             isFakeBoldText = true
             textAlign = Paint.Align.LEFT
+            // setShadowLayer on a plain Bitmap-backed Canvas (not a View's
+            // hardware layer) renders in software with no extra setup needed.
+            setShadowLayer(glowRadiusPx, 0f, 0f, textColor)
         }
         val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
@@ -185,16 +275,19 @@ object OverlayBuilder {
         val textWidth = bounds.width().toFloat()
         val textHeight = bounds.height().toFloat()
 
-        val bmpW = (textWidth + paddingPx * 2 + strokeWidthPx * 2).toInt().coerceAtLeast(1)
-        val bmpH = (textHeight + paddingPx * 2 + strokeWidthPx * 2).toInt().coerceAtLeast(1)
+        // Bitmap padded out further to fit the glow radius too, or the glow
+        // clips at the texture edge instead of fading out naturally.
+        val bmpW = (textWidth + paddingPx * 2 + strokeWidthPx * 2 + glowRadiusPx * 2).toInt().coerceAtLeast(1)
+        val bmpH = (textHeight + paddingPx * 2 + strokeWidthPx * 2 + glowRadiusPx * 2).toInt().coerceAtLeast(1)
         val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
-        val baselineX = paddingPx + strokeWidthPx
-        val baselineY = paddingPx + strokeWidthPx + textHeight
+        val baselineX = paddingPx + strokeWidthPx + glowRadiusPx
+        val baselineY = paddingPx + strokeWidthPx + glowRadiusPx + textHeight
 
-        // Outline drawn first (sits behind), then the colored fill on top —
-        // the classic comic-text "pop" look, legible over any background.
+        // Outline drawn first (sits behind, no glow on it - keeps the glow
+        // reading as light coming from the colored fill, not the outline),
+        // then the glowing colored fill on top.
         canvas.drawText(word, baselineX, baselineY, strokePaint)
         canvas.drawText(word, baselineX, baselineY, fillPaint)
 

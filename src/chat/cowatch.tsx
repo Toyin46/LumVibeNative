@@ -59,7 +59,7 @@ import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
 import NetInfo from '@react-native-community/netinfo';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 // FIX 2: Correct relative paths for bare workflow
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
@@ -2339,6 +2339,14 @@ export default function CowatchScreen() {
 
   const navigation = useNavigation<any>();
   const { user, userProfile, loadProfile } = useAuthStore();
+  // FIX: topBarRow1 (back button, name, controls) used a hardcoded
+  // paddingTop of 10-12px, but the outer SafeAreaView deliberately excludes
+  // the top edge here (immersive full-screen video) — so that fixed value
+  // never accounted for the actual status bar/notch height, and the top
+  // bar sat right under the clock/battery icons on Android. Same root
+  // cause as the chat/[id].tsx and group/[id].tsx status-bar bugs, just a
+  // manually-padded overlay bar instead of a SafeAreaView this time.
+  const insets = useSafeAreaInsets();
 
   // FIX: hide the parent bottom tab bar while Co-Watch is open — this is a
   // full-screen immersive view, but without this the tab bar (Home/Explore/
@@ -3213,7 +3221,7 @@ export default function CowatchScreen() {
 
         {/* TOP BAR */}
         <View style={[styles.topBarWrap, { pointerEvents: 'box-none' } as any]}>
-          <View style={styles.topBarRow1}>
+          <View style={[styles.topBarRow1, { paddingTop: insets.top + 10 }]}>
             <TouchableOpacity style={styles.backBtn} onPress={endCowatch}>
               <Feather name="chevron-down" size={20} color={C.white} />
             </TouchableOpacity>

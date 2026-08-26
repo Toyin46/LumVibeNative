@@ -390,64 +390,106 @@ object EffectShaders {
     // uIntensity is repurposed here to carry the live smile score (0..1) each frame,
     // set by VideoTranscoder right before this draw call  -  same uniform, no new
     // plumbing needed.
+    // Mood Ring  -  REBUILT from a full-frame hue-shift into an actual ring
+    // graphic around the face, confirmed against the app's own reference image
+    // (a smooth rainbow-gradient ring, not a whole-frame color shift). Reuses
+    // uFaceBox (same real tracked signal every face-box effect here uses) and
+    // the same layered-glow-ring technique as VOICE_HALO, recolored with a
+    // continuous hue sweep around the ring's circumference instead of a
+    // single reactive color. Smile score still drives it - brightness, spin
+    // speed - so it's still a real "mood" reaction, just shaped as a ring now.
     private val moodRing = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
-        uniform float uIntensity; // repurposed: live smile score 0..1, not a static strength
+        uniform vec4 uFaceBox;
+        uniform float uIntensity; // repurposed: live smile score 0..1
+        uniform float uTime;
 
-        vec3 hueShift(vec3 color, float hueAdjust) {
-            const vec3 kRGBToYPrime = vec3(0.299, 0.587, 0.114);
-            const vec3 kRGBToI = vec3(0.596, -0.275, -0.321);
-            const vec3 kRGBToQ = vec3(0.212, -0.523, 0.311);
-            const vec3 kYIQToR = vec3(1.0, 0.956, 0.621);
-            const vec3 kYIQToG = vec3(1.0, -0.272, -0.647);
-            const vec3 kYIQToB = vec3(1.0, -1.107, 1.704);
-
-            float yPrime = dot(color, kRGBToYPrime);
-            float i = dot(color, kRGBToI);
-            float q = dot(color, kRGBToQ);
-            float hue = atan(q, i) + hueAdjust;
-            float chroma = sqrt(i * i + q * q);
-            i = chroma * cos(hue);
-            q = chroma * sin(hue);
-            vec3 yiq = vec3(yPrime, i, q);
-            return vec3(dot(yiq, kYIQToR), dot(yiq, kYIQToG), dot(yiq, kYIQToB));
+        vec3 hsv2rgb(vec3 c) {
+            vec4 k = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+            vec3 p = abs(fract(c.xxx + k.xyz) * 6.0 - k.www);
+            return c.z * mix(k.xxx, clamp(p - k.xxx, 0.0, 1.0), c.y);
         }
 
         void main() {
-            vec4 src = texture2D(uTexture, vTexCoord);
-            // 0 = no shift, 1 = quarter-turn hue rotation at full smile
-            vec3 shifted = hueShift(src.rgb, uIntensity * 1.5708);
-            gl_FragColor = vec4(shifted, src.a);
+            vec4 base = texture2D(uTexture, vTexCoord);
+
+            vec2 center = vec2((uFaceBox.x + uFaceBox.z) * 0.5, (uFaceBox.y + uFaceBox.w) * 0.5);
+            float boxSize = max(uFaceBox.z - uFaceBox.x, uFaceBox.w - uFaceBox.y);
+            float baseRadius = boxSize * 0.8;
+            vec2 rel = vTexCoord - center;
+            float d = length(rel);
+            float angle = atan(rel.y, rel.x);
+
+            float response = pow(clamp(uIntensity, 0.0, 1.0), 0.6);
+            float idleBreath = 0.03 * sin(uTime * 1.1);
+            // Ring slowly rotates on its own, faster with a bigger smile - a
+            // mood ring should feel alive before you even react to it.
+            float spin = uTime * (0.12 + response * 0.5);
+            float radius = baseRadius * (1.0 + idleBreath + response * 0.08);
+
+            float glow = 0.0;
+            for (int i = 0; i < 3; i++) {
+                float ringOffset = float(i) * 0.05;
+                float ringDist = abs(d - (radius - ringOffset));
+                float falloff = exp(-ringDist * ringDist * 1000.0);
+                glow += falloff * (1.0 - float(i) * 0.3);
+            }
+            glow *= (0.45 + response * 0.9);
+
+            // Continuous rainbow sweep around the circumference - the actual
+            // visual identity of "mood ring," matching the reference.
+            float hue = fract((angle / 6.28318) + spin);
+            vec3 ringColor = hsv2rgb(vec3(hue, 0.85, 1.0));
+
+            gl_FragColor = vec4(base.rgb + ringColor * glow, base.a);
         }
     """.trimIndent()
 
-    // Wink Spark  -  uIntensity carries the wink score (0 = both eyes open or both
-    // closed, 1 = a clean single-eye wink). Spark is anchored at a fixed
-    // screen-space point (roughly where a face's eye sits when someone's
-    // recording themselves at arm's length) rather than a tracked eye position  -
-    // FaceTracker's blendshapes give us WHICH eye winked, not WHERE it is in the
-    // frame (that needs raw landmark coordinates, not blendshapes). Documented
-    // simplification, same spirit as MOOD_RING's original note; upgrade path is
-    // pulling landmark index 159 (left eye) / 386 (right eye) if precise
-    // positioning matters later.
+    // Wink Spark  -  REWRITTEN twice over: (1) uSparkOrigin is now the real
+    // wink-side eye landmark position (see FaceTracker.eyeCenter(), wired into
+    // all three dispatch paths above) instead of a fixed screen-space guess;
+    // (2) the spark itself is now actual 5-pointed star shapes - three,
+    // staggered sizes and independent rotation speeds, reading as a small
+    // sparkle cluster - instead of a radial ray-burst comb pattern, matching
+    // the reference image.
     private val winkSpark = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
         uniform float uIntensity; // repurposed: wink score 0..1
-        uniform vec2 uSparkOrigin; // normalized screen-space anchor, e.g. (0.62, 0.4)
+        uniform vec2 uSparkOrigin; // real eye landmark position now
+        uniform float uTime;
+
+        vec2 rot(vec2 p, float a) {
+            float c = cos(a);
+            float s = sin(a);
+            return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+        }
+
+        // Cheap 5-point star: radius alternates between outerR (at each
+        // point's tip) and innerR (at the gap between points) as angle
+        // sweeps around - a well-known, good-enough approximation for a
+        // small on-screen sparkle, not a precise geometric star SDF.
+        float star(vec2 p, float points, float innerR, float outerR) {
+            float angle = atan(p.y, p.x);
+            float d = length(p);
+            float seg = 6.28318 / points;
+            float a = mod(angle, seg) - seg * 0.5;
+            float r = mix(outerR, innerR, smoothstep(0.0, seg * 0.5, abs(a)));
+            return smoothstep(r, r * 0.85, d);
+        }
 
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
-            float d = distance(vTexCoord, uSparkOrigin);
 
-            // Radial rays: angle-based sine comb, masked by distance falloff, so it
-            // reads as a spark burst rather than a plain glowing dot.
-            vec2 delta = vTexCoord - uSparkOrigin;
-            float angle = atan(delta.y, delta.x);
-            float rays = pow(abs(sin(angle * 10.0)), 6.0);
-            float falloff = smoothstep(0.35, 0.0, d);
-            float spark = rays * falloff * uIntensity;
+            vec2 o1 = uSparkOrigin;
+            vec2 o2 = uSparkOrigin + vec2(0.035, -0.02);
+            vec2 o3 = uSparkOrigin + vec2(-0.03, 0.025);
+            float spark = 0.0;
+            spark += star(rot(vTexCoord - o1, uTime), 5.0, 0.006, 0.028);
+            spark += star(rot(vTexCoord - o2, -uTime * 1.4), 5.0, 0.003, 0.014) * 0.7;
+            spark += star(rot(vTexCoord - o3, uTime * 1.7), 5.0, 0.003, 0.011) * 0.6;
+            spark = clamp(spark, 0.0, 1.0) * uIntensity;
 
             vec3 sparkColor = vec3(1.0, 0.92, 0.55);
             gl_FragColor = vec4(base.rgb + sparkColor * spark * 2.0, base.a);
@@ -546,22 +588,33 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Aura Glow  -  same neon-edge-detect core as NEON_EDGE, but the glow color
-    // rotates continuously and its INTENSITY (not hue) is driven by uIntensity,
-    // which VideoTranscoder feeds from AudioAmplitudeReader.amplitudeAt() each
-    // frame. The pitch description asked for "color shifts with voice pitch"  -
-    // real pitch detection (finding the fundamental frequency) is a materially
-    // bigger DSP task than RMS amplitude; this ships amplitude-reactive first
-    // as a real, tested stand-in, with pitch as a documented future upgrade
-    // rather than something silently faked as "pitch."
+    // Aura Glow  -  REWRITTEN: was a frame-wide Sobel edge-glow (lit up ANY edge
+    // in the shot - background clutter included, not just the person), which is
+    // why it read as thin/generic next to the reference image's aura hugging the
+    // body outline. Now uses uMaskTexture (same real segmentation mask as GOLD_
+    // SKIN/DEPTH_BLOOM/SPLIT_PRISM - added to EffectRequirements.segmentationAudio
+    // Effects for this) two ways: (1) the local Sobel detail-glow is restricted to
+    // ON the person only, a rim-light on real hair/face/clothing edges instead of
+    // whatever happened to be in the background; (2) a separate "reach" term
+    // samples the mask at 8 angles x 2 radii (16 taps, each angle's radius jittered
+    // by a per-pixel hash) to estimate how close a BACKGROUND pixel sits to the
+    // silhouette, so the glow visibly extends past the body edge with an uneven,
+    // tendril-like falloff instead of a uniform ring. 16 taps is deliberately kept
+    // under DEPTH_BLOOM's existing 25-tap blur elsewhere in this file, as a budget
+    // anchor for what this codebase already runs on low-end hardware. Color-rotate
+    // and audio-amplitude-driven intensity are unchanged from the original version.
+    // Pitch-reactive color (vs. amplitude) remains a documented future upgrade,
+    // not something silently faked as "pitch" - unchanged reasoning from before.
     private val auraGlow = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
+        uniform sampler2D uMaskTexture;
         uniform vec2 uTexelSize;
         uniform float uTime;
         uniform float uIntensity; // repurposed: normalized audio amplitude 0..1
 
         float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+        float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
         vec3 hsv2rgb(vec3 c) {
             vec4 k = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
@@ -571,6 +624,7 @@ object EffectShaders {
 
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
+            float mask = texture2D(uMaskTexture, vTexCoord).a; // ALPHA_8: 1.0 = person
 
             float tl = luma(texture2D(uTexture, vTexCoord + uTexelSize * vec2(-1.0,  1.0)).rgb);
             float t  = luma(texture2D(uTexture, vTexCoord + uTexelSize * vec2( 0.0,  1.0)).rgb);
@@ -580,14 +634,31 @@ object EffectShaders {
             float bl = luma(texture2D(uTexture, vTexCoord + uTexelSize * vec2(-1.0, -1.0)).rgb);
             float b  = luma(texture2D(uTexture, vTexCoord + uTexelSize * vec2( 0.0, -1.0)).rgb);
             float br = luma(texture2D(uTexture, vTexCoord + uTexelSize * vec2( 1.0, -1.0)).rgb);
-
             float gx = -tl - 2.0 * l - bl + tr + 2.0 * r + br;
             float gy = -tl - 2.0 * t - tr + bl + 2.0 * b + br;
-            float edge = clamp(sqrt(gx * gx + gy * gy), 0.0, 1.0);
+            float detailEdge = clamp(sqrt(gx * gx + gy * gy), 0.0, 1.0) * mask;
+
+            // Outward reach: for background pixels, sample the mask at 8 angles
+            // x 2 radii, each radius jittered per-angle, and see how much
+            // "person" turns up nearby - close to the silhouette, this is high;
+            // far away, it fades to zero. 16 taps total.
+            float reach = 0.0;
+            for (int i = 0; i < 8; i++) {
+                float angle = (float(i) / 8.0) * 6.28318;
+                vec2 dir = vec2(cos(angle), sin(angle));
+                float jitter = 0.55 + 0.65 * hash(vTexCoord * 80.0 + float(i) * 3.7);
+                for (int j = 1; j <= 2; j++) {
+                    float dist = float(j) * jitter;
+                    vec2 sampleUv = vTexCoord + dir * uTexelSize * dist * 16.0;
+                    reach += texture2D(uMaskTexture, sampleUv).a / (float(j) * 2.0);
+                }
+            }
+            reach = clamp(reach / 8.0, 0.0, 1.0) * (1.0 - mask);
 
             float hue = fract(uTime * 0.08);
             vec3 glowColor = hsv2rgb(vec3(hue, 0.85, 1.0));
-            vec3 outColor = base.rgb + glowColor * edge * (0.3 + 0.9 * uIntensity);
+            float glowAmount = (detailEdge + reach) * (0.3 + 0.9 * uIntensity);
+            vec3 outColor = base.rgb + glowColor * glowAmount;
 
             gl_FragColor = vec4(outColor, base.a);
         }
@@ -674,11 +745,15 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Voice Halo  -  a glow ring traced around FaceTracker's actual face bounding
-    // box (uFaceBox: minX,minY,maxX,maxY, normalized), brightness driven by mic
-    // volume via uIntensity. Falls back to a centered default box (set by
-    // VideoTranscoder when no face was detected that frame) rather than a
-    // sudden pop-in/out  -  same "skip gracefully" spirit as every tracker here.
+    // Voice Halo  -  REWRITTEN: was three smooth concentric glow rings; the
+    // app's own reference gallery image shows a jagged waveform ring instead
+    // (like an audio spectrum visualizer bent into a circle - many short
+    // radial spikes, taller where louder), which is a genuinely different
+    // shape, not a tuning pass. Still built on the same real face box +
+    // amplitude signal as before - only the ring's silhouette changed. A
+    // thin gaussian base ring is kept underneath the spikes so it still
+    // reads as a continuous ring at near-zero volume instead of scattering
+    // into disconnected ticks.
     private val voiceHalo = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -686,40 +761,40 @@ object EffectShaders {
         uniform float uIntensity; // repurposed: normalized audio amplitude 0..1
         uniform float uTime;
 
+        float hash1(float n) { return fract(sin(n) * 43758.5453); }
+
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
 
             vec2 center = vec2((uFaceBox.x + uFaceBox.z) * 0.5, (uFaceBox.y + uFaceBox.w) * 0.5);
             float boxSize = max(uFaceBox.z - uFaceBox.x, uFaceBox.w - uFaceBox.y);
-            float baseRadius = boxSize * 0.75;
-            float d = distance(vTexCoord, center);
+            float baseRadius = boxSize * 0.78;
+            vec2 rel = vTexCoord - center;
+            float d = length(rel);
+            float angle = atan(rel.y, rel.x);
 
-            // Non-linear response: quiet stays subtle, loud gets a real payoff  -
-            // pow() curve instead of the old straight-line 0.4 + 0.9*intensity,
-            // which made every volume level look about the same.
             float response = pow(clamp(uIntensity, 0.0, 1.0), 0.6);
-
-            // Idle shimmer: a slow outward breathing motion even at silence, so
-            // the ring never looks frozen/dead between words  -  this is what the
-            // old version was missing entirely (zero motion at uIntensity = 0).
             float idleBreath = 0.03 * sin(uTime * 1.3);
-            float radius = baseRadius * (1.0 + idleBreath + response * 0.12);
+            float radius = baseRadius * (1.0 + idleBreath);
 
-            // THREE layered rings at decreasing radius/opacity instead of one hard
-            // edge  -  this is the single biggest difference between "a ring was
-            // drawn" and "a light is glowing." Each ring uses a soft gaussian-like
-            // falloff (squared distance) rather than a hard smoothstep line.
-            float glow = 0.0;
-            for (int i = 0; i < 3; i++) {
-                float ringOffset = float(i) * 0.06;
-                float ringDist = abs(d - (radius - ringOffset));
-                float falloff = exp(-ringDist * ringDist * 900.0);
-                glow += falloff * (1.0 - float(i) * 0.32);
-            }
-            glow *= (0.35 + response * 1.1);
+            // The circle is divided into BARS bars around its circumference,
+            // each with its own spike length that wobbles on its own phase -
+            // quiet: short stubble; loud: tall spikes, like a real spectrum.
+            const float BARS = 72.0;
+            float barIndex = floor((angle / 6.28318 + 0.5) * BARS);
+            float barPhase = hash1(barIndex * 12.9898);
+            float wobble = 0.5 + 0.5 * sin(uTime * (1.5 + barPhase * 2.0) + barPhase * 30.0);
+            float spike = 0.3 + 0.7 * wobble;
+            float barHeight = radius * (0.08 + 0.22 * response) * spike;
 
-            // Color shifts cool -> warm gold as intensity rises  -  reads as
-            // "reacting to your voice" rather than a static-colored sticker.
+            float ringDist = d - radius;
+            float bar = smoothstep(0.0, barHeight * 0.1, ringDist)
+                - smoothstep(barHeight * 0.85, barHeight, ringDist);
+            float baseRing = exp(-ringDist * ringDist * 2500.0);
+            float glow = clamp(bar + baseRing * 0.6, 0.0, 1.0) * (0.4 + response * 1.0);
+
+            // Color still shifts cool -> warm gold as intensity rises  -  reads
+            // as "reacting to your voice" rather than a static-colored sticker.
             vec3 quietColor = vec3(0.25, 0.65, 1.0);
             vec3 loudColor  = vec3(1.0, 0.75, 0.25);
             vec3 glowColor = mix(quietColor, loudColor, response);
@@ -805,6 +880,17 @@ object EffectShaders {
     // computed in VideoTranscoder from frame-to-frame average-luma change, since
     // (as flagged earlier) there's no live device-motion sensor available during
     // post-record baking. Foreground (mask) stays a normal, unsplit image.
+    //
+    // ADDED: a single offset "ghost" duplicate of the person, chromatically
+    // fringed, shown only where the ghost's own offset sample position was also
+    // part of the mask (so it doesn't smear skin-color across background that
+    // was never the person). This is a deliberate, cheaper stand-in for true
+    // multi-copy prism duplication (which would need re-sampling AND re-masking
+    // the whole foreground 2-3x per fragment) - one extra texture+mask sample
+    // pair gets most of the "duplicated ghost" read the reference image has, at
+    // a fraction of the fill-rate cost. If you later want the full multi-ghost
+    // version, this is the place to add more offset copies - each one costs
+    // roughly what this single one does.
     private val splitPrism = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -822,7 +908,16 @@ object EffectShaders {
             float b = texture2D(uTexture, vTexCoord - uTexelSize * vec2(spread, 0.0)).b;
             vec3 split = vec3(r, g, b);
 
-            vec3 outColor = mix(split, src.rgb, mask);
+            vec2 ghostOffset = uTexelSize * vec2(-spread * 1.6, spread * 0.9);
+            vec2 ghostUv = vTexCoord + ghostOffset;
+            float ghostMask = texture2D(uMaskTexture, ghostUv).a;
+            vec3 ghostColor = texture2D(uTexture, ghostUv).rgb;
+            ghostColor.r = texture2D(uTexture, ghostUv + uTexelSize * 1.5).r;
+            ghostColor.b = texture2D(uTexture, ghostUv - uTexelSize * 1.5).b;
+            float ghostAmount = ghostMask * clamp(uIntensity * 1.4, 0.0, 0.55);
+
+            vec3 withGhost = mix(split, ghostColor, ghostAmount * (1.0 - mask));
+            vec3 outColor = mix(withGhost, src.rgb, mask);
             gl_FragColor = vec4(outColor, src.a);
         }
     """.trimIndent()
@@ -892,9 +987,24 @@ object EffectShaders {
     // when freshly spawned, cooling through yellow/orange/red as they rise and
     // fade) rather than a discrete palette pick - that's what makes them read
     // as individual cooling sparks instead of confetti-colored dots.
+    // MOUTH_FIRE rewrite (part 3 - real fire video layer). Adds uFireTexture
+    // (see FireVideoPlayer.kt), sampled WITHIN the existing silhouette math
+    // above rather than replacing it - the silhouette/anchoring/sizing logic
+    // was already correct, this only swaps in real turbulent video detail as
+    // an extra layer. Mapped so the video's own vertical axis follows the
+    // flame from mouth (t=0, hot) to tip (t=1, cool), scaled to the flame's
+    // current width. Blended ADDITIVELY and gated by both `inFlame` (never
+    // draws outside the existing silhouette) and the video's own luma (its
+    // black background contributes nothing - see FireVideoPlayer's doc for
+    // why that's a deliberate, free way to handle a non-alpha source video) -
+    // so if the texture isn't bound yet, or fails on some device, this
+    // degrades gracefully to the procedural flame alone rather than going
+    // black or broken.
     private val mouthFire = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
+        uniform samplerExternalOES uFireTexture;
+        uniform mat4 uFireTexMatrix;
         uniform vec2 uMouthCenter; // normalized 0..1
         uniform float uIntensity;  // repurposed: jawOpen score 0..1
         uniform float uTime;
@@ -973,6 +1083,14 @@ object EffectShaders {
 
             vec3 addColor = flameColor * flameAlpha + glowColor;
 
+            // Real fire video, sampled within the existing silhouette (see
+            // this shader's rewrite comment above for the full reasoning).
+            vec2 fireRawUv = vec2(0.5 + flameSpace.x / (edgeWidth * 3.0 + 0.001), t);
+            vec2 fireUv = (uFireTexMatrix * vec4(fireRawUv, 0.0, 1.0)).xy;
+            vec3 fireVideo = texture2D(uFireTexture, fireUv).rgb;
+            float fireVideoLuma = dot(fireVideo, vec3(0.299, 0.587, 0.114));
+            addColor += fireVideo * fireVideoLuma * inFlame * openAmount * 0.9;
+
             // Real embers - small soft circles, colored/sized by their own
             // remaining life so each one visibly cools and shrinks as it rises,
             // rather than every ember looking identical until it just vanishes.
@@ -1001,6 +1119,14 @@ object EffectShaders {
     // architecturally: nothing to simulate on the CPU side, nothing to upload
     // as a uniform array, works identically live and baked with zero extra
     // Kotlin wiring beyond the uTime this file's other effects already use.
+    // Snow Fall  -  REWRITE: flakes were hard-edged smoothstep discs, which read
+    // as flat white dots rather than photographic snow. Softened the falloff
+    // into a proper glow (real snow reads as slightly-out-of-focus glowing
+    // circles on camera, not crisp shapes), added per-flake opacity variance so
+    // flakes aren't all the same solid brightness, a touch of vertical stretch
+    // on the nearest/fastest layer for a hint of motion blur, and a third
+    // far/hazy layer for more depth than the original two. Still fully
+    // procedural/stateless - no extra texture samples, same cost class as before.
     private val snowFall = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1010,32 +1136,34 @@ object EffectShaders {
             return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
         }
 
-        // Two overlapping layers at different cell sizes/speeds give a sense of
-        // depth (near flakes bigger and faster, far flakes smaller and slower)
-        // without needing real 3D or per-flake depth state.
-        float snowLayer(vec2 uv, float cellSize, float speed, float sizeScale) {
+        float snowLayer(vec2 uv, float cellSize, float speed, float sizeScale, float stretch) {
             vec2 grid = uv;
             grid.y += uTime * speed;
             vec2 cell = floor(grid / cellSize);
-            vec2 local = fract(grid / cellSize);
+            vec2 local = fract(grid / cellSize) - 0.5;
 
             float h1 = hash(cell);
             float h2 = hash(cell + vec2(17.0, 31.0));
-            vec2 flakeCenter = vec2(h1, h2);
-            // Gentle per-flake horizontal drift, phase offset by the flake's own
-            // hash so flakes don't all sway in unison.
-            flakeCenter.x += 0.15 * sin(uTime * 0.8 + h1 * 20.0);
+            float h3 = hash(cell + vec2(53.0, 71.0));
+            vec2 flakeCenter = vec2(h1, h2) - 0.5;
+            flakeCenter.x += 0.12 * sin(uTime * 0.8 + h1 * 20.0);
 
-            float d = distance(local, flakeCenter);
-            float flakeSize = (0.05 + h2 * 0.05) * sizeScale;
-            return smoothstep(flakeSize, flakeSize * 0.3, d);
+            vec2 delta = local - flakeCenter;
+            delta.y /= stretch; // elongates along the fall direction for a hint of motion blur
+            float d = length(delta);
+            float flakeSize = (0.06 + h2 * 0.06) * sizeScale;
+            // Soft glow falloff instead of a hard edge.
+            float glow = smoothstep(flakeSize * 1.8, 0.0, d);
+            float opacity = 0.55 + h3 * 0.45;
+            return glow * opacity;
         }
 
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
             float snow = 0.0;
-            snow += snowLayer(vTexCoord, 0.08, 0.06, 1.0) * 0.9;   // near layer  -  bigger, faster
-            snow += snowLayer(vTexCoord, 0.05, 0.03, 0.6) * 0.6;   // far layer  -  smaller, slower
+            snow += snowLayer(vTexCoord, 0.09, 0.07, 1.1, 1.6) * 0.85;    // near - bigger, faster, slight streak
+            snow += snowLayer(vTexCoord, 0.055, 0.035, 0.65, 1.25) * 0.55; // mid
+            snow += snowLayer(vTexCoord, 0.03, 0.015, 0.35, 1.0) * 0.3;    // far - small, hazy, no streak
             snow = clamp(snow, 0.0, 1.0);
             gl_FragColor = vec4(base.rgb + vec3(1.0) * snow, base.a);
         }
@@ -1262,9 +1390,17 @@ object EffectShaders {
     // gravity (see ParticleSystem instantiation in VideoTranscoder) so they
     // drift gently upward rather than falling  -  same physics engine, different
     // tuning, proving the particle core isn't confetti-specific.
+    // REWRITTEN: was sparkle particles only; added a structured ring/spiral
+    // energy core underneath, matching the reference's "energy orb" look.
+    // Anchored on uPalmCenter - a real uniform now (wired through live preview
+    // and video-bake, using the palm position already computed there for
+    // particle spawning - see those call sites), deliberately NOT derived by
+    // averaging uParticlePos[] per-fragment in the shader, which would have
+    // doubled the cost of the particle loop below for every pixel on screen.
     private val palmMagicSparkle = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
+        uniform vec2 uPalmCenter;
         uniform vec2 uParticlePos[$PARTICLE_MAX];
         uniform float uParticleLife[$PARTICLE_MAX];
         uniform float uParticleColorIdx[$PARTICLE_MAX];
@@ -1279,15 +1415,33 @@ object EffectShaders {
 
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
-            vec3 addColor = vec3(0.0);
+
+            vec2 rel = vTexCoord - uPalmCenter;
+            float d = length(rel);
+            float angle = atan(rel.y, rel.x);
+            float spin = uTime * 1.8;
+
+            float core = exp(-d * d * 700.0);
+            float ringGlow = 0.0;
+            for (int r = 0; r < 3; r++) {
+                float radius = 0.03 + float(r) * 0.025;
+                float ringDist = abs(d - radius);
+                ringGlow += exp(-ringDist * ringDist * 3000.0) * (1.0 - float(r) * 0.25);
+            }
+            // Spiral line winding outward from the core.
+            float spiralAngle = angle - d * 40.0 + spin;
+            float spiral = smoothstep(0.35, 0.0, abs(sin(spiralAngle))) * smoothstep(0.09, 0.0, d) * smoothstep(0.0, 0.015, d);
+
+            vec3 orbColor = vec3(0.75, 0.55, 1.0);
+            vec3 addColor = orbColor * (core * 1.4 + ringGlow * 0.8 + spiral * 0.6);
 
             for (int i = 0; i < $PARTICLE_MAX; i++) {
                 if (i >= uParticleCount) break;
-                float d = distance(vTexCoord, uParticlePos[i]);
+                float pd = distance(vTexCoord, uParticlePos[i]);
                 // Soft round falloff (not a hard circle)  -  a real glow, not a
                 // filled disc  -  plus a fast twinkle so each sparkle shimmers
                 // rather than sitting as a static dot.
-                float glow = exp(-d * d * 900.0);
+                float glow = exp(-pd * pd * 900.0);
                 float twinkle = 0.6 + 0.4 * sin(uTime * 10.0 + float(i) * 12.9);
                 addColor += sparkleColor(uParticleColorIdx[i]) * glow * uParticleLife[i] * twinkle;
             }
@@ -1337,7 +1491,21 @@ object EffectShaders {
             float d = distance(vTexCoord, uBoomCenter);
             float flash = exp(-d * d * 60.0) * uBoomEnergy;
 
-            vec3 addColor = vec3(1.0, 0.95, 0.8) * flash;
+            // Added: staggered echo rings (same technique just added to
+            // TAP_SHOCKWAVE) under the central flash, reading as a denser
+            // burst - matching the reference - without touching particle
+            // spawn counts, which is a separate Kotlin-side change not made
+            // this pass.
+            float maxRadius = 0.22;
+            float ring = 0.0;
+            for (int i = 0; i < 2; i++) {
+                float echoEnergy = clamp(uBoomEnergy - float(i) * 0.25, 0.0, 1.0);
+                float radius = (1.0 - echoEnergy) * maxRadius;
+                float ringWidth = 0.012 + (1.0 - echoEnergy) * 0.008;
+                ring += smoothstep(ringWidth, 0.0, abs(d - radius)) * echoEnergy * (1.0 - float(i) * 0.35);
+            }
+
+            vec3 addColor = vec3(1.0, 0.95, 0.8) * flash + vec3(1.0, 0.85, 0.5) * ring;
             for (int i = 0; i < $PARTICLE_MAX; i++) {
                 if (i >= uParticleCount) break;
                 vec2 toP = vTexCoord - uParticlePos[i];
@@ -1353,10 +1521,12 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Tap Shockwave  -  reuses uBoomCenter/uBoomEnergy again, no new uniforms.
-    // The trick: radius grows as energy DECAYS (radius = (1-energy)*max), and
-    // opacity fades WITH energy  -  so a single decaying-0-to-1 value drives both
-    // an expanding ring's size and its fade-out, entirely in the shader.
+    // Tap Shockwave  -  REWRITTEN: was one expanding/thinning ring, now three
+    // staggered echo rings for a denser burst, matching the reference. All
+    // three come from the SAME single decaying uBoomEnergy value, just offset
+    // further along in their own decay (echoEnergy = energy - i*0.22) - reads
+    // as trailing echoes without needing new Kotlin-side timer state for
+    // multiple independent rings.
     private val tapShockwave = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1367,13 +1537,18 @@ object EffectShaders {
             vec4 base = texture2D(uTexture, vTexCoord);
             float d = distance(vTexCoord, uBoomCenter);
 
-            float maxRadius = 0.35;
-            float radius = (1.0 - uBoomEnergy) * maxRadius;
-            float ringWidth = 0.015 + (1.0 - uBoomEnergy) * 0.01; // ring thins slightly as it expands
-            float ring = smoothstep(ringWidth, 0.0, abs(d - radius)) * uBoomEnergy;
-
+            float maxRadius = 0.38;
             vec3 ringColor = vec3(0.6, 0.85, 1.0);
-            gl_FragColor = vec4(base.rgb + ringColor * ring, base.a);
+            vec3 addColor = vec3(0.0);
+            for (int i = 0; i < 3; i++) {
+                float echoEnergy = clamp(uBoomEnergy - float(i) * 0.22, 0.0, 1.0);
+                float radius = (1.0 - echoEnergy) * maxRadius;
+                float ringWidth = 0.014 + (1.0 - echoEnergy) * 0.01;
+                float ring = smoothstep(ringWidth, 0.0, abs(d - radius)) * echoEnergy;
+                addColor += ringColor * ring * (1.0 - float(i) * 0.3);
+            }
+
+            gl_FragColor = vec4(base.rgb + addColor, base.a);
         }
     """.trimIndent()
 
@@ -1497,9 +1672,21 @@ object EffectShaders {
     // previously always axis-aligned regardless of hand tilt, which read as
     // pasted-on rather than held. Book image asset already supplied
     // (fx_gl_fire_book2.png)  -  no longer a missing-asset situation.
+    // FIRE_BOOK rewrite (part 2 - real fire video body). Adds a body-shaped
+    // flame rising from the book's top edge, using the SAME video-sampling
+    // technique MOUTH_FIRE uses (see that shader's comment for the full
+    // reasoning on the additive/luma-gated blend and graceful degradation).
+    // Anchored in screen space, deliberately NOT counter-rotated with the
+    // book's tilt (uPortalAngle) - real fire burns upward under its own
+    // buoyancy regardless of what it's resting on, so a screen-space-vertical
+    // flame is both simpler than full rotation compensation AND arguably more
+    // physically correct than tilting the flame with the book would be. The
+    // existing per-particle point-flames (below) stay as embers/detail on top.
     private val fireBook = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
+        uniform samplerExternalOES uFireTexture;
+        uniform mat4 uFireTexMatrix;
         uniform sampler2D uPortalTexture;
         uniform vec2 uPortalCenter;
         uniform float uPortalRadius; // repurposed: book half-width scale
@@ -1539,6 +1726,30 @@ object EffectShaders {
                 vec4 bookColor = texture2D(uPortalTexture, bookUV);
                 outColor = mix(outColor, bookColor.rgb, bookColor.a);
             }
+
+            // Body-shaped video-fire flame rising from the book's top edge.
+            // Reuses MOUTH_FIRE's exact silhouette pattern (mirrored here on
+            // purpose, not reinvented) anchored at the book's top-center
+            // instead of the mouth. No jawOpen-equivalent "openness" signal
+            // for a book, so size stays proportional to uPortalRadius (book
+            // scale) with a gentle idle pulse instead.
+            vec2 bookTop = uPortalCenter + vec2(0.0, -halfH * 0.9);
+            vec2 bfSpace = vTexCoord - bookTop;
+            float bfPulse = 0.85 + 0.15 * sin(uTime * 5.0);
+            float bfHeight = halfH * 1.6 * bfPulse;
+            float bfWidth = halfW * 0.45 * bfPulse;
+            float bft = clamp(-bfSpace.y / bfHeight, 0.0, 1.0);
+            float bfCoreWidth = bfWidth * (1.0 - bft) * (1.0 - bft);
+            float bfWithinWidth = smoothstep(bfCoreWidth + 0.02, bfCoreWidth - 0.005, abs(bfSpace.x));
+            float bfAboveBook = smoothstep(0.02, -0.01, bfSpace.y);
+            float bfBelowTip = smoothstep(-bfHeight - 0.02, -bfHeight + 0.02, bfSpace.y);
+            float bfInFlame = bfWithinWidth * bfAboveBook * bfBelowTip;
+
+            vec2 fireRawUv = vec2(0.5 + bfSpace.x / (bfCoreWidth * 3.0 + 0.001), bft);
+            vec2 fireUv = (uFireTexMatrix * vec4(fireRawUv, 0.0, 1.0)).xy;
+            vec3 fireVideo = texture2D(uFireTexture, fireUv).rgb;
+            float fireVideoLuma = dot(fireVideo, vec3(0.299, 0.587, 0.114));
+            outColor += fireVideo * fireVideoLuma * bfInFlame * 0.9;
 
             // Warm ambient glow around the book, pulsing like firelight  -
             // uses the UNROTATED offset since plain distance-from-center
@@ -1613,44 +1824,98 @@ object EffectShaders {
         }
     """.trimIndent()
 
+    // REWRITTEN: was one soft radial burst; added jagged lightning tendrils
+    // on top, matching the reference image. Reuses WINK_SPARK's angular-
+    // sector technique (divide the circle into N sectors, light up near each
+    // sector's centerline) but with noise-perturbed angle and tapering width
+    // per ray instead of a clean star pattern, so it reads as lightning
+    // rather than a starburst.
     private val fistBumpBoomFragment = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
-        uniform vec2 uBoomCenter; // normalized 0..1, the fist's palm position
+        uniform vec2 uBoomCenter;
         uniform float uBoomEnergy;
+
+        float hash1(float n) { return fract(sin(n) * 43758.5453); }
 
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
-            float d = distance(vTexCoord, uBoomCenter);
+            vec2 rel = vTexCoord - uBoomCenter;
+            float d = length(rel);
+            float angle = atan(rel.y, rel.x);
+
             float burst = smoothstep(0.5, 0.0, d) * uBoomEnergy;
+
+            const float RAYS = 18.0;
+            float rayIndex = floor((angle / 6.28318 + 0.5) * RAYS);
+            float rayPhase = hash1(rayIndex * 17.31);
+            float rayAngleJitter = (rayPhase - 0.5) * 0.15;
+            float raySeg = 6.28318 / RAYS;
+            float angleInSeg = mod(angle + 3.14159, raySeg) - raySeg * 0.5 - rayAngleJitter;
+            float distFrac = clamp(d / 0.5, 0.0, 1.0);
+            float rayWidth = mix(0.012, 0.003, distFrac); // tapers thinner with distance
+            // abs(angleInSeg) * d converts an angular deviation into an
+            // approximate arc-length deviation, so ray width reads as a
+            // roughly constant screen distance rather than a wedge that
+            // widens with radius.
+            float onRay = smoothstep(rayWidth, 0.0, abs(angleInSeg) * d);
+            float rayReach = (0.25 + rayPhase * 0.35) * uBoomEnergy;
+            float withinReach = smoothstep(rayReach, rayReach * 0.7, d);
+            float tendrils = onRay * withinReach * uBoomEnergy;
+
             vec3 boomColor = vec3(1.0, 0.5, 0.1);
-            gl_FragColor = vec4(base.rgb + boomColor * burst * 1.5, base.a);
+            vec3 tendrilColor = vec3(1.0, 0.85, 0.5);
+            vec3 addColor = boomColor * burst * 1.5 + tendrilColor * tendrils * 1.3;
+            gl_FragColor = vec4(base.rgb + addColor, base.a);
         }
     """.trimIndent()
 
-    // Two-Hand Frame  -  uFrameRect is the rectangle (left,top,right,bottom,
-    // normalized 0..1) spanned by both palm positions; draws a glowing vignette
-    // border along that rectangle's edge. uIntensity carries gesture confidence
-    // (how rectangle-like the two-hand shape currently is  -  computed in
-    // VideoTranscoder, not here).
+    // Two-Hand Frame  -  REWRITTEN: was a full glowing border around all four
+    // edges; the reference image shows four L-shaped corner brackets instead
+    // (camera-viewfinder style), which reads as cleaner and is, if anything,
+    // less shader work than tracing a continuous border was. uFrameRect and
+    // uIntensity are unchanged - same real rectangle spanned by both palms,
+    // same gesture-confidence signal.
     private val twoHandFrame = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
         uniform vec4 uFrameRect; // left, top, right, bottom (normalized)
         uniform float uIntensity;
 
+        // One straight bracket arm: bright near a line at acrossDist = 0,
+        // for alongDist between 0 (the corner) and armLen (the arm's tip).
+        float arm(float acrossDist, float alongDist, float armLen, float lineWidth) {
+            float line = smoothstep(lineWidth, lineWidth * 0.3, abs(acrossDist));
+            float extent = (1.0 - smoothstep(armLen * 0.85, armLen, alongDist)) * step(0.0, alongDist);
+            return line * extent;
+        }
+
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
-            float distToEdge = min(
-                min(abs(vTexCoord.x - uFrameRect.x), abs(vTexCoord.x - uFrameRect.z)),
-                min(abs(vTexCoord.y - uFrameRect.y), abs(vTexCoord.y - uFrameRect.w))
-            );
-            bool inside = vTexCoord.x > uFrameRect.x && vTexCoord.x < uFrameRect.z &&
-                          vTexCoord.y > uFrameRect.y && vTexCoord.y < uFrameRect.w;
-            float border = inside ? smoothstep(0.03, 0.0, distToEdge) : 0.0;
-            border *= uIntensity;
+
+            float w = uFrameRect.z - uFrameRect.x;
+            float h = uFrameRect.w - uFrameRect.y;
+            float armLen = min(w, h) * 0.2;
+            float lineWidth = 0.006;
+
+            float distLeft = vTexCoord.x - uFrameRect.x;
+            float distRight = uFrameRect.z - vTexCoord.x;
+            float distTop = vTexCoord.y - uFrameRect.y;
+            float distBottom = uFrameRect.w - vTexCoord.y;
+
+            float bracket = 0.0;
+            bracket = max(bracket, arm(distTop, distLeft, armLen, lineWidth));     // top-left, horizontal
+            bracket = max(bracket, arm(distLeft, distTop, armLen, lineWidth));     // top-left, vertical
+            bracket = max(bracket, arm(distTop, distRight, armLen, lineWidth));    // top-right, horizontal
+            bracket = max(bracket, arm(distRight, distTop, armLen, lineWidth));    // top-right, vertical
+            bracket = max(bracket, arm(distBottom, distLeft, armLen, lineWidth));  // bottom-left, horizontal
+            bracket = max(bracket, arm(distLeft, distBottom, armLen, lineWidth));  // bottom-left, vertical
+            bracket = max(bracket, arm(distBottom, distRight, armLen, lineWidth)); // bottom-right, horizontal
+            bracket = max(bracket, arm(distRight, distBottom, armLen, lineWidth)); // bottom-right, vertical
+            bracket *= uIntensity;
+
             vec3 frameColor = vec3(1.0, 0.85, 0.3);
-            gl_FragColor = vec4(mix(base.rgb, frameColor, border), base.a);
+            gl_FragColor = vec4(base.rgb + frameColor * bracket * 1.8, base.a);
         }
     """.trimIndent()
 
@@ -1754,10 +2019,20 @@ object EffectShaders {
         }
     """.trimIndent()
 
-    // Particle Flow  -  small glowing dust motes drifting diagonally upward,
-    // tiled so it repeats seamlessly (same fract()-of-a-scaled-UV tiling
-    // MOUTH_FIRE-adjacent noise functions in this file already use). Pure
-    // uTime, no tracker needed.
+    // Particle Flow  -  REWRITTEN from straight vertical drift into a
+    // controlled swirl, confirmed against the reference image (particles
+    // orbiting the subject in a coherent spiral, not drifting untargeted
+    // upward). Maps the same tiled-grid noise technique into POLAR
+    // coordinates (angle, radius from frame center) instead of cartesian -
+    // angle advances with time for the spin, radius drifts slowly in/out so
+    // it reads as flowing rather than a rigid spinning wheel. Orbits the
+    // frame center (0.5, 0.5) rather than a tracked person silhouette -
+    // that would need segmentation mask wiring (a bigger addition, not made
+    // this pass), and most selfie framing keeps the subject roughly centered
+    // anyway. KNOWN CHARACTERISTIC: polar-coordinate tiling has an inherent
+    // seam where angle wraps from +pi to -pi - usually unnoticeable in a busy
+    // dust-particle pattern, flagging it here rather than pretending it's
+    // seamless.
     private val particleFlow = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1767,14 +2042,20 @@ object EffectShaders {
 
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
+            vec2 center = vec2(0.5, 0.5);
+            vec2 rel = vTexCoord - center;
+            float radius = length(rel);
+            float angle = atan(rel.y, rel.x);
+
             float glow = 0.0;
-            // Two overlapping tile scales so it doesn't read as one obvious grid.
             for (int layer = 0; layer < 2; layer++) {
                 float scale = layer == 0 ? 9.0 : 14.0;
-                float layerSpeed = layer == 0 ? 0.05 : -0.08;
-                vec2 uv = vTexCoord * scale + vec2(0.0, uTime * layerSpeed);
-                vec2 cell = floor(uv);
-                vec2 local = fract(uv) - 0.5;
+                float layerSpeed = layer == 0 ? 0.35 : -0.5;
+                float spinAngle = angle + uTime * layerSpeed * 0.3;
+                float radiusDrift = radius + sin(uTime * 0.15 + angle * 3.0) * 0.03;
+                vec2 swirlUv = vec2(spinAngle * scale * 0.5, radiusDrift * scale);
+                vec2 cell = floor(swirlUv);
+                vec2 local = fract(swirlUv) - 0.5;
                 vec2 jitter = vec2(hash2(cell), hash2(cell + 3.7)) - 0.5;
                 float d = length(local - jitter * 0.6);
                 float twinkle = 0.5 + 0.5 * sin(uTime * 2.0 + hash2(cell) * 20.0);
@@ -1788,36 +2069,72 @@ object EffectShaders {
     // Rain Fall  -  vertical streaks falling down the frame, plus a slight
     // cool darkening so it reads as "weather" rather than just lines on top of
     // the video. Pure uTime, no tracker needed.
+    // Rain Fall (displayed as "Rain Drop")  -  REWRITTEN from rain STREAKS
+    // falling through open air to actual droplets sitting on / sliding down
+    // glass, confirmed as the real target against the app's own marketing
+    // reference (condensation beads refracting the scene behind them, most
+    // static, some sliding). Genuinely different technique from before, not a
+    // tuning pass: each droplet refracts the frame behind it via ONE offset
+    // texture2D sample per layer (scaled by distance-from-droplet-center),
+    // plus a bright rim highlight so it reads as glassy rather than blurry.
+    // Two droplet layers (not the old effect's 40-column loop), so this is
+    // actually CHEAPER than what it replaces - 2 extra texture2D samples
+    // total, vs. re-evaluating 40 columns of ALU math per fragment before.
     private val rainFall = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
+        uniform vec2 uTexelSize;
         uniform float uTime;
 
         float hash1(float n) { return fract(sin(n) * 43758.5453); }
+        vec2 hash2v(vec2 p) {
+            vec2 q = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+            return fract(sin(q) * 43758.5453);
+        }
+
+        // Packs (refractDirX, refractDirY, mask, unused) for one droplet grid.
+        // Most droplets in a cell sit fixed (~55%, "fogged window" beading);
+        // the rest slide slowly downward at their own random speed, since real
+        // rain-on-glass isn't uniform - some drops stick, some run.
+        vec4 dropletField(vec2 uv, float cellSize, float aspect) {
+            vec2 cellBase = floor(uv / cellSize);
+            vec2 rnd = hash2v(cellBase);
+            float slides = step(0.55, rnd.x);
+            vec2 slideUv = uv;
+            slideUv.y += slides * uTime * (0.025 + rnd.y * 0.05);
+
+            vec2 cell = floor(slideUv / cellSize);
+            vec2 jitter = hash2v(cell + 3.7) - 0.5;
+            vec2 local = fract(slideUv / cellSize) - 0.5 - jitter * 0.5;
+            local.x *= aspect;
+            float size = 0.16 + hash1(dot(cell, vec2(91.3, 17.7))) * 0.22;
+
+            float d = length(local);
+            float mask = smoothstep(size, size * 0.55, d);
+            vec2 refractDir = vec2(local.x / aspect, local.y) * mask;
+            return vec4(refractDir, mask, 0.0);
+        }
 
         void main() {
-            vec4 base = texture2D(uTexture, vTexCoord);
-            // Cool, slightly darkened base so falling streaks read clearly
-            // against it, same reasoning as SILENCE_RIPPLE's dark backdrop.
-            vec3 color = mix(base.rgb, base.rgb * vec3(0.75, 0.82, 0.95), 0.5);
+            vec4 src = texture2D(uTexture, vTexCoord);
+            // Rough portrait-frame correction so grid cells read as round
+            // droplets, not stretched ovals - retune if your output aspect
+            // ratio differs meaningfully from 9:16.
+            float aspect = 0.56;
 
-            float streaks = 0.0;
-            const int COLUMNS = 40;
-            for (int i = 0; i < COLUMNS; i++) {
-                float fi = float(i);
-                float colX = hash1(fi * 17.13);
-                float speed = 0.6 + hash1(fi * 4.2) * 0.9;
-                float phase = hash1(fi * 8.7);
-                float dropY = fract(uTime * speed * 0.25 + phase);
-                float dx = abs(vTexCoord.x - colX);
-                // Thin column, only lit near the falling drop's current Y and
-                // fading above it into a faint trailing streak.
-                float column = smoothstep(0.0025, 0.0, dx);
-                float trail = smoothstep(0.18, 0.0, dropY - vTexCoord.y) * step(vTexCoord.y, dropY);
-                streaks += column * trail;
-            }
-            vec3 rainColor = vec3(0.75, 0.85, 1.0);
-            gl_FragColor = vec4(color + rainColor * streaks * 0.6, base.a);
+            vec4 layerA = dropletField(vTexCoord, 0.1, aspect);
+            vec4 layerB = dropletField(vTexCoord + vec2(0.37, 0.61), 0.065, aspect);
+
+            vec2 refractOffset = layerA.xy * 22.0 * uTexelSize + layerB.xy * 16.0 * uTexelSize;
+            vec4 refracted = texture2D(uTexture, vTexCoord - refractOffset);
+
+            float dropAmount = clamp(layerA.z + layerB.z * 0.8, 0.0, 1.0);
+            float rim = smoothstep(0.0, 0.4, dropAmount) - smoothstep(0.4, 0.75, dropAmount);
+
+            vec3 outColor = mix(src.rgb, refracted.rgb, dropAmount);
+            outColor += vec3(1.0) * rim * 0.2;
+
+            gl_FragColor = vec4(outColor, src.a);
         }
     """.trimIndent()
 
@@ -1842,11 +2159,26 @@ object EffectShaders {
             return fract(sin(q) * 43758.5453);
         }
 
+        // Distance from p to a capsule hanging straight down from `top` for
+        // `len` units, for the drip trail below each splat.
+        // NOTE: assumes -y is "down" on screen in this shader's texcoord space.
+        // If drips render growing upward instead of down once this is on a
+        // device, flip the sign on the two `-len` below - texcoord vertical
+        // convention here depends on the camera's transform matrix and wasn't
+        // confirmed on-device for this rewrite.
+        float dripDist(vec2 p, vec2 top, float len) {
+            float t = clamp((p.y - top.y) / -len, 0.0, 1.0);
+            vec2 closest = top + vec2(0.0, -len * t);
+            return distance(p, closest);
+        }
+
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
             vec3 splashColor = vec3(0.0);
             float coverage = 0.0;
-            const int CELLS = 14;
+            // Fewer, bigger cells than before (was 14) - blobs are now large
+            // enough that 14 tightly-packed cells would just overlap into mud.
+            const int CELLS = 10;
             float cellSize = 1.0 / float(CELLS);
             vec2 grid = floor(vTexCoord / cellSize);
             for (int dy = -1; dy <= 1; dy++) {
@@ -1854,23 +2186,46 @@ object EffectShaders {
                     vec2 cell = grid + vec2(float(dx), float(dy));
                     vec2 jitter = hash2v(cell);
                     vec2 center = (cell + jitter) * cellSize;
-                    // Each cell only "activates" above its own random threshold,
-                    // so higher uIntensity lights up progressively more cells
-                    // rather than every cell scaling together (reads as real
-                    // splashes appearing, not a uniform fade).
-                    float threshold = hash2(cell + 9.3);
+                    // Softer gate than before (threshold scaled to 0..0.7, was
+                    // 0..1.0) so moderate motion lights up more of the
+                    // neighborhood at once instead of one or two cells at a
+                    // time - this was the main cause of the "dot dot" look at
+                    // normal, non-extreme motion.
+                    float threshold = hash2(cell + 9.3) * 0.7;
                     if (uIntensity < threshold) continue;
-                    float d = distance(vTexCoord, center);
-                    float size = 0.02 + hash2(cell + 1.7) * 0.05;
-                    float blob = smoothstep(size, size * 0.3, d);
+
                     vec3 hue = fract(hash2(cell + 5.5) + uTime * 0.02) < 0.33 ? vec3(1.0, 0.2, 0.35)
                         : fract(hash2(cell + 5.5) + uTime * 0.02) < 0.66 ? vec3(0.2, 0.6, 1.0)
                         : vec3(1.0, 0.85, 0.15);
+
+                    // Organic splat: union of 3 overlapping sub-blobs at small
+                    // random offsets instead of one perfect circle, so the
+                    // silhouette reads as an irregular paint splash rather
+                    // than a dot. Also much bigger than before (was 0.02-0.07
+                    // radius, now 0.05-0.14).
+                    float baseSize = 0.05 + hash2(cell + 1.7) * 0.09;
+                    float blob = 0.0;
+                    for (int k = 0; k < 3; k++) {
+                        vec2 sub = hash2v(cell + float(k) * 3.1) - 0.5;
+                        vec2 subCenter = center + sub * baseSize * 0.7;
+                        float subSize = baseSize * (0.55 + 0.45 * hash2(cell + float(k) * 7.7));
+                        float d = distance(vTexCoord, subCenter);
+                        blob = max(blob, smoothstep(subSize, subSize * 0.25, d));
+                    }
+
+                    // Drip trailing from the splat, fading out toward its tip.
+                    float dripLen = baseSize * (1.8 + 2.0 * hash2(cell + 4.2));
+                    float dd = dripDist(vTexCoord, center, dripLen);
+                    float dripWidth = baseSize * 0.18;
+                    float drip = smoothstep(dripWidth, dripWidth * 0.2, dd);
+                    drip *= 1.0 - clamp((center.y - vTexCoord.y) / dripLen, 0.0, 1.0) * 0.7;
+                    blob = max(blob, drip);
+
                     splashColor += hue * blob;
                     coverage = max(coverage, blob);
                 }
             }
-            vec3 outColor = mix(base.rgb, splashColor, coverage * 0.85);
+            vec3 outColor = mix(base.rgb, splashColor, coverage * 0.9);
             gl_FragColor = vec4(outColor, base.a);
         }
     """.trimIndent()
@@ -1880,7 +2235,15 @@ object EffectShaders {
     // touchscreen-tracked). Structurally identical to gazeTrail above, just a
     // separate uniform set so it can coexist independently and doesn't repurpose
     // GAZE_TRAIL's array meant for iris history.
-    private const val FINGER_TRAIL_POINTS = 8
+    // REWRITTEN: was 8 points, discrete glowing DOTS (not connected) - too
+    // few points and no line-connecting math to read as a smooth drawn curve
+    // for shapes like hearts/letters, matching the reference image. Now 16
+    // points (doubled - see the FrameRenderer/LiveEffectPreviewView array
+    // size updates that had to move in lockstep with this constant), and
+    // uses the same distToSegment line-connecting technique GAZE_TRAIL
+    // already proved, plus a two-layer glow (soft wide + bright core) instead
+    // of a single flat falloff.
+    private const val FINGER_TRAIL_POINTS = 16
     private val fingerDraw = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
@@ -1888,43 +2251,63 @@ object EffectShaders {
         uniform float uFingerAges[$FINGER_TRAIL_POINTS]; // 0 = newest/brightest, 1 = oldest/gone
         uniform int uFingerCount;
 
+        float distToSegment(vec2 p, vec2 a, vec2 b) {
+            vec2 ab = b - a;
+            float t = clamp(dot(p - a, ab) / max(dot(ab, ab), 0.00001), 0.0, 1.0);
+            return distance(p, a + ab * t);
+        }
+
         void main() {
             vec4 base = texture2D(uTexture, vTexCoord);
             vec3 trailColor = vec3(1.0, 0.55, 0.9);
             float glow = 0.0;
-            for (int i = 0; i < $FINGER_TRAIL_POINTS; i++) {
-                if (i >= uFingerCount) break;
-                float d = distance(vTexCoord, uFingerPoints[i]);
+            for (int i = 0; i < $FINGER_TRAIL_POINTS - 1; i++) {
+                if (i + 1 >= uFingerCount) break;
+                float d = distToSegment(vTexCoord, uFingerPoints[i], uFingerPoints[i + 1]);
                 float fade = 1.0 - uFingerAges[i];
-                glow += smoothstep(0.025, 0.0, d) * fade;
+                // Wide soft glow + a tighter bright core, instead of one flat
+                // falloff - reads as a real neon line rather than a fuzzy bar.
+                glow += smoothstep(0.05, 0.0, d) * fade * 0.35;
+                glow += smoothstep(0.012, 0.0, d) * fade;
+            }
+            if (uFingerCount > 0) {
+                float dCore = distance(vTexCoord, uFingerPoints[0]);
+                glow += smoothstep(0.018, 0.0, dCore) * 1.4;
             }
             gl_FragColor = vec4(base.rgb + trailColor * glow, base.a);
         }
     """.trimIndent()
 
-    // Double Take  -  reimagined as a SINGLE-PASS directional streak (multi-tap
-    // sampling of the SAME live frame at offset UVs) rather than blending real
-    // historical frames. This is a deliberate, safer substitute for a true
-    // afterimage: it reads as a fast-turn ghost/blur without needing any
-    // frame-capture or FBO machinery, at the cost of not showing your ACTUAL
-    // previous pose (just a directional smear). If you want the literal
-    // multi-frame ghost from the original pitch later, that's a genuinely
-    // different (and riskier) technique  -  worth a dedicated pass on its own,
-    // not bundled in here.
+    // Double Take  -  REWRITTEN from a horizontal directional smear into a real
+    // radial zoom-burst, confirmed as the actual target against the reference
+    // images (streaks radiating outward from the face, not a side-to-side
+    // ghost). Still single-pass multi-tap sampling of the same live frame (no
+    // FBO/frame-capture machinery, same reasoning as before) - just a
+    // different sampling geometry: each successive tap is pulled toward the
+    // real face center (uFaceBox, newly wired for this effect - see the
+    // faceBoxEffects additions above) at a shrinking scale, so pixels further
+    // from the face streak more than pixels near it, the classic "zoom burst"
+    // look. Same real turn-speed magnitude (uIntensity) still drives how
+    // strong the burst is - only the shape changed, not the signal.
     private val doubleTake = EXT_HEADER + """
         varying vec2 vTexCoord;
         uniform samplerExternalOES uTexture;
+        uniform vec4 uFaceBox;
         uniform float uIntensity; // repurposed: turn speed magnitude 0..1
-        uniform float uDirection; // repurposed: turn direction, -1..1
 
         void main() {
-            vec4 color = texture2D(uTexture, vTexCoord) * 0.55;
-            float totalWeight = 0.55;
-            for (int i = 1; i <= 4; i++) {
-                float w = 0.4 / float(i);
-                vec2 offset = vec2(uDirection * 0.012 * float(i) * uIntensity, 0.0);
-                color += texture2D(uTexture, vTexCoord - offset) * w;
-                totalWeight += w;
+            vec2 center = vec2((uFaceBox.x + uFaceBox.z) * 0.5, (uFaceBox.y + uFaceBox.w) * 0.5);
+            vec2 toPixel = vTexCoord - center;
+
+            vec4 color = vec4(0.0);
+            float totalWeight = 0.0;
+            const int SAMPLES = 8;
+            for (int i = 0; i < SAMPLES; i++) {
+                float scale = 1.0 - uIntensity * 0.05 * float(i);
+                vec2 sampleUv = center + toPixel * scale;
+                float weight = 1.0 - float(i) / float(SAMPLES);
+                color += texture2D(uTexture, sampleUv) * weight;
+                totalWeight += weight;
             }
             gl_FragColor = vec4(color.rgb / totalWeight, 1.0);
         }
@@ -1951,12 +2334,56 @@ object EffectShaders {
         }
     """.trimIndent()
 
+    // REWRITTEN: was a plain frame freeze with zero ice treatment at all,
+    // despite the name and the app's own reference image (a real frost/
+    // crystal texture visibly forming across the frozen half). Reuses the
+    // same Voronoi cell-edge technique SMILE_SHATTER already proved for its
+    // glass-edge glint - applied STATICALLY here (no per-cell displacement,
+    // no uTime jitter) since frost doesn't move once it's formed, unlike
+    // shattering glass which is mid-motion. Two crystal scales layered (fine
+    // + coarse) for a more organic frost network than one uniform cell size,
+    // plus a desaturated cool-blue tint on the base frozen frame.
     private val blinkFreezeFragment = """
         precision mediump float;
         varying vec2 vTexCoord;
         uniform sampler2D uFrozenTexture;
+
+        vec2 hash2(vec2 p) {
+            vec2 q = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+            return fract(sin(q) * 43758.5453);
+        }
+
+        // Voronoi cell-edge lines (the standard d2-d1 trick) as a crystal
+        // network instead of SMILE_SHATTER's shatter pattern.
+        float frostCrystals(vec2 uv, float scale) {
+            vec2 p = uv * scale;
+            vec2 cell = floor(p);
+            float d1 = 8.0;
+            float d2 = 8.0;
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    vec2 neighbor = vec2(float(x), float(y));
+                    vec2 point = neighbor + hash2(cell + neighbor);
+                    float d = distance(p - cell, point);
+                    if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
+                }
+            }
+            return smoothstep(0.06, 0.0, d2 - d1);
+        }
+
         void main() {
-            gl_FragColor = texture2D(uFrozenTexture, vTexCoord);
+            vec4 src = texture2D(uFrozenTexture, vTexCoord);
+
+            float luma = dot(src.rgb, vec3(0.299, 0.587, 0.114));
+            vec3 desat = mix(src.rgb, vec3(luma), 0.55);
+            vec3 iceTint = desat * vec3(0.75, 0.88, 1.05);
+
+            float crystalsFine = frostCrystals(vTexCoord, 38.0);
+            float crystalsCoarse = frostCrystals(vTexCoord + 5.2, 14.0) * 0.6;
+            float crystals = clamp(crystalsFine + crystalsCoarse, 0.0, 1.0);
+
+            vec3 outColor = iceTint + vec3(0.9, 0.96, 1.0) * crystals * 0.5;
+            gl_FragColor = vec4(outColor, src.a);
         }
     """.trimIndent()
 

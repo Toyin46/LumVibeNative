@@ -4,15 +4,21 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
-  StyleSheet, SafeAreaView, StatusBar, KeyboardAvoidingView,
+  StyleSheet, StatusBar, KeyboardAvoidingView,
   Platform, Modal, Alert, ActivityIndicator, Image,
   ScrollView, Dimensions, PermissionsAndroid,
 } from 'react-native';
 import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
+import * as Notifications from 'expo-notifications';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+// FIX: react-native's own SafeAreaView is iOS-only — on Android it's a
+// no-op View, which is exactly why the header (back button, avatar, call
+// icons) was rendering underneath the status bar/battery indicator.
+// react-native-safe-area-context's SafeAreaView applies real insets on
+// both platforms, so it replaces the 'react-native' import below.
+import { useSafeAreaInsets, SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 // FIX: this app uses @react-navigation, not expo-router. useRoute() replaces
@@ -25,7 +31,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 // FIX: Room/RoomEvent/Track/ConnectionState are core classes from livekit-client.
 // @livekit/react-native only wraps native WebRTC + provides RN-specific UI (VideoView).
 import { Room, RoomEvent, Track, ConnectionState } from 'livekit-client';
-import { VideoView } from '@livekit/react-native';
+import { VideoView, AudioSession, AndroidAudioTypePresets } from '@livekit/react-native';
 import Constants from 'expo-constants';
 
 // FIX: point this at whatever your navigator actually registered the
@@ -48,6 +54,67 @@ const C = {
 
 const QUICK_EMOJIS = ['😂','❤️','🔥','😭','🙌','💀','👀','🎬','⚡','✨','🎵','😍','💯','🤩','😎','🤣'];
 const REACTIONS    = ['❤️','😂','🔥','😮','😢','👏','💀','🙌'];
+
+// ── PUSH NOTIFICATIONS (for ringing while the app is backgrounded/killed) ──
+// FIX (audit item #1, continued): the realtime broadcast below only rings
+// the other person if their chat screen happens to be mounted. To ring
+// them while the app is backgrounded — or fully killed on Android — we
+// also need a real push notification. This registers this device's Expo
+// push token and asks the Edge Function `send-call-push` to fire one.
+//
+// ⚠️ IMPORTANT — this gets Android to a genuine "incoming call" push even
+// from a killed state. Full iOS behavior like a real phone call (ringing
+// through silent mode, native full-screen UI before unlock) needs PushKit
+// VoIP pushes + CallKit, which is a separate native integration (Apple
+// requires CallKit whenever you use VoIP pushes, plus a VoIP push
+// certificate). That's a bigger, distinct project from this one — say the
+// word if you want that built next. This gets you real ringing on Android
+// today, and on iOS whenever the app is foregrounded/backgrounded (not
+// force-quit).
+async function registerCallPushToken(userId: string) {
+  try {
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('calls', {
+        name: 'Calls',
+        importance: Notifications.AndroidImportance.MAX,
+        // FIX: passing the literal string 'default' here isn't Android's
+        // built-in system sound — expo-notifications treats it as a custom
+        // sound filename it should bundle, and throws when no such file is
+        // registered in the expo-notifications config plugin's `sounds`
+        // array. Omitting `sound` entirely just uses the OS default
+        // notification sound, which is what was actually wanted here.
+        vibrationPattern: [0, 500, 250, 500],
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      });
+    }
+    const { status: existing } = await Notifications.getPermissionsAsync();
+    let finalStatus = existing;
+    if (existing !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+    if (finalStatus !== 'granted') return;
+
+    const projectId = (Constants.expoConfig?.extra as any)?.eas?.projectId;
+    const tokenResp = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
+    await supabase.from('profiles').update({ expo_push_token: tokenResp.data }).eq('id', userId);
+  } catch (e) {
+    console.error('registerCallPushToken error:', e);
+  }
+}
+
+async function sendCallPush(payload: {
+  calleeId: string; callerId: string; callerName: string;
+  callType: 'voice' | 'video'; roomName: string; conversationId: string;
+}) {
+  try {
+    await supabase.functions.invoke('send-call-push', { body: payload });
+  } catch (e) {
+    // Non-fatal — the realtime broadcast may still reach them if their
+    // chat screen is open, so a push failure shouldn't block the call.
+    console.error('sendCallPush error:', e);
+  }
+}
 
 // ── LIVEKIT CALL HOOK ─────────────────────────────────────────
 async function fetchLiveKitToken(roomName: string, participantName: string): Promise<string | null> {
@@ -82,21 +149,85 @@ const CALL_INITIAL: CallState = {
   remoteConnected: false, permDenied: false,
 };
 
-function useCall(currentUserId: string, displayName: string) {
-  const [callState, setCallState] = useState<CallState>(CALL_INITIAL);
-  const roomRef    = useRef<Room | null>(null);
-  const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const mountedRef = useRef(true);
+// ✅ NEW: an incoming call notice, delivered over a per-conversation
+// Supabase realtime broadcast channel. This is signaling only — it just
+// tells the other person's device "a call started, here's the room to
+// join" — it doesn't touch push notifications, so it only rings while
+// their app has this chat screen mounted (foreground/background), same
+// as the rest of this screen's realtime features (messages, presence).
+// A true "ring while the app is killed" experience needs a push
+// notification provider wired in separately.
+interface IncomingCall {
+  callerId:    string;
+  callerName:  string;
+  callerPhoto?: string;
+  callType:    'voice' | 'video';
+  roomName:    string;
+}
+
+function useCall(currentUserId: string, displayName: string, conversationId: string | null, otherUserId: string | null) {
+  const [callState,      setCallState]      = useState<CallState>(CALL_INITIAL);
+  const [incomingCall,   setIncomingCall]   = useState<IncomingCall | null>(null);
+  const [localVideoTrack,  setLocalVideoTrack]  = useState<Track | null>(null);
+  const [remoteVideoTrack, setRemoteVideoTrack] = useState<Track | null>(null);
+  const roomRef      = useRef<Room | null>(null);
+  const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef   = useRef(true);
+  const signalRef    = useRef<RealtimeChannel | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
+    if (currentUserId) registerCallPushToken(currentUserId);
     return () => {
       mountedRef.current = false;
       endCall();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startCall = useCallback(async (conversationId: string, callType: 'voice' | 'video') => {
+  // ✅ NEW: subscribe to this conversation's call-signaling channel so an
+  // incoming call can actually surface on the receiving side.
+  useEffect(() => {
+    if (!conversationId) return;
+    const channel = supabase.channel(`call_signal:${conversationId}`, {
+      config: { broadcast: { self: false } },
+    });
+    channel
+      .on('broadcast', { event: 'incoming_call' }, ({ payload }: any) => {
+        if (!mountedRef.current || payload?.callerId === currentUserId) return;
+        setIncomingCall(payload);
+        if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
+        ringTimerRef.current = setTimeout(() => {
+          setIncomingCall(prev => (prev?.roomName === payload.roomName ? null : prev));
+        }, 30000); // auto-dismiss the ring after 30s if nobody answers
+      })
+      .on('broadcast', { event: 'call_cancelled' }, ({ payload }: any) => {
+        setIncomingCall(prev => (prev?.roomName === payload?.roomName ? null : prev));
+      })
+      .on('broadcast', { event: 'call_declined' }, ({ payload }: any) => {
+        if (!mountedRef.current) return;
+        setCallState(prev => {
+          if (prev.isInCall && !prev.remoteConnected) {
+            // We're the caller and the other side just declined — hang up.
+            if (timerRef.current) clearInterval(timerRef.current);
+            if (roomRef.current) { try { roomRef.current.disconnect(); } catch (_) {} roomRef.current = null; }
+            Alert.alert('Call declined');
+            return CALL_INITIAL;
+          }
+          return prev;
+        });
+      })
+      .subscribe();
+    signalRef.current = channel;
+    return () => {
+      if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
+      supabase.removeChannel(channel);
+      signalRef.current = null;
+    };
+  }, [conversationId, currentUserId]);
+
+  const startCall = useCallback(async (convId: string, callType: 'voice' | 'video') => {
     if (!LIVEKIT_URL) {
       Alert.alert('Call Setup', 'LiveKit URL not configured. Set LIVEKIT_URL in app.config.js extras.');
       return;
@@ -114,13 +245,40 @@ function useCall(currentUserId: string, displayName: string) {
       }
     }
 
-    const roomName = `call_${conversationId}`;
+    const roomName = `call_${convId}`;
     setCallState(prev => ({
       ...prev, isInCall: true, callType,
       isConnecting: true, remoteConnected: false, permDenied: false,
     }));
+    setIncomingCall(prev => (prev?.roomName === roomName ? null : prev));
+
+    // ✅ NEW: tell the other participant a call is starting, so their
+    // screen can show the incoming-call UI and join the same room.
+    try {
+      await signalRef.current?.send({
+        type: 'broadcast', event: 'incoming_call',
+        payload: { callerId: currentUserId, callerName: displayName || 'Someone', callType, roomName },
+      });
+    } catch (e) { console.error('incoming_call broadcast error:', e); }
+
+    // ✅ NEW: also ring them via push, so it reaches backgrounded/killed
+    // devices, not just an already-open chat screen.
+    if (otherUserId) {
+      sendCallPush({
+        calleeId: otherUserId, callerId: currentUserId,
+        callerName: displayName || 'Someone', callType, roomName, conversationId: convId,
+      });
+    }
 
     try {
+      // ✅ NEW: configure the native audio session before connecting, and
+      // start it so mic/speaker routing behaves like a real call rather
+      // than default media playback.
+      await AudioSession.configureAudio({
+        android: { audioTypeOptions: AndroidAudioTypePresets.communication },
+      });
+      await AudioSession.startAudioSession();
+
       const token = await fetchLiveKitToken(roomName, displayName || currentUserId);
       if (!token) throw new Error('Could not get call token');
 
@@ -144,10 +302,29 @@ function useCall(currentUserId: string, displayName: string) {
 
       room.on(RoomEvent.ParticipantDisconnected, () => {
         if (mountedRef.current) setCallState(prev => ({ ...prev, remoteConnected: false }));
+        setRemoteVideoTrack(null);
       });
 
       room.on(RoomEvent.Disconnected, () => {
         if (mountedRef.current) setCallState(CALL_INITIAL);
+        setLocalVideoTrack(null);
+        setRemoteVideoTrack(null);
+      });
+
+      // ✅ NEW: actually surface video tracks instead of only publishing them.
+      room.on(RoomEvent.LocalTrackPublished, (publication) => {
+        if (mountedRef.current && publication.kind === Track.Kind.Video && publication.videoTrack) {
+          setLocalVideoTrack(publication.videoTrack);
+        }
+      });
+      room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+        if (publication.kind === Track.Kind.Video) setLocalVideoTrack(null);
+      });
+      room.on(RoomEvent.TrackSubscribed, (track) => {
+        if (mountedRef.current && track.kind === Track.Kind.Video) setRemoteVideoTrack(track);
+      });
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        if (track.kind === Track.Kind.Video) setRemoteVideoTrack(null);
       });
 
       await room.connect(LIVEKIT_URL, token);
@@ -164,16 +341,52 @@ function useCall(currentUserId: string, displayName: string) {
       console.error('LiveKit call error:', err);
       if (mountedRef.current) setCallState(prev => ({ ...prev, isConnecting: false }));
     }
-  }, [currentUserId, displayName]);
+  }, [currentUserId, displayName, otherUserId]);
 
   const endCall = useCallback(() => {
+    // If we're still ringing (nobody joined yet), let the other side know
+    // to stop showing the incoming-call banner.
+    setCallState(prev => {
+      if (prev.isInCall && !prev.remoteConnected) {
+        signalRef.current?.send({
+          type: 'broadcast', event: 'call_cancelled',
+          payload: { roomName: conversationId ? `call_${conversationId}` : '' },
+        }).catch(() => {});
+      }
+      return prev;
+    });
     if (timerRef.current) clearInterval(timerRef.current);
     if (roomRef.current) {
       try { roomRef.current.disconnect(); } catch (_) {}
       roomRef.current = null;
     }
+    AudioSession.stopAudioSession().catch(() => {});
+    setLocalVideoTrack(null);
+    setRemoteVideoTrack(null);
     setCallState(CALL_INITIAL);
-  }, []);
+  }, [conversationId]);
+
+  // ✅ NEW: accept an incoming call — joins the same LiveKit room the
+  // caller created (deterministic room name from the conversation id).
+  const acceptCall = useCallback(async () => {
+    if (!incomingCall || !conversationId) return;
+    const { callType } = incomingCall;
+    setIncomingCall(null);
+    if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
+    await startCall(conversationId, callType);
+  }, [incomingCall, conversationId, startCall]);
+
+  // ✅ NEW: decline an incoming call — tells the caller so they can stop
+  // ringing instead of timing out.
+  const declineCall = useCallback(() => {
+    if (!incomingCall) return;
+    signalRef.current?.send({
+      type: 'broadcast', event: 'call_declined',
+      payload: { roomName: incomingCall.roomName },
+    }).catch(() => {});
+    if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
+    setIncomingCall(null);
+  }, [incomingCall]);
 
   const toggleMute = useCallback(async () => {
     if (!roomRef.current) return;
@@ -189,11 +402,24 @@ function useCall(currentUserId: string, displayName: string) {
     setCallState(p => ({ ...p, isVideoOff: next }));
   }, [callState.isVideoOff]);
 
-  const toggleSpeaker = useCallback(() => {
-    setCallState(p => ({ ...p, isSpeakerOn: !p.isSpeakerOn }));
-  }, []);
+  // ✅ FIX: actually route audio output instead of only flipping an icon.
+  // AudioSession.selectAudioOutput comes from @livekit/react-native and
+  // switches the native call audio route (speaker vs. earpiece/default).
+  const toggleSpeaker = useCallback(async () => {
+    const next = !callState.isSpeakerOn;
+    try {
+      await AudioSession.selectAudioOutput(next ? 'force_speaker' : 'default');
+    } catch (e) {
+      console.error('selectAudioOutput error:', e);
+    }
+    setCallState(p => ({ ...p, isSpeakerOn: next }));
+  }, [callState.isSpeakerOn]);
 
-  return { callState, startCall, endCall, toggleMute, toggleCamera, toggleSpeaker };
+  return {
+    callState, incomingCall, localVideoTrack, remoteVideoTrack,
+    startCall, endCall, acceptCall, declineCall,
+    toggleMute, toggleCamera, toggleSpeaker,
+  };
 }
 
 // ── TYPES ─────────────────────────────────────────────────────
@@ -540,24 +766,41 @@ function Waveform({ isMe }: { isMe: boolean }) {
 
 // ── CALL MODAL ────────────────────────────────────────────────
 function CallModal({
-  visible, otherName, otherPhoto, callState,
+  visible, otherName, otherPhoto, callState, localVideoTrack, remoteVideoTrack,
   onEnd, onToggleMute, onToggleSpeaker, onToggleCamera,
 }: {
   visible: boolean; otherName: string; otherPhoto?: string;
   callState: CallState;
+  localVideoTrack: Track | null; remoteVideoTrack: Track | null;
   onEnd: () => void; onToggleMute: () => void;
   onToggleSpeaker: () => void; onToggleCamera: () => void;
 }) {
   const { callType } = callState;
   const insets = useSafeAreaInsets();
+  // ✅ NEW: show live video once it's flowing; fall back to the avatar
+  // card (still connecting, camera off, or plain voice call).
+  const showRemoteVideo = callType === 'video' && !!remoteVideoTrack;
+  const showLocalPreview = callType === 'video' && !!localVideoTrack && !callState.isVideoOff;
 
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent>
       <View style={[styles.callModal, { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 30 }]}>
         <StatusBar barStyle="light-content" backgroundColor="#000" />
 
-        {/* Pulse rings — voice call only */}
-        {callType === 'voice' && callState.remoteConnected && !callState.isConnecting && (
+        {/* ✅ NEW: full-screen remote video feed */}
+        {showRemoteVideo && (
+          <VideoView videoTrack={remoteVideoTrack as any} style={StyleSheet.absoluteFillObject} objectFit="cover" />
+        )}
+
+        {/* ✅ NEW: local camera preview, picture-in-picture */}
+        {showLocalPreview && (
+          <View style={[styles.localPreview, { top: insets.top + 20 }]}>
+            <VideoView videoTrack={localVideoTrack as any} style={StyleSheet.absoluteFillObject} objectFit="cover" mirror />
+          </View>
+        )}
+
+        {/* Pulse rings — voice call only, or video before the feed connects */}
+        {!showRemoteVideo && callType === 'voice' && callState.remoteConnected && !callState.isConnecting && (
           <>
             <View style={styles.callPulse1} />
             <View style={styles.callPulse2} />
@@ -566,14 +809,15 @@ function CallModal({
         )}
 
         <View style={styles.callTop}>
-          <View style={styles.callAvatarWrap}>
+          {/* Avatar card — hidden once the remote video feed is live */}
+          {!showRemoteVideo && <View style={styles.callAvatarWrap}>
             {otherPhoto
               ? <Image source={{ uri: otherPhoto }} style={styles.callAvatar} />
               : <View style={styles.callAvatarPlaceholder}>
                   <Text style={styles.callAvatarInitial}>{(otherName || 'U')[0].toUpperCase()}</Text>
                 </View>}
             {callState.remoteConnected && <View style={styles.callAvatarRing} />}
-          </View>
+          </View>}
           <Text style={styles.callName}>{otherName}</Text>
           <Text style={styles.callStatus}>
             {callState.isConnecting ? 'Calling…'
@@ -807,7 +1051,22 @@ export default function ChatScreen() {
   // from wherever the conversation list lives.
   const route = useRoute<any>();
   const navigation = useNavigation<any>();
-  const { id, otherUserId, otherName, otherPhoto } = route.params || {};
+  const { id, otherUserId, otherName, otherPhoto, autoAnswerCall, autoAnswerCallType } = route.params || {};
+
+  // FIX: MainTabBar was always visible on this screen — it never told the
+  // parent tab navigator to hide it. MainTabBar itself already knows how to
+  // read tabBarStyle.display === 'none' from the focused screen's options
+  // (same pattern cowatch.tsx/create.tsx already use); this screen just
+  // never called it. With the tab bar permanently eating ~68-80px at the
+  // bottom, the message input bar was being squeezed out of the visible
+  // viewport on shorter screens — which is what showed up as "no visible
+  // place to type a normal message."
+  useEffect(() => {
+    navigation.getParent()?.setOptions({ tabBarStyle: { display: 'none' } });
+    return () => {
+      navigation.getParent()?.setOptions({ tabBarStyle: undefined });
+    };
+  }, [navigation]);
 
   const { user, userProfile } = useAuthStore();
   const flatRef = useRef<FlatList>(null);
@@ -836,8 +1095,23 @@ export default function ChatScreen() {
   const displayName = userProfile?.display_name || userProfile?.username || 'LumVibe User';
 
   const {
-    callState, startCall, endCall, toggleMute, toggleCamera, toggleSpeaker,
-  } = useCall(user?.id || '', displayName);
+    callState, incomingCall, localVideoTrack, remoteVideoTrack,
+    startCall, endCall, acceptCall, declineCall,
+    toggleMute, toggleCamera, toggleSpeaker,
+  } = useCall(user?.id || '', displayName, id || null, otherUserId || null);
+
+  // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
+  // the user tapped it, and the root navigator (see the app-entry snippet)
+  // relaunched straight into this screen with these params. Auto-join once.
+  // This also covers a warm tap (app already running elsewhere) since the
+  // same root-level handler drives both — see call-push-app-entry-snippet.
+  const autoAnsweredRef = useRef(false);
+  useEffect(() => {
+    if (autoAnswerCall && !autoAnsweredRef.current && id) {
+      autoAnsweredRef.current = true;
+      startCall(id, autoAnswerCallType === 'video' ? 'video' : 'voice');
+    }
+  }, [autoAnswerCall, autoAnswerCallType, id, startCall]);
 
   const [streak, setStreak] = useState(0);
 
@@ -894,20 +1168,45 @@ export default function ChatScreen() {
     finally { setUploadingVideo(false); }
   }, [sendVideo]);
 
-  // FIX: expo-audio recording pattern
+  // FIX: expo-audio recording pattern.
+  // FIX (real bug — recording never stops): startRecording awaits mic
+  // permission + prepareToRecordAsync before actually calling
+  // recorder.record(). If the user does a quick tap-and-release (a short
+  // voice note), onPressOut → stopRecording could fire and finish BEFORE
+  // that await chain resolves — so stopRecording ran on a recorder that
+  // hadn't started yet (a no-op), and moments later startRecording's
+  // record() call kicked in with nothing left to ever stop it. That's
+  // exactly "release the button but it keeps recording." These two refs
+  // close that race: if stop is requested while start is still in-flight,
+  // start bails out the instant its await resolves instead of recording.
+  const stopRequestedRef = useRef(false);
+  const isStartingRef    = useRef(false);
+
   const startRecording = useCallback(async () => {
+    stopRequestedRef.current = false;
+    isStartingRef.current = true;
     try {
       const status = await AudioModule.requestRecordingPermissionsAsync();
-      if (!status.granted) { Alert.alert('Permission needed', 'Please allow microphone access.'); return; }
+      if (!status.granted) {
+        Alert.alert('Permission needed', 'Please allow microphone access.');
+        return;
+      }
       await recorder.prepareToRecordAsync();
+      if (stopRequestedRef.current) return; // user already let go — don't start at all
       recorder.record();
       setIsRecording(true);
       setRecordingDur(0);
       recordTimerRef.current = setInterval(() => setRecordingDur(p => p + 1), 1000);
-    } catch (e) { console.error('startRecording error:', e); }
+    } catch (e) {
+      console.error('startRecording error:', e);
+    } finally {
+      isStartingRef.current = false;
+    }
   }, [recorder]);
 
   const stopRecording = useCallback(async () => {
+    stopRequestedRef.current = true;
+    if (isStartingRef.current) return; // nothing recording yet — startRecording will bail itself out
     try {
       if (recordTimerRef.current) clearInterval(recordTimerRef.current);
       await recorder.stop();
@@ -937,7 +1236,7 @@ export default function ChatScreen() {
 
   if (loading) {
     return (
-      <SafeAreaView style={[styles.safe, { alignItems: 'center', justifyContent: 'center' }]}>
+      <SafeAreaView edges={['top']} style={[styles.safe, { alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator color={C.green} size="large" />
       </SafeAreaView>
     );
@@ -947,7 +1246,7 @@ export default function ChatScreen() {
   const showCharCount = charCount >= 1800;
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView edges={['top']} style={styles.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.black} />
 
       {/* Header */}
@@ -1175,11 +1474,39 @@ export default function ChatScreen() {
         otherName={otherName || 'Them'}
         otherPhoto={otherPhoto}
         callState={callState}
+        localVideoTrack={localVideoTrack}
+        remoteVideoTrack={remoteVideoTrack}
         onEnd={endCall}
         onToggleMute={toggleMute}
         onToggleSpeaker={toggleSpeaker}
         onToggleCamera={toggleCamera}
       />
+
+      {/* ✅ NEW: Incoming call banner — shown when the other participant
+          starts a call while this chat is open. */}
+      <Modal visible={!!incomingCall} transparent animationType="fade" statusBarTranslucent>
+        <View style={styles.incomingOverlay}>
+          <View style={styles.incomingCard}>
+            {incomingCall?.callerPhoto
+              ? <Image source={{ uri: incomingCall.callerPhoto }} style={styles.incomingAvatar} />
+              : <View style={[styles.incomingAvatar, styles.incomingAvatarPlaceholder]}>
+                  <Text style={styles.incomingAvatarInitial}>{(incomingCall?.callerName || 'U')[0].toUpperCase()}</Text>
+                </View>}
+            <Text style={styles.incomingName}>{incomingCall?.callerName || 'Someone'}</Text>
+            <Text style={styles.incomingSubtitle}>
+              Incoming {incomingCall?.callType === 'video' ? 'video' : 'voice'} call…
+            </Text>
+            <View style={styles.incomingActions}>
+              <TouchableOpacity style={[styles.incomingBtn, styles.incomingDecline]} onPress={declineCall}>
+                <Ionicons name="call" size={24} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.incomingBtn, styles.incomingAccept]} onPress={acceptCall}>
+                <Ionicons name={incomingCall?.callType === 'video' ? 'videocam' : 'call'} size={24} color="#000" />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1295,4 +1622,20 @@ const styles = StyleSheet.create({
   callCtrlActive:        { backgroundColor: 'rgba(0,230,118,0.12)', borderColor: C.green },
   callEndBtn:            { backgroundColor: C.red, borderColor: '#c62828', width: 68, height: 68, borderRadius: 34 },
   callCtrlLabel:         { fontSize: 11, color: '#666', fontWeight: '500', letterSpacing: 0.2 },
+
+  // ✅ NEW: local camera picture-in-picture preview during a video call
+  localPreview: { position: 'absolute', right: 16, width: 100, height: 140, borderRadius: 14, overflow: 'hidden', backgroundColor: '#111', borderWidth: 1, borderColor: '#2e2e2e', zIndex: 2 },
+
+  // ✅ NEW: incoming call banner
+  incomingOverlay:      { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
+  incomingCard:         { width: '100%', backgroundColor: '#111', borderRadius: 28, paddingVertical: 36, paddingHorizontal: 24, alignItems: 'center', borderWidth: 1, borderColor: '#242424' },
+  incomingAvatar:              { width: 88, height: 88, borderRadius: 44, marginBottom: 16 },
+  incomingAvatarPlaceholder:   { backgroundColor: '#1a1a1a', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: C.green },
+  incomingAvatarInitial:       { fontSize: 32, fontWeight: '800', color: C.green },
+  incomingName:         { fontSize: 20, fontWeight: '800', color: C.white },
+  incomingSubtitle:     { fontSize: 13, color: C.muted, marginTop: 4, marginBottom: 28 },
+  incomingActions:      { flexDirection: 'row', gap: 40 },
+  incomingBtn:          { width: 62, height: 62, borderRadius: 31, alignItems: 'center', justifyContent: 'center' },
+  incomingDecline:      { backgroundColor: C.red },
+  incomingAccept:       { backgroundColor: C.green },
 });

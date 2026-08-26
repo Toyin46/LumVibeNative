@@ -1,11 +1,24 @@
-import React, { useEffect } from 'react';
-import { NavigationContainer, DarkTheme } from '@react-navigation/native';
+import React, { useEffect, useRef } from 'react';
+import { NavigationContainer, DarkTheme, NavigationContainerRef } from '@react-navigation/native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet } from 'react-native';
+// ✅ NEW: root cause of "Audio device module is not initialized" — LiveKit's
+// WebRTC globals were never registered. This has to run once, before any
+// screen touches LiveKit, so it lives here at the very top of the app
+// entry rather than inside chat/[id].tsx. This alone isn't the full fix —
+// see the note further down about the Expo config plugin, which is the
+// other required half (and needs a new EAS build, not just a JS reload).
+import { registerGlobals } from '@livekit/react-native';
+registerGlobals();
+
 import { RootNavigator } from './src/navigation';
 import { colors } from './src/constants';
+// ✅ NEW: makes tapping an incoming-call push (cold-start or warm) land
+// straight in the right chat with the call auto-joined — see the file
+// for why this has to live here, at the app root, and not in chat/[id].tsx.
+import { useCallPushNavigation } from './src/lib/callPushNavigation';
 
 const navigationTheme = {
   ...DarkTheme,
@@ -26,10 +39,15 @@ export default function App() {
   }, []);
   // #endregion
 
+  // ✅ NEW: wires up incoming-call push notification taps to navigate into
+  // ChatDM with autoAnswerCall — see src/lib/callPushNavigation.ts
+  const navigationRef = useRef<NavigationContainerRef<any>>(null);
+  useCallPushNavigation(navigationRef);
+
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-        <NavigationContainer theme={navigationTheme}>
+        <NavigationContainer ref={navigationRef} theme={navigationTheme}>
           <StatusBar style="light" />
           <RootNavigator />
         </NavigationContainer>

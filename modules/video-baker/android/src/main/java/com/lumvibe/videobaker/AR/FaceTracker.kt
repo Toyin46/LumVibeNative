@@ -167,4 +167,16 @@ class FaceTracker(context: Context) {
         val lower = points[14]
         return ((upper.x() + lower.x()) / 2f) to ((upper.y() + lower.y()) / 2f)
     }
+
+    /** Real eye position for WINK_SPARK's anchor - upper-eyelid landmark, a
+     * reasonable "center of this eye" proxy. 159 = left eye, 386 = right eye,
+     * the exact indices winkSpark's own shader comment already named as the
+     * intended upgrade before this method existed to provide them. */
+    fun eyeCenter(result: FaceLandmarkerResult, isLeft: Boolean): Pair<Float, Float>? {
+        val points = result.faceLandmarks().firstOrNull() ?: return null
+        val index = if (isLeft) 159 else 386
+        if (points.size <= index) return null
+        val p = points[index]
+        return p.x() to p.y()
+    }
 }   
