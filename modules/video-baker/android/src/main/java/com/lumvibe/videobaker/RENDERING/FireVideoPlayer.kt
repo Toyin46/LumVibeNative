@@ -1,4 +1,17 @@
-package com.lumvibe.videobaker.RENDERING
+package com.lumvibe.videobaker
+// ✅ FIX (pre-existing bug, unrelated to the fireVideoPath wiring): this was
+// declared as `com.lumvibe.videobaker.RENDERING`, but every other file in
+// this same physical folder (FrameRenderer.kt, GlUtil.kt, EffectShaders.kt)
+// is actually package `com.lumvibe.videobaker` with no subpackage, and none
+// of them import FireVideoPlayer explicitly — they all rely on same-package
+// visibility. That mismatch is exactly what a clean EAS build's full
+// from-scratch Kotlin compile surfaces as "Unresolved reference 'GlUtil'"
+// inside this file, which then cascades into "Unresolved reference
+// 'FireVideoPlayer'" everywhere FrameRenderer.kt uses it — a local
+// incremental build can go a long time without ever fully recompiling a
+// file nothing has touched, which is almost certainly why this was never
+// caught until now. Matching the package everything else already uses is
+// the correct fix, not adding a one-off import.
 
 import android.content.Context
 import android.graphics.SurfaceTexture

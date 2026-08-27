@@ -96,7 +96,12 @@ class ImageBaker {
             pbufferSurface = eglCore.createOffscreenSurface(width, height)
             eglCore.makeCurrent(pbufferSurface)
 
-            renderer = FrameRenderer().apply {
+            // ✅ FIX (pre-existing bug, unrelated to fireVideoPath): FrameRenderer's
+            // constructor requires `context` (see FrameRenderer.kt) — this call was
+            // passing none. `context` is already in scope in this function (used
+            // just above for HandTracker/SegmentationTracker), so this is a
+            // one-argument fix, not a signature change.
+            renderer = FrameRenderer(context).apply {
                 setup()
                 setFrameSize(width, height)
                 ensureSecondaryTexture()

@@ -1,4 +1,4 @@
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 
 // Host this wherever your fire_loop.mp4 (already compressed via
 // compress-fire-video.js) ends up - Cloudinary, since that's already part of
