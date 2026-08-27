@@ -6,15 +6,30 @@ import android.media.MediaPlayer
 import android.opengl.Matrix
 import android.util.Log
 import android.view.Surface
+import java.io.File
 
 /**
- * Decodes the bundled looping fire video (assets/fire_loop.mp4) onto its own
- * GL_TEXTURE_EXTERNAL_OES texture via MediaPlayer + SurfaceTexture - the exact
- * same mechanism the camera preview itself already uses (see LiveEffectPreview
- * View/EglCore), just decoding a bundled file instead of a live camera feed.
- * Used by MOUTH_FIRE and FIRE_BOOK to layer real fire detail on top of their
- * existing procedural/particle flames - see those shaders' own comments in
- * EffectShaders.kt for how the sampling is blended in.
+ * Decodes the fire video onto its own GL_TEXTURE_EXTERNAL_OES texture via
+ * MediaPlayer + SurfaceTexture - the exact same mechanism the camera preview
+ * itself already uses (see LiveEffectPreviewView/EglCore), just decoding a
+ * video file instead of a live camera feed. Used by MOUTH_FIRE and FIRE_BOOK
+ * to layer real fire detail on top of their existing procedural/particle
+ * flames - see those shaders' own comments in EffectShaders.kt for how the
+ * sampling is blended in.
+ *
+ * SOURCE OF THE VIDEO FILE, REWRITTEN: originally always read from the
+ * bundled assets/fire_loop.mp4, which meant shipping the fire footage in
+ * every install regardless of whether the person ever opens these two
+ * effects - not worth it for an 80+MB asset. Now prefers [cachedFilePath] -
+ * a real file already downloaded and cached by the JS side (expo-file-system,
+ * FileSystem.cacheDirectory) on first use of either effect - and only falls
+ * back to a bundled assets/fire_loop.mp4 if that path is null/missing, which
+ * keeps local dev/testing working without needing the download step wired up
+ * yet. In production, once the JS-side download+cache is in place, the
+ * bundled asset can be removed from assets/ entirely and this always takes
+ * the cachedFilePath branch. MediaPlayer doesn't care where a file physically
+ * lives once it's on disk - setDataSource(path) is actually simpler than the
+ * AssetFileDescriptor path it replaces here.
  *
  * The source video ships on a plain BLACK background (not a real alpha
  * channel, per how it was sourced - see fireBook/mouthFire's shader comments).
@@ -36,14 +51,21 @@ import android.view.Surface
  * timing.
  *
  * FLAG FOR ON-DEVICE VERIFICATION: this is genuinely new code with no prior
- * working version in this codebase to diff against. Verify: (1) the asset
- * actually decodes and updateTexImage() produces new frames each call: (2)
+ * working version in this codebase to diff against. Verify: (1) the file
+ * actually decodes and updateTexImage() produces new frames each call; (2)
  * looping is seamless - MediaPlayer.isLooping handles restart, but a visible
  * "jump" at the loop point depends on the source clip itself, trim/re-encode
  * it if so; (3) the video's own audio track (if it has one) stays muted -
- * setVolume(0f, 0f) below - so it never bleeds into an actual recording.
+ * setVolume(0f, 0f) below - so it never bleeds into an actual recording; (4)
+ * a corrupted/partial cachedFilePath (interrupted download) fails gracefully
+ * here rather than crashing - the try/catch below covers it, but confirm on
+ * a real interrupted-download test, not just a normal one.
  */
-class FireVideoPlayer(context: Context, assetFileName: String = "fire_loop.mp4") {
+class FireVideoPlayer(
+    context: Context,
+    cachedFilePath: String? = null,
+    assetFileName: String = "fire_loop.mp4",
+) {
     private val tag = "FireVideoPlayer"
 
     val textureId: Int = GlUtil.createExternalTexture()
@@ -60,24 +82,32 @@ class FireVideoPlayer(context: Context, assetFileName: String = "fire_loop.mp4")
 
     init {
         try {
-            val afd = context.assets.openFd(assetFileName)
+            val cachedFile = cachedFilePath?.let { File(it) }
+            val usingCachedFile = cachedFile != null && cachedFile.exists() && cachedFile.length() > 0
             mediaPlayer = MediaPlayer().apply {
-                setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-                afd.close()
+                if (usingCachedFile) {
+                    setDataSource(cachedFilePath) // simplest overload - just a path on disk
+                } else {
+                    val afd = context.assets.openFd(assetFileName)
+                    setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                    afd.close()
+                }
                 setSurface(surface)
                 isLooping = true
                 setVolume(0f, 0f) // mute - decorative texture only, never audio
                 setOnPreparedListener { it.start() }
                 setOnErrorListener { _, what, extra ->
-                    Log.w(tag, "MediaPlayer error for $assetFileName: what=$what extra=$extra - " +
+                    val source = if (usingCachedFile) cachedFilePath else "bundled asset $assetFileName"
+                    Log.w(tag, "MediaPlayer error for $source: what=$what extra=$extra - " +
                         "MOUTH_FIRE/FIRE_BOOK will run on their procedural flame only")
                     true
                 }
                 prepareAsync()
             }
         } catch (e: Exception) {
-            Log.w(tag, "Could not open fire asset '$assetFileName' - was it added to " +
-                "android/src/main/assets/? Falling back to procedural flame only.", e)
+            val source = cachedFilePath ?: "bundled asset $assetFileName"
+            Log.w(tag, "Could not open fire video from '$source'. Falling back to " +
+                "procedural flame only.", e)
         }
     }
 

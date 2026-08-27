@@ -46,6 +46,10 @@ type VideoBakerOptions = {
   saturation?: number; // 0..2, default 1
   effect?: VisualEffectKey; // omit for no effect
   effectIntensity?: number; // 0..1, default 1
+  // Downloaded/cached fire_loop.mp4 path from ensureFireVideoCached() —
+  // only read when effect is "mouth_fire" or "fire_book". Omit/null falls
+  // back to procedural flame only.
+  fireVideoPath?: string | null;
 };
 
 // Image baking's options — same vocabulary as VideoBakerOptions minus the
@@ -64,6 +68,9 @@ type ImageBakerOptions = {
   effect?: VisualEffectKey;
   effectIntensity?: number; // 0..1, default 1
   portalScenePngPath?: string; // only used when effect is "hand_portal"
+  // Same meaning as VideoBakerOptions.fireVideoPath — only relevant for
+  // "mouth_fire" (the only fire effect a still photo can realistically use).
+  fireVideoPath?: string | null;
 };
 
 // Tells EventEmitter which events exist and what shape each payload is.

@@ -72,6 +72,13 @@ class VideoTranscoder {
         // image shown inside the portal circle. transcode() throws early if this
         // effect is selected without a path, rather than silently drawing nothing.
         val portalScenePngPath: String? = null,
+        // ✅ NEW: same downloaded/cached fire_loop.mp4 path used by the live
+        // preview (LiveEffectPreviewView.setFireVideoPath) — only read when
+        // effect is "mouth_fire" or "fire_book". Null falls back to
+        // procedural flame only (FireVideoPlayer.kt), same graceful
+        // degradation as live preview, so an export never crashes even if
+        // the download somehow failed right before the user hit export.
+        val fireVideoPath: String? = null,
         val videoBitRate: Int = -1 // -1 = auto (width*height*4)
     )
 
@@ -128,6 +135,11 @@ class VideoTranscoder {
         renderer.contrast = options.contrast
         renderer.saturation = options.saturation
         renderer.effectIntensity = options.effectIntensity
+        // Set before setEffect() so MOUTH_FIRE/FIRE_BOOK creates its
+        // FireVideoPlayer against the real cached path immediately (the
+        // custom setter in FrameRenderer.kt also handles this if ever set
+        // out of order, but this is the natural, intended order here).
+        renderer.fireVideoPath = options.fireVideoPath
         renderer.setEffect(VisualEffect.fromKey(options.effect))
 
         val captionTextureId = OverlayBuilder.buildCaptionTexture(width, height, options.captionText)

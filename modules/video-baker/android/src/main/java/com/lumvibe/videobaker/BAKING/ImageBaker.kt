@@ -43,7 +43,14 @@ class ImageBaker {
         // VisualEffect.fromKey for the authoritative list.
         val effect: String? = null,
         val effectIntensity: Float = 1f,
-        val portalScenePngPath: String? = null
+        val portalScenePngPath: String? = null,
+        // ✅ NEW: same meaning/fallback as VideoTranscoder.Options.fireVideoPath.
+        // MOUTH_FIRE is realistically the only one of the two fire effects a
+        // still photo would use (FIRE_BOOK needs a hand gesture, which a
+        // static image can't provide — see EffectRequirements.kt's own
+        // handling of that), but wiring it through here too costs nothing
+        // and keeps this options shape a genuine match to VideoTranscoder's.
+        val fireVideoPath: String? = null
     )
 
     /**
@@ -125,6 +132,8 @@ class ImageBaker {
             renderer.brightness = options.brightness
             renderer.contrast = options.contrast
             renderer.saturation = options.saturation
+            // Set before setEffect() — see VideoTranscoder.kt's identical note.
+            renderer.fireVideoPath = options.fireVideoPath
             renderer.setEffect(selectedEffect)
             renderer.effectIntensity = options.effectIntensity
 

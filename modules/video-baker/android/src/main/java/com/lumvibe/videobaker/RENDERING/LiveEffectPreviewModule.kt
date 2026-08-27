@@ -42,6 +42,21 @@ class LiveEffectPreviewModule : Module() {
             // is the exact same lookup EffectShaders/VideoTranscoder use for baking,
             // so a live preview key and a bake-time key are guaranteed to mean the
             // same effect.
+            // ✅ NEW: must be registered/applied BEFORE the "effect" Prop below —
+            // FrameRenderer.setEffect() only reads fireVideoPath at the exact
+            // moment MOUTH_FIRE/FIRE_BOOK first gets selected and creates its
+            // FireVideoPlayer (see FrameRenderer.kt's own comment on this).
+            // Expo Modules applies Props in the order they're declared here,
+            // so declaring this first guarantees the path is already set by
+            // the time "effect" fires, even if create.tsx ever updates both
+            // props in the same render for some reason. create.tsx should
+            // still independently await ensureFireVideoCached() and only THEN
+            // select the effect — this is a safety net, not a substitute for
+            // that sequencing.
+            Prop("fireVideoPath") { view: LiveEffectPreviewView, path: String? ->
+                view.setFireVideoPath(path)
+            }
+
             Prop("effect") { view: LiveEffectPreviewView, key: String? ->
                 // FIX: wires the view's plain callback field to this module's
                 // sendEvent the first time ANY prop is set on this view

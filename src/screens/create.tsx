@@ -47,7 +47,8 @@ import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
-import { LiveEffectPreview, LiveEffectPreviewHandle } from '../../modules/video-baker/LiveEffectPreview';
+import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
+import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -699,41 +700,6 @@ const FX_CATEGORIES = [
   {id:'retro',name:'Retro',emoji:'📼'},{id:'editorial',name:'Editorial',emoji:'🎬'},
   {id:'creative',name:'Creative',emoji:'🎨'},
 ];
-
-// FIX (requested correction): several fx_gl_* entries in FX_IMAGES point at
-// require('../assets/images/filters/fx_gl_X.png') paths whose actual image
-// files either don't exist yet or aren't a real styled cover (per your own
-// report - "vintage etc"). Two different failure modes here, worth being
-// precise about: (1) if the file genuinely doesn't exist on disk, require()
-// fails at METRO BUNDLE TIME - a hard build error, not a runtime glitch, and
-// no amount of onError handling in this component can catch that; (2) if the
-// file exists but is corrupt/blank/a bad placeholder, THAT is a runtime load
-// failure and onError below does catch it. I can't inspect your actual
-// assets/images/filters folder from here to tell which case applies to which
-// file, so this component covers case (2) robustly and gracefully - if you
-// still see specific effects with no cover after building, tell me exactly
-// which ones and I'll remove their require() line entirely and switch them
-// to icon-only, which eliminates the bundle-time risk for good.
-function FxCover({ effect, style, imgStyle }: { effect: FxEffect; style?: any; imgStyle?: any }) {
-  const [failed, setFailed] = React.useState(false);
-  const source = FX_IMAGES[effect.id];
-  if (!source || failed) {
-    return (
-      <View style={[{ backgroundColor: '#1c1c2e', alignItems: 'center', justifyContent: 'center' }, style]}>
-        <Text style={{ fontSize: 22 }}>{effect.emoji}</Text>
-      </View>
-    );
-  }
-  return (
-    <Image
-      source={source}
-      style={[{ width: '100%', height: '100%' }, imgStyle]}
-      resizeMode="cover"
-      onError={() => setFailed(true)}
-    />
-  );
-}
-
 const FX_OVERLAY_TINTS: Record<string,string> = {
   fx_none:'transparent', fx_vhs:'rgba(180,120,60,0.28)', fx_fire:'rgba(255,80,0,0.32)',
   fx_ice:'rgba(80,160,255,0.30)', fx_neon_burn:'rgba(0,255,180,0.28)',
@@ -4627,9 +4593,6 @@ export default function CreateScreen() {
   // shader effect onto the raw footage afterwards, same as it already does
   // for effects picked from the gallery, so this is the only piece missing.
   const [isCapturingLiveFx, setIsCapturingLiveFx] = useState(false);
-  // FIX (live-effect recording): lets the actual native live-GL recording be
-  // called directly, instead of always falling back to the plain camera.
-  const liveEffectPreviewRef = useRef<LiveEffectPreviewHandle>(null);
   // FIX: the native camera session starts tearing down the instant
   // stopRecording() is called, but screenView doesn't switch to 'compose'
   // until onRecordingFinished actually fires (which isn't instant - the file
@@ -4687,6 +4650,35 @@ export default function CreateScreen() {
   const [blurEnabled, setBlurEnabled]   = useState(false);
   const [addWatermark, setAddWatermark] = useState(true);
   const [autoOptimize, setAutoOptimize] = useState(true);
+
+  // ✅ NEW: MOUTH_FIRE/FIRE_BOOK's shared downloaded fire-video texture.
+  // null = not cached yet (or download failed) — native side falls back to
+  // procedural flame only in that case, so this never blocks the effect
+  // from being usable, it just looks a little plainer until the download
+  // finishes. fireVideoLoading drives the spinner on those two thumbnails
+  // — see the FX thumbnail strip and fxCard list below.
+  const [fireVideoPath, setFireVideoPath]       = useState<string | null>(null);
+  const [fireVideoLoading, setFireVideoLoading] = useState(false);
+
+  // Same "kick this off the moment the user selects the effect" pattern as
+  // pickPortalScene below, and idempotent the same way ensureFireVideoCached
+  // itself is — calling this repeatedly (e.g. the user taps Mouth Fire more
+  // than once) only downloads once; every call after the first just returns
+  // the already-resolved path immediately, no spinner flash.
+  const ensureFireVideoReady = useCallback(async () => {
+    if (fireVideoPath) return fireVideoPath;
+    setFireVideoLoading(true);
+    try {
+      const path = await ensureFireVideoCached();
+      setFireVideoPath(path); // may be null on failure — handled gracefully everywhere this is read
+      return path;
+    } finally {
+      setFireVideoLoading(false);
+    }
+  }, [fireVideoPath]);
+
+  const isFireEffect = (fx?: { glShaderEffect?: string }) =>
+    fx?.glShaderEffect === 'mouth_fire' || fx?.glShaderEffect === 'fire_book';
 
   // Lets the user pick an image for HAND_PORTAL's portal-scene. Called from the
   // FX card's onPress (below) so picking happens right when they select the
@@ -4866,33 +4858,6 @@ export default function CreateScreen() {
 
   // ─── Camera actions (VisionCamera) ───────────────────
   const handleTakePhoto = async () => {
-    // FIX (real bug you reported): this always called cameraRef.current.
-    // takePhoto() — but the regular <Camera> component isn't even mounted
-    // while a GL effect is selected (<LiveEffectPreview> replaces it in the
-    // render tree), so cameraRef.current was null and this function's very
-    // first line silently returned, doing nothing. Same branch-then-fallback
-    // pattern handleStartRecording already uses correctly below: try the
-    // live-effect capture path first when a GL effect is active, and only
-    // fall through to the regular camera if that's not the case (or if it
-    // genuinely fails for some reason), so this can never end up MORE broken
-    // than it already was.
-    if (hasLiveGLEffect && liveEffectPreviewRef.current) {
-      try {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-        const outputPath = `${FileSystem.cacheDirectory}live_photo_${Date.now()}.jpg`.replace('file://', '');
-        const resultPath = await liveEffectPreviewRef.current.capturePhoto(outputPath);
-        const uri = Platform.OS === 'android' ? `file://${resultPath}` : resultPath;
-        setOriginalMediaUri(uri);
-        setMediaUri(uri);
-        setMediaType('image');
-        setScreenView('compose');
-        return;
-      } catch (e: any) {
-        console.warn('Live-effect photo capture failed, falling back to plain camera:', e?.message);
-        // falls through to the existing plain-camera path below
-      }
-    }
-
     if (!cameraRef.current) return;
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -4908,35 +4873,7 @@ export default function CreateScreen() {
     } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + e.message); }
   };
 
-  const recordingViaLiveFxRef = useRef(false);
-
   const handleStartRecording = async () => {
-    if (isRecording) return;
-
-    // FIX (live-effect recording): try the REAL live recording first when a
-    // GL effect is active - the effect now shows WHILE recording, not just
-    // baked in afterward. Falls back to the old swap-to-plain-camera
-    // behavior below if this throws for ANY reason, so a bug in the
-    // brand-new native recorder can never leave the record button fully
-    // broken - see LiveRecorder.kt's own "FLAG FOR ON-DEVICE VERIFICATION"
-    // note for why this fallback matters so much here specifically.
-    if (hasLiveGLEffect && liveEffectPreviewRef.current) {
-      try {
-        const videoOnlyPath = `${FileSystem.cacheDirectory}live_video_${Date.now()}.mp4`.replace('file://', '');
-        const pcmPath = `${FileSystem.cacheDirectory}live_audio_${Date.now()}.pcm`.replace('file://', '');
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-        await liveEffectPreviewRef.current.startRecording(videoOnlyPath, pcmPath);
-        recordingViaLiveFxRef.current = true;
-        setIsRecording(true);
-        return;
-      } catch (e: any) {
-        console.warn('Live-effect recording failed, falling back to plain camera:', e?.message);
-        recordingViaLiveFxRef.current = false;
-        // falls through to the existing plain-camera path below
-      }
-    }
-
-    // ---- existing plain-camera path (also the fallback for the try above) ----
     if (isRecording) return;
     // FIX: if a GL shader effect is showing (LiveEffectPreview mounted),
     // swap to the real Camera first and wait for its REAL onInitialized
@@ -5002,45 +4939,7 @@ export default function CreateScreen() {
   };
 
   const handleStopRecording = async () => {
-    if (!isRecording) return;
-
-    // FIX (live-effect recording): if this recording was actually done via
-    // the real live-effect path (see handleStartRecording above), stop it
-    // through LiveEffectPreview instead of the plain Camera - cameraRef
-    // won't even be mounted in this case, since the whole point of this
-    // path is that it never had to swap to the plain camera at all.
-    if (recordingViaLiveFxRef.current) {
-      setIsFinalizingRecording(true);
-      try {
-        const finalOutputPath = `${FileSystem.cacheDirectory}live_final_${Date.now()}.mp4`.replace('file://', '');
-        const resultPath = await liveEffectPreviewRef.current?.stopRecording(finalOutputPath);
-        if (!resultPath) throw new Error('no output path returned');
-        const rawUri = `file://${resultPath}`;
-        let finalUri = rawUri;
-        if (duetMode && duetPartnerUri) {
-          try {
-            finalUri = await mergeDuetVideos(rawUri, duetPartnerUri);
-          } catch { finalUri = rawUri; }
-        }
-        setOriginalMediaUri(finalUri);
-        setMediaUri(finalUri);
-        setMediaType('video');
-        setIsRecording(false);
-        recordingViaLiveFxRef.current = false;
-        setIsFinalizingRecording(false);
-        setVideoPlaying(false);
-        setScreenView('compose');
-      } catch (e: any) {
-        setIsRecording(false);
-        recordingViaLiveFxRef.current = false;
-        setIsFinalizingRecording(false);
-        Alert.alert('Error', 'Could not finish recording: ' + e.message);
-      }
-      return;
-    }
-
-    // ---- existing plain-camera stop path (unchanged) ----
-    if (!cameraRef.current) return;
+    if (!cameraRef.current || !isRecording) return;
     setIsFinalizingRecording(true);
     try {
       await cameraRef.current.stopRecording();
@@ -5450,6 +5349,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             }
           }
 
+          // ✅ NEW: real fire-video texture for MOUTH_FIRE/FIRE_BOOK exports —
+          // reuses whatever ensureFireVideoReady() already resolved (and
+          // cached) when the user first selected the effect in the thumbnail
+          // strip, so this is normally instant here, not a fresh download.
+          // null/undefined is fine — native falls back to procedural flame.
+          if (imgFxEffect.glShaderEffect === 'mouth_fire' || imgFxEffect.glShaderEffect === 'fire_book') {
+            imgBakeOptions.fireVideoPath = await ensureFireVideoReady();
+          }
+
           const imgOutputPath = `${FileSystem.cacheDirectory}baked_${Date.now()}.jpg`.replace('file://', '');
           const imgCleanInput = mediaUri.replace('file://', '');
           let bakedImagePath: string;
@@ -5782,6 +5690,12 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                     console.warn('Fire Book image copy failed, effect will be skipped:', copyErr);
                   }
                 }
+
+                // ✅ NEW: real fire-video texture for MOUTH_FIRE/FIRE_BOOK exports
+                // — same reused-cache reasoning as the image bake branch above.
+                if (fxEffect.glShaderEffect === 'mouth_fire' || fxEffect.glShaderEffect === 'fire_book') {
+                  bakeOptions.fireVideoPath = await ensureFireVideoReady();
+                }
               } else {
                 bakeOptions.brightness = fxEffect.brightness - 1;
                 bakeOptions.contrast = fxEffect.contrast;
@@ -6028,9 +5942,9 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             // recording actually has a camera to record from. See
             // isCapturingLiveFx declaration for the full explanation.
             <LiveEffectPreview
-              ref={liveEffectPreviewRef}
               effect={activeFx?.glShaderEffect ?? null}
               facing={facing}
+              fireVideoPath={fireVideoPath}
               style={StyleSheet.absoluteFill}
             />
           ) : cameraFeature === 'dualcam' ? (
@@ -6222,7 +6136,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                     the filmstrip below, so no new assets are needed. */}
                 {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
                   <View style={ms.shutterFxBadge}>
-                    <FxCover effect={FX_EFFECTS.find(e => e.id === selectedFx)!} style={{ width: '100%', height: '100%' }} />
+                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
                   </View>
                 )}
               </TouchableOpacity>
@@ -6234,7 +6148,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 <View style={[ms.shutterInner, isRecording && ms.shutterInnerRec]} />
                 {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
                   <View style={ms.shutterFxBadge}>
-                    <FxCover effect={FX_EFFECTS.find(e => e.id === selectedFx)!} style={{ width: '100%', height: '100%' }} />
+                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
                   </View>
                 )}
               </TouchableOpacity>
@@ -6278,12 +6192,29 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               <TouchableOpacity
                 key={f.id}
                 style={ms.filterThumbWrap}
-                onPress={() => { setSelectedFx(f.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+                onPress={() => {
+                  setSelectedFx(f.id);
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  // Fire-and-forget — the effect activates immediately (on
+                  // procedural flame only if not cached yet), the real fire
+                  // texture kicks in the instant the download resolves,
+                  // thanks to FrameRenderer's fireVideoPath setter handling
+                  // a late-arriving path with no re-selection needed.
+                  if (isFireEffect(f)) ensureFireVideoReady();
+                }}
               >
                 <View style={[ms.filterThumb, selectedFx === f.id && ms.filterThumbActive, { overflow: 'hidden' }]}>
-                  <FxCover effect={f} style={{ width: '100%', height: '100%' }} />
+                  <Image source={FX_IMAGES[f.id]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
                   {selectedFx === f.id && (
                     <View style={ms.filterThumbCheck}><Feather name="check" size={11} color="#000" /></View>
+                  )}
+                  {/* ✅ NEW: first-time download spinner for Mouth Fire / Fire
+                      Book — only shows while ensureFireVideoCached() is
+                      actually in flight; every later selection is instant. */}
+                  {isFireEffect(f) && fireVideoLoading && !fireVideoPath && (
+                    <View style={ms.fxDownloadingOverlay}>
+                      <ActivityIndicator size="small" color="#fff" />
+                    </View>
                   )}
                 </View>
                 <Text style={[ms.filterThumbTxt, selectedFx === f.id && { color: '#00ff88' }]} numberOfLines={1}>{f.name}</Text>
@@ -6877,9 +6808,19 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   setSelectedFx(fx.id);
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                   if (fx.glShaderEffect === 'hand_portal') pickPortalScene();
+                  if (isFireEffect(fx)) ensureFireVideoReady();
                 }}
               >
-                <FxCover effect={fx} style={ms.fxCardImg} imgStyle={ms.fxCardImg} />
+                {FX_IMAGES[fx.id] ? (
+                  <Image source={FX_IMAGES[fx.id]} style={ms.fxCardImg} resizeMode="cover" />
+                ) : (
+                  <Text style={{ fontSize: 22 }}>{fx.emoji}</Text>
+                )}
+                {isFireEffect(fx) && fireVideoLoading && !fireVideoPath && (
+                  <View style={ms.fxDownloadingOverlay}>
+                    <ActivityIndicator size="small" color="#fff" />
+                  </View>
+                )}
                 <Text style={[ms.fxCardName, selectedFx === fx.id && { color: '#00ff88' }]}>{fx.name}</Text>
                 <Text style={ms.fxCardDesc} numberOfLines={1}>{fx.desc}</Text>
                 {/* Now that LiveEffectPreview handles GL shader effects, selecting one
@@ -7354,6 +7295,9 @@ const ms = StyleSheet.create({
   fxCardDesc: { color: '#555', fontSize: 8, textAlign: 'center', marginTop: 2 },
   fxCheck: { position: 'absolute', top: 4, right: 4, width: 15, height: 15, borderRadius: 8, backgroundColor: '#00ff88', alignItems: 'center', justifyContent: 'center' },
   fxNoPreviewBadge: { marginTop: 3, backgroundColor: 'rgba(0,255,136,0.15)', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1.5, borderWidth: 1, borderColor: 'rgba(0,255,136,0.35)' },
+  // ✅ NEW: first-time download spinner overlay, shared by both FX thumbnail
+  // strips (filterThumb and fxCard) for any effect with a downloadable asset.
+  fxDownloadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
   fxNoPreviewTxt: { color: '#00ff88', fontSize: 7, fontWeight: '700' },
 
   // Music section

@@ -31,6 +31,18 @@ export interface LiveEffectPreviewProps {
   facing?: 'front' | 'back';
   style?: ViewStyle;
   /**
+   * Path to the downloaded/cached fire_loop.mp4 (from ensureFireVideoCached()
+   * in fireVideoCache.ts). Only matters for MOUTH_FIRE/FIRE_BOOK — every
+   * other effect ignores it entirely. Leave undefined/null until the caller
+   * has actually resolved a real cached path; the native side falls back to
+   * procedural flame only when this is null, which is the correct behavior
+   * while a first-time download is still in flight (see create.tsx's
+   * effect-selection handler for the recommended sequencing: resolve this
+   * BEFORE setting `effect` to a fire effect, so the user never sees one
+   * frame rendered without it).
+   */
+  fireVideoPath?: string | null;
+  /**
    * NEW - Two Hand Frame's gesture auto-capture. Fires once when the user
    * holds both hands in the frame shape for ~1.2s (see LiveEffectPreviewView.kt's
    * frameHoldRequiredSec). filePath is a JPEG already written to disk at that

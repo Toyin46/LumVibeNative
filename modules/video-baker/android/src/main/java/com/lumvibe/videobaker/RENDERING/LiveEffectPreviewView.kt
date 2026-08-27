@@ -80,6 +80,14 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // never reaches the renderer at all.
     private var pendingEffect: VisualEffect = VisualEffect.NONE
 
+    // ✅ NEW: same "renderer might not exist yet" race pendingEffect already
+    // handles, for the downloaded/cached fire-video path (MOUTH_FIRE /
+    // FIRE_BOOK). JS sets this via ensureFireVideoCached() the first time
+    // one of those effects is selected; null is a completely valid state
+    // (procedural flame only) — see FireVideoPlayer.kt's own doc for the
+    // graceful fallback.
+    private var pendingFireVideoPath: String? = null
+
     // NEW: Two Hand Frame auto-capture. FIX: originally used expo-modules-
     // kotlin's EventDispatcher property delegate, but checked against Expo's
     // own documentation/examples and every one of them requires the
@@ -126,6 +134,15 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     fun setFacing(facing: String) {
         pendingFacing = if (facing == "front") CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
         renderHandler?.post { reopenCamera() }
+    }
+
+    /** ✅ NEW: path to the downloaded/cached fire_loop.mp4 (or null to fall
+     * back to procedural flame only). Mirrors setEffect's pendingEffect
+     * pattern exactly, for the same reason — the renderer may not exist yet
+     * when this is called from a Prop setter. */
+    fun setFireVideoPath(path: String?) {
+        pendingFireVideoPath = path
+        renderHandler?.post { renderer?.fireVideoPath = path }
     }
 
     // ---- Render thread + EGL ----
@@ -449,6 +466,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // Apply whatever effect was requested before the renderer existed  -  see
         // pendingEffect's doc for why this line is the actual fix, not just belt-and-braces.
         renderer?.setEffect(pendingEffect)
+        // ✅ NEW: same reasoning as the pendingEffect line above — this runs
+        // every time the renderer is (re)created, so a fire-video path set
+        // before the very first surfaceCreated() (or across a facing-switch
+        // reopenCamera()) isn't silently dropped.
+        renderer?.fireVideoPath = pendingFireVideoPath
         cameraTexId = GlUtil.createExternalTexture()
         cameraSurfaceTexture = SurfaceTexture(cameraTexId).apply {
             setDefaultBufferSize(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))

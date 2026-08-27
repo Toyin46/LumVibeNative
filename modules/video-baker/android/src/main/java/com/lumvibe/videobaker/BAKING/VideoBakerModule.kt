@@ -49,7 +49,8 @@ class VideoBakerModule : Module() {
                         saturation = (options["saturation"] as? Number)?.toFloat() ?: 1f,
                         effect = options["effect"] as? String,
                         effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f,
-                        portalScenePngPath = options["portalScenePngPath"] as? String
+                        portalScenePngPath = options["portalScenePngPath"] as? String,
+                        fireVideoPath = options["fireVideoPath"] as? String
                     )
                     transcoder.transcode(videoBakerContext, inputPath, outputPath, opts) { progress ->
                         sendEvent("onProgress", mapOf("progress" to progress))
@@ -86,7 +87,8 @@ class VideoBakerModule : Module() {
                         saturation = (options["saturation"] as? Number)?.toFloat() ?: 1f,
                         effect = options["effect"] as? String,
                         effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f,
-                        portalScenePngPath = options["portalScenePngPath"] as? String
+                        portalScenePngPath = options["portalScenePngPath"] as? String,
+                        fireVideoPath = options["fireVideoPath"] as? String
                     )
                     baker.bake(videoBakerContext, inputPath, outputPath, opts)
                     promise.resolve(outputPath)

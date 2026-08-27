@@ -25,6 +25,35 @@ class FrameRenderer(private val context: Context) {
     // system resource, no reason to hold one open for every other effect.
     private var fireVideoPlayer: FireVideoPlayer? = null
 
+    // ADDED: set by the JS side (via the module bridge - see LiveEffectPreview
+    // Module's existing prop-passing convention) once fire_loop.mp4 has been
+    // downloaded and cached locally (expo-file-system, on first use of either
+    // fire effect), BEFORE MOUTH_FIRE/FIRE_BOOK gets selected. Null means "not
+    // downloaded/cached yet" - FireVideoPlayer falls back to a bundled asset
+    // in that case, which only matters for local dev/testing since the
+    // bundled copy should be removed from assets/ once this flow is wired up
+    // end-to-end.
+    //
+    // ✅ FIX: made this a real property with a custom setter instead of a
+    // plain field. The original comment here said "set this BEFORE calling
+    // setEffect(), or the player will already exist against the fallback
+    // path" — true, but fragile: JS calls cross a bridge, and asynchronous
+    // Prop application order isn't something to build a hard requirement on.
+    // Now, if a fire effect is already active and this changes (e.g. the
+    // download finishes a moment after the user already tapped the filter),
+    // the existing player is torn down and rebuilt against the new path
+    // immediately — no ordering requirement needed.
+    var fireVideoPath: String? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            val needsFireVideo = currentEffect == VisualEffect.MOUTH_FIRE || currentEffect == VisualEffect.FIRE_BOOK
+            if (needsFireVideo) {
+                fireVideoPlayer?.release()
+                fireVideoPlayer = FireVideoPlayer(context, cachedFilePath = value)
+            }
+        }
+
     // ---- Video (external texture) shader  -  plain pass-through with color adjust ----
     private val videoVertexShader = """
         uniform mat4 uTexMatrix;
@@ -246,7 +275,7 @@ class FrameRenderer(private val context: Context) {
         currentEffect = effect
         val needsFireVideo = effect == VisualEffect.MOUTH_FIRE || effect == VisualEffect.FIRE_BOOK
         if (needsFireVideo && fireVideoPlayer == null) {
-            fireVideoPlayer = FireVideoPlayer(context)
+            fireVideoPlayer = FireVideoPlayer(context, cachedFilePath = fireVideoPath)
         } else if (!needsFireVideo && fireVideoPlayer != null) {
             fireVideoPlayer?.release()
             fireVideoPlayer = null
