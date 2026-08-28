@@ -776,6 +776,25 @@ async function cancelAiMatchQueue(queueId: string): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────
+// AI MATCH — cancel a found match (Skip/Try Next)
+// Deactivates the shared session and resets BOTH queue rows back
+// to 'waiting' (they share session_id), so whichever of the two
+// users searches next automatically picks the other one back up
+// instead of leaving them stuck in a dead session.
+// ─────────────────────────────────────────────────────────────
+async function cancelAiMatch(sessionId: string, userId: string): Promise<void> {
+  try {
+    const { error } = await supabase.rpc('cancel_ai_match', {
+      p_session_id: sessionId,
+      p_canceller_id: userId,
+    });
+    if (error) console.error('cancel_ai_match RPC error:', error);
+  } catch (e) {
+    console.error('cancelAiMatch unexpected error:', e);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // AI MATCH — attempt to match a waiting user
 //
 // FIX (race condition): matching used to happen client-side —
@@ -2448,6 +2467,8 @@ export default function CowatchScreen() {
   const [aiMatchQueueId,      setAiMatchQueueId]      = useState<string | null>(null);
   const [aiMatchPartnerName,  setAiMatchPartnerName]  = useState<string>('');
   const [aiMatchPartnerPhoto, setAiMatchPartnerPhoto] = useState<string | null>(null);
+  const [aiMatchSessionId,    setAiMatchSessionId]    = useState<string | null>(null);
+  const [aiMatchElapsedMs,    setAiMatchElapsedMs]    = useState<number>(0);
   const aiMatchPollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const aiMatchMountedRef = useRef(true);
 
@@ -2657,90 +2678,114 @@ export default function CowatchScreen() {
       if (!queueId || !aiMatchMountedRef.current) return;
       setAiMatchQueueId(queueId);
 
-      let attempts = 0;
-      const MAX_ATTEMPTS = 90; // 90 × 2s = 3 minutes
-
-      aiMatchPollRef.current = setInterval(async () => {
-        if (!aiMatchMountedRef.current) {
-          clearInterval(aiMatchPollRef.current!);
-          return;
-        }
-
-        attempts++;
-
-        // Every other attempt, actively try to match (safe — RLS allows own writes)
-        if (attempts % 2 === 0) {
-          const result = await attemptAiMatch(queueId, user.id, vibes);
-          if (result.matched && result.sessionId && aiMatchMountedRef.current) {
-            clearInterval(aiMatchPollRef.current!);
-            setAiMatchStatus('matched');
-            setAiMatchPartnerName(result.partnerName || 'Vibe Match');
-            setAiMatchPartnerPhoto(result.partnerPhoto);
-            setTimeout(async () => {
-              if (!aiMatchMountedRef.current) return;
-              const activeSession = await getActiveCowatchSession(result.sessionId!);
-              if (!activeSession) { setIsLoading(false); return; }
-              setSession(activeSession);
-              setHostId(activeSession.host_id ?? null);
-              setFeedType('video'); feedTypeRef.current = 'video';
-              setIsLoading(false);
-              // FIX: real, unique session id now exists — safe to open a
-              // private LiveKit room scoped to just these two users.
-              setLiveConversationId(result.sessionId!);
-              syncChannelRef.current = subscribeCowatchSession(activeSession.id, handleRemoteSync);
-              addSystemMessage(`🎯 AI matched you with ${result.partnerName}! Watch party started 🎬`);
-            }, 1500);
-            return;
-          }
-        }
-
-        // Also check if partner matched us first
-        const row = await pollAiMatchQueue(queueId);
-        if (!row || !aiMatchMountedRef.current) return;
-
-        if (row.status === 'matched' && row.session_id && row.matched_with) {
-          clearInterval(aiMatchPollRef.current!);
-          setAiMatchStatus('matched');
-
-          const { data: partnerProfile } = await supabase
-            .from('users')
-            .select('display_name, username, avatar_url')
-            .eq('id', row.matched_with)
-            .single();
-
-          const pName = partnerProfile?.display_name || partnerProfile?.username || 'Vibe Match';
-          const pPhoto = partnerProfile?.avatar_url || null;
-          setAiMatchPartnerName(pName);
-          setAiMatchPartnerPhoto(pPhoto);
-
-          setTimeout(async () => {
-            if (!aiMatchMountedRef.current) return;
-            const activeSession = await getActiveCowatchSession(row.session_id!);
-            if (!activeSession) { setIsLoading(false); return; }
-            setSession(activeSession);
-            setHostId(activeSession.host_id ?? null);
-            setFeedType('video'); feedTypeRef.current = 'video';
-            setIsLoading(false);
-            // FIX: same as above — only open the private room once we
-            // have the real session id, not before.
-            setLiveConversationId(row.session_id!);
-            syncChannelRef.current = subscribeCowatchSession(activeSession.id, handleRemoteSync);
-            addSystemMessage(`🎯 AI matched you with ${pName}! Watch party started 🎬`);
-          }, 1500);
-          return;
-        }
-
-        if (row.status === 'expired' || attempts >= MAX_ATTEMPTS) {
-          clearInterval(aiMatchPollRef.current!);
-          setAiMatchStatus('expired');
-          setIsLoading(false);
-        }
-      }, 2000);
+      startAiMatchPolling(queueId, user.id, vibes);
     } catch (e) {
       console.error('setupAiMatchSession error:', e);
       setAiMatchStatus('expired');
       setIsLoading(false);
     }
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // AI MATCH — polling loop, pulled out into its own function so
+  // Skip/Try Next can restart it against the SAME queue row without
+  // re-running getUserTopVibes/joinAiMatchQueue.
+  //
+  // FIX: was 2000ms and only tried to match on every OTHER tick
+  // (effectively 4s between real attempts). Now tries every tick
+  // at 1200ms, so a live match lands almost immediately instead
+  // of being caught up to 4s late.
+  //
+  // FIX: no longer auto-joins the session after a match is found.
+  // It just surfaces the match (aiMatchSessionId + partner info) and
+  // stops — the user explicitly taps Join or Skip on the 'matched'
+  // screen. See handleJoinAiMatch / handleSkipAiMatch below.
+  // ─────────────────────────────────────────────────────────────
+  const startAiMatchPolling = (queueId: string, userId: string, vibes: string[]) => {
+    let attempts = 0;
+    const POLL_INTERVAL_MS = 1200;
+    const MAX_ATTEMPTS = 150; // 150 × 1.2s ≈ 3 min ceiling (unchanged safety net)
+
+    aiMatchPollRef.current = setInterval(async () => {
+      if (!aiMatchMountedRef.current) {
+        clearInterval(aiMatchPollRef.current!);
+        return;
+      }
+
+      attempts++;
+      setAiMatchElapsedMs(attempts * POLL_INTERVAL_MS);
+
+      const result = await attemptAiMatch(queueId, userId, vibes);
+      if (result.matched && result.sessionId && aiMatchMountedRef.current) {
+        clearInterval(aiMatchPollRef.current!);
+        setAiMatchSessionId(result.sessionId);
+        setAiMatchStatus('matched');
+        setAiMatchPartnerName(result.partnerName || 'Vibe Match');
+        setAiMatchPartnerPhoto(result.partnerPhoto);
+        return;
+      }
+
+      // Also check if partner matched us first
+      const row = await pollAiMatchQueue(queueId);
+      if (!row || !aiMatchMountedRef.current) return;
+
+      if (row.status === 'matched' && row.session_id && row.matched_with) {
+        clearInterval(aiMatchPollRef.current!);
+
+        const { data: partnerProfile } = await supabase
+          .from('users')
+          .select('display_name, username, avatar_url')
+          .eq('id', row.matched_with)
+          .single();
+
+        const pName = partnerProfile?.display_name || partnerProfile?.username || 'Vibe Match';
+        const pPhoto = partnerProfile?.avatar_url || null;
+        setAiMatchSessionId(row.session_id);
+        setAiMatchStatus('matched');
+        setAiMatchPartnerName(pName);
+        setAiMatchPartnerPhoto(pPhoto);
+        return;
+      }
+
+      if (row.status === 'expired' || attempts >= MAX_ATTEMPTS) {
+        clearInterval(aiMatchPollRef.current!);
+        setAiMatchStatus('expired');
+        setIsLoading(false);
+      }
+    }, POLL_INTERVAL_MS);
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // AI MATCH — user taps "Join Watch Party" on the found-match screen
+  // ─────────────────────────────────────────────────────────────
+  const handleJoinAiMatch = async () => {
+    if (!aiMatchSessionId || !aiMatchMountedRef.current) return;
+    const activeSession = await getActiveCowatchSession(aiMatchSessionId);
+    if (!activeSession) { setIsLoading(false); return; }
+    setSession(activeSession);
+    setHostId(activeSession.host_id ?? null);
+    setFeedType('video'); feedTypeRef.current = 'video';
+    setIsLoading(false);
+    setLiveConversationId(aiMatchSessionId);
+    syncChannelRef.current = subscribeCowatchSession(activeSession.id, handleRemoteSync);
+    addSystemMessage(`🎯 AI matched you with ${aiMatchPartnerName}! Watch party started 🎬`);
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // AI MATCH — user taps "Skip → Try Another" on the found-match screen.
+  // Cancels the shared session (so the ex-partner isn't left stranded
+  // in a dead session), resets both queue rows back to 'waiting', then
+  // resumes searching on the SAME queue row.
+  // ─────────────────────────────────────────────────────────────
+  const handleSkipAiMatch = async () => {
+    if (!aiMatchSessionId || !user?.id || !aiMatchQueueId) return;
+    await cancelAiMatch(aiMatchSessionId, user.id);
+    if (!aiMatchMountedRef.current) return;
+    setAiMatchSessionId(null);
+    setAiMatchPartnerName('');
+    setAiMatchPartnerPhoto(null);
+    setAiMatchStatus('searching');
+    startAiMatchPolling(aiMatchQueueId, user.id, aiMatchVibes);
   };
 
   const setupSession = async () => {
@@ -3006,7 +3051,13 @@ export default function CowatchScreen() {
             ? aiMatchVibes.map(v => v.charAt(0).toUpperCase() + v.slice(1)).join(' + ')
             : 'great content'}
         </Text>
-        <Text style={{ color: C.muted, fontSize: 11, marginTop: 8 }}>This takes up to 3 minutes</Text>
+        <Text style={{ color: C.muted, fontSize: 11, marginTop: 8 }}>
+          {aiMatchElapsedMs < 15000
+            ? 'Usually just a few seconds'
+            : aiMatchElapsedMs < 45000
+            ? 'Still looking — hang tight'
+            : 'No one matching your vibe is online yet — you can keep waiting or check back later'}
+        </Text>
         <TouchableOpacity
           style={{ marginTop: 28, borderWidth: 1.5, borderColor: C.border, borderRadius: 20, paddingVertical: 10, paddingHorizontal: 28 }}
           onPress={async () => {
@@ -3037,8 +3088,21 @@ export default function CowatchScreen() {
           </View>
         )}
         <Text style={[styles.loadingTitle, { color: C.green }]}>Vibe Match Found! 🎉</Text>
-        <Text style={styles.loadingSubtitle}>Starting watch party with {aiMatchPartnerName}…</Text>
-        <ActivityIndicator color={C.green} size="small" style={{ marginTop: 16 }} />
+        <Text style={styles.loadingSubtitle}>{aiMatchPartnerName}</Text>
+        <View style={{ flexDirection: 'row', gap: 12, marginTop: 24 }}>
+          <TouchableOpacity
+            onPress={handleSkipAiMatch}
+            style={{ borderWidth: 1.5, borderColor: C.border, borderRadius: 20, paddingVertical: 12, paddingHorizontal: 22 }}
+          >
+            <Text style={{ color: C.muted, fontWeight: '700' }}>Skip → Try Another</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleJoinAiMatch}
+            style={{ backgroundColor: C.green, borderRadius: 20, paddingVertical: 12, paddingHorizontal: 22 }}
+          >
+            <Text style={{ color: '#000', fontWeight: '700' }}>Join Watch Party</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }

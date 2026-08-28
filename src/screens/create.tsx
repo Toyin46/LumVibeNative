@@ -20,6 +20,7 @@ import {
   View, Text, Image, TouchableOpacity, TextInput, Alert, StyleSheet,
   ScrollView, ActivityIndicator, Dimensions, Animated, Modal, Linking,
   Platform, Switch, AppState, AppStateStatus, PanResponder, FlatList,
+  PermissionsAndroid,
 } from 'react-native';
 import { Feather, MaterialCommunityIcons, Ionicons } from '@expo/vector-icons';
 import {
@@ -48,6 +49,7 @@ import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
 import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
+import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
@@ -595,9 +597,9 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_aura_glow',       name:'Aura Glow (GL)', emoji:'🌟',category:'creative', desc:'Glowing outline, reacts to audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'aura_glow'},
   {id:'fx_gl_color_drain',     name:'Color Drain',    emoji:'🩶',category:'mood',     desc:'Desaturates the longer you hold still — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'color_drain'},
   {id:'fx_gl_silence_ripple',  name:'Silence Ripple',  emoji:'🔵',category:'mood',    desc:'Ripples out when audio goes quiet — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'silence_ripple'},
-  {id:'fx_gl_voice_halo',      name:'Voice Halo',     emoji:'⭕',category:'creative', desc:'Glow ring around your face, reacts to voice — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'voice_halo'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_voice_halo',      name:'Voice Halo',     emoji:'⭕',category:'creative', desc:'Glow ring around your face, reacts to voice — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'voice_halo'},
   {id:'fx_gl_thermal_pulse',   name:'Thermal Pulse',  emoji:'🌡️',category:'creative', desc:'Heat-map skin tone, pulses with audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'thermal_pulse'},
-  {id:'fx_gl_depth_bloom',     name:'Depth Bloom',    emoji:'🌫️',category:'mood',    desc:'Background blooms with audio, you stay sharp — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'depth_bloom'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_depth_bloom',     name:'Depth Bloom',    emoji:'🌫️',category:'mood',    desc:'Background blooms with audio, you stay sharp — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'depth_bloom'},
   {id:'fx_gl_split_prism',     name:'Split Prism',    emoji:'🔺',category:'creative', desc:'Background splits into RGB layers on motion — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'split_prism'},
   // ⚠️ Requires a portal scene image picked at bake time — see pickPortalScene()
   // and the bakeOptions.portalScenePngPath wiring below. If none is picked, the
@@ -605,38 +607,38 @@ const FX_EFFECTS: FxEffect[] = [
   // video (see the try/catch around bakeVideo further down) — it won't crash
   // the app, but the user also won't get the effect they picked, so nudging
   // them to pick a scene image up front (done in the onPress below) matters.
-  {id:'fx_gl_hand_portal',     name:'Hand Portal',    emoji:'🌀',category:'creative', desc:'Circle your hand — opens a portal — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'hand_portal'},
-  {id:'fx_gl_fist_bump_boom',  name:'Fist Bump Boom', emoji:'👊',category:'creative', desc:'Closed fist triggers a screen-shake burst — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fist_bump_boom'},
-  {id:'fx_gl_two_hand_frame',  name:'Two-Hand Frame', emoji:'🖼️',category:'creative', desc:'Frame gesture with both hands — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'two_hand_frame'},
-  {id:'fx_gl_gaze_trail',      name:'Gaze Trail',     emoji:'👀',category:'creative', desc:'Particles trail where you look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gaze_trail'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_hand_portal',     name:'Hand Portal',    emoji:'🌀',category:'creative', desc:'Circle your hand — opens a portal — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'hand_portal'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_fist_bump_boom',  name:'Fist Bump Boom', emoji:'👊',category:'creative', desc:'Closed fist triggers a screen-shake burst — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fist_bump_boom'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_two_hand_frame',  name:'Two-Hand Frame', emoji:'🖼️',category:'creative', desc:'Frame gesture with both hands — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'two_hand_frame'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_gaze_trail',      name:'Gaze Trail',     emoji:'👀',category:'creative', desc:'Particles trail where you look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gaze_trail'},
   {id:'fx_gl_double_take',     name:'Double Take',    emoji:'👥',category:'creative', desc:'Fast head turn leaves a ghost streak — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'double_take'},
   {id:'fx_gl_blink_freeze',    name:'Blink Freeze',   emoji:'📸',category:'creative', desc:'Blink freezes the frame + zoom punch — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'blink_freeze'},
   {id:'fx_gl_gold_skin',       name:'Gold Skin',      emoji:'👑',category:'creative', desc:'Metallic gold body — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gold_skin'},
   {id:'fx_gl_mouth_fire',      name:'Mouth Fire',     emoji:'🔥',category:'creative', desc:'Flame when mouth opens — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_fire'},
   {id:'fx_gl_snow_fall',       name:'Snow Fall',      emoji:'❄️',category:'mood',     desc:'Ambient falling snow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'snow_fall'},
-  {id:'fx_gl_throw_confetti',  name:'Throw Confetti', emoji:'🎉',category:'creative', desc:'Throw motion bursts real confetti — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'throw_confetti'},
-  {id:'fx_gl_raise_eyebrow',   name:'Raise Eyebrow',  emoji:'🤨',category:'creative', desc:'Glow lifts with your brow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'raise_eyebrow'},
-  {id:'fx_gl_glitch_wave',     name:'Glitch Wave',    emoji:'📡',category:'retro',    desc:'Signal glitch bursts — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'glitch_wave'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_throw_confetti',  name:'Throw Confetti', emoji:'🎉',category:'creative', desc:'Throw motion bursts real confetti — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'throw_confetti'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_raise_eyebrow',   name:'Raise Eyebrow',  emoji:'🤨',category:'creative', desc:'Glow lifts with your brow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'raise_eyebrow'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_glitch_wave',     name:'Glitch Wave',    emoji:'📡',category:'retro',    desc:'Signal glitch bursts — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'glitch_wave'},
   {id:'fx_gl_retro_vhs',       name:'Retro VHS',      emoji:'📼',category:'retro',    desc:'Worn tape look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'retro_vhs'},
   {id:'fx_gl_light_leak',      name:'Light Leak',     emoji:'🌅',category:'mood',     desc:'Warm light streaks — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'light_leak'},
   {id:'fx_gl_mouth_words',     name:'Mouth Words',    emoji:'💬',category:'creative', desc:'WOW/OMG/HAHA reacts to your expression — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_words'},
   {id:'fx_gl_palm_magic',      name:'Palm Magic',     emoji:'✨',category:'creative', desc:'Open palm sparkles with magic — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'palm_magic'},
   {id:'fx_gl_rock_paper_scissors', name:'Rock Paper Scissors', emoji:'✂️',category:'creative', desc:'Labels your hand shape live — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rock_paper_scissors'},
-  {id:'fx_gl_clap_burst',      name:'Clap Burst',     emoji:'👏',category:'creative', desc:'Clap triggers a burst + glow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'clap_burst'},
-  {id:'fx_gl_tap_shockwave',   name:'Tap Shockwave',  emoji:'💥',category:'creative', desc:'Finger tap sends a shockwave ring — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'tap_shockwave'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_clap_burst',      name:'Clap Burst',     emoji:'👏',category:'creative', desc:'Clap triggers a burst + glow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'clap_burst'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_tap_shockwave',   name:'Tap Shockwave',  emoji:'💥',category:'creative', desc:'Finger tap sends a shockwave ring — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'tap_shockwave'},
   {id:'fx_gl_spin_effect',     name:'Spin Effect',    emoji:'🌀',category:'creative', desc:'Head turn spins a light ring — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'spin_effect'},
-  {id:'fx_gl_face_morph',      name:'Face Morph',     emoji:'🕸️',category:'creative', desc:'Half-face wireframe mesh — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'face_morph'},
-  {id:'fx_gl_fire_book',       name:'Fire Book',      emoji:'📖',category:'creative', desc:'Hand-tracked flaming book — needs a book image, baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fire_book'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_face_morph',      name:'Face Morph',     emoji:'🕸️',category:'creative', desc:'Half-face wireframe mesh — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'face_morph'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_fire_book',       name:'Fire Book',      emoji:'📖',category:'creative', desc:'Hand-tracked flaming book — needs a book image, baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'fire_book'},
   {id:'fx_gl_stickers_react',  name:'Stickers React',  emoji:'💕',category:'creative', desc:'Smile sends floating hearts — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'stickers_react'},
   // Added back with real shaders this time (see EffectShaders.kt's Phase 9
   // comment) — previously these had cover images but no matching Kotlin
   // shader case, so selecting them did nothing. 'particle_flow' below is
   // also the corrected spelling — it shipped as the typo'd 'paticle_flow'
   // before, which is part of why it silently did nothing.
-  {id:'fx_gl_bokeh_lights',    name:'Bokeh Lights',   emoji:'✨',category:'mood',     desc:'Soft glowing light orbs — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'bokeh_lights'},
-  {id:'fx_gl_particle_flow',   name:'Particle Flow',  emoji:'💫',category:'mood',     desc:'Ambient flowing particles — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'particle_flow'},
-  {id:'fx_gl_rain_fall',       name:'Rain Fall',      emoji:'🌧️',category:'mood',     desc:'Ambient falling rain — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rain_fall'},
-  {id:'fx_gl_paint_splash',    name:'Paint Splash',   emoji:'🎨',category:'creative', desc:'Color splashes on movement — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paint_splash'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_bokeh_lights',    name:'Bokeh Lights',   emoji:'✨',category:'mood',     desc:'Soft glowing light orbs — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'bokeh_lights'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_particle_flow',   name:'Particle Flow',  emoji:'💫',category:'mood',     desc:'Ambient flowing particles — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'particle_flow'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_rain_fall',       name:'Rain Fall',      emoji:'🌧️',category:'mood',     desc:'Ambient falling rain — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rain_fall'},
+  // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_paint_splash',    name:'Paint Splash',   emoji:'🎨',category:'creative', desc:'Color splashes on movement — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paint_splash'},
   {id:'fx_gl_finger_draw',     name:'Finger Draw',    emoji:'✍️',category:'creative', desc:'Glowing trail from your fingertip — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'finger_draw'},
 ];
 
@@ -2758,9 +2760,10 @@ function DeepARCameraView({
   selectedArEffect?: string;
   filterTint?: string | null;
   fxTint?: string | null;
-  // FIX: real "the native camera session is actually ready" signal, instead
-  // of a blind timeout - see handleStartRecording's isCapturingLiveFx branch
-  // for why this matters (the landscape-after-recording bug).
+  // Real "the native camera session is actually ready" signal for the
+  // non-GL-effect (DeepARCameraView) recording path — the GL-effect path
+  // no longer needs this at all, since it now records through
+  // LiveEffectPreview's own recorder instead of swapping to this camera.
   onCameraReady?: () => void;
 }) {
   // ✅ Skia AR fallback state — if Skia crashes on Android, fall back to plain Camera
@@ -4582,17 +4585,23 @@ export default function CreateScreen() {
   const [showBurstPanel, setShowBurstPanel] = useState(false);
   const [showBeatTap, setShowBeatTap]   = useState(false);
   const cameraRef = useRef<Camera>(null);
-  // FIX: LiveEffectPreview (used for every GL shader effect - Fist Bump Boom,
-  // Clap Burst, Fire Book, Gold Skin, Mood Ring, Thermal Pulse etc.) is a
-  // preview-only native view with no recording capability of its own. While
-  // it's mounted, the real <Camera> (cameraRef) isn't mounted at all, so
-  // cameraRef.current is null and the record button silently does nothing.
-  // This flag briefly swaps the real Camera back in - just long enough to
-  // record - the moment the user presses record with a GL effect selected.
-  // The bake step at compose time (bakeOptions.effect) already applies the
-  // shader effect onto the raw footage afterwards, same as it already does
-  // for effects picked from the gallery, so this is the only piece missing.
-  const [isCapturingLiveFx, setIsCapturingLiveFx] = useState(false);
+  // ✅ REAL FIX (this was the "switches to normal camera when you press
+  // record" bug): LiveEffectPreviewModule.kt already exposes
+  // startLiveRecording/stopLiveRecording/captureLivePhoto (see
+  // LiveEffectPreview.tsx's forwardRef handle) — genuine native recording
+  // of the GL-composited output itself, not just a preview. The old
+  // isCapturingLiveFx approach swapped LiveEffectPreview OUT for the real
+  // <Camera> the instant record was pressed, which is exactly what looked
+  // like "switching to normal camera" — it genuinely was switching. Now
+  // recording happens through this ref instead, so LiveEffectPreview never
+  // unmounts and the camera view never changes.
+  const liveEffectPreviewRef = useRef<LiveEffectPreviewHandle>(null);
+  // Set at the moment recording/capture actually starts via the live-fx
+  // path, read again at stop/finish time and by the export step below —
+  // this is what lets the bake-at-export step skip re-applying the shader
+  // to footage that already has it composited in from live capture.
+  const recordingViaLiveFxRef = useRef(false);
+  const [capturedWithLiveFx, setCapturedWithLiveFx] = useState(false);
   // FIX: the native camera session starts tearing down the instant
   // stopRecording() is called, but screenView doesn't switch to 'compose'
   // until onRecordingFinished actually fires (which isn't instant - the file
@@ -4858,6 +4867,24 @@ export default function CreateScreen() {
 
   // ─── Camera actions (VisionCamera) ───────────────────
   const handleTakePhoto = async () => {
+    // ✅ FIX: this always called cameraRef.current.takePhoto() — but the
+    // regular Camera isn't even mounted while a GL effect is active
+    // (LiveEffectPreview replaces it), so this silently no-op'd on its own
+    // null-check whenever an effect was selected. Branches to the real
+    // capture path for whichever view is actually on screen.
+    if (hasLiveGLEffect) {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        const outputPath = `${FileSystem.cacheDirectory}fx_photo_${Date.now()}.jpg`.replace('file://', '');
+        await liveEffectPreviewRef.current?.capturePhoto(outputPath);
+        setCapturedWithLiveFx(true);
+        setOriginalMediaUri(`file://${outputPath}`);
+        setMediaUri(`file://${outputPath}`);
+        setMediaType('image');
+        setScreenView('compose');
+      } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + e.message); }
+      return;
+    }
     if (!cameraRef.current) return;
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -4866,6 +4893,7 @@ export default function CreateScreen() {
         enableShutterSound: false,
       });
       const uri = Platform.OS === 'android' ? `file://${photo.path}` : photo.path;
+      setCapturedWithLiveFx(false);
       setOriginalMediaUri(uri);
       setMediaUri(uri);
       setMediaType('image');
@@ -4875,27 +4903,50 @@ export default function CreateScreen() {
 
   const handleStartRecording = async () => {
     if (isRecording) return;
-    // FIX: if a GL shader effect is showing (LiveEffectPreview mounted),
-    // swap to the real Camera first and wait for its REAL onInitialized
-    // signal - not just a fixed delay - before recording. A blind 350ms
-    // wasn't always long enough for the camera session to finish negotiating
-    // its format on slower devices, which is what caused the
-    // landscape-after-recording bug: recording started before the session
-    // had settled into its correct portrait format. 2s is just a safety
-    // ceiling so this can't hang forever if onInitialized never fires.
-    if (hasLiveGLEffect && !isCapturingLiveFx) {
-      cameraReadyRef.current = false;
-      setIsCapturingLiveFx(true);
-      const maxWaitMs = 2000;
-      const pollIntervalMs = 50;
-      let waited = 0;
-      while (!cameraReadyRef.current && waited < maxWaitMs) {
-        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-        waited += pollIntervalMs;
+
+    // ✅ REAL FIX: record the GL-composited output directly via
+    // LiveEffectPreview's own recorder instead of swapping to the real
+    // Camera. The view never unmounts, so there's no camera-view change and
+    // no aspect-ratio jump during recording — the actual bug reported.
+    if (hasLiveGLEffect) {
+      try {
+        // ✅ FIX (real cause of "records without audio" on this path): the
+        // normal <Camera> path gets audio because VisionCamera handles/has
+        // already triggered the RECORD_AUDIO runtime permission prompt
+        // internally at some point. This GL-effect path calls straight into
+        // LiveRecorder.kt's native AudioRecord tap, which has ITS OWN
+        // permission check (see LiveRecorder.kt's startAudio()) — if that
+        // check finds the permission not yet granted, it deliberately skips
+        // audio entirely rather than crash, which is exactly why the
+        // recording came out silent instead of erroring. Requesting it
+        // explicitly here closes that gap without touching the working
+        // Camera path at all.
+        if (Platform.OS === 'android') {
+          const micStatus = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+            { title: 'Microphone Permission', message: 'Needed to record audio with this effect.', buttonPositive: 'OK' }
+          );
+          if (micStatus !== PermissionsAndroid.RESULTS.GRANTED) {
+            Alert.alert('No microphone access', 'Recording will continue without sound. You can enable microphone access in Settings.');
+          }
+        }
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        const stamp = Date.now();
+        const videoOnlyPath = `${FileSystem.cacheDirectory}fx_video_only_${stamp}.mp4`.replace('file://', '');
+        const pcmPath = `${FileSystem.cacheDirectory}fx_audio_${stamp}.pcm`.replace('file://', '');
+        recordingViaLiveFxRef.current = true;
+        await liveEffectPreviewRef.current?.startRecording(videoOnlyPath, pcmPath);
+        setIsRecording(true);
+      } catch (e: any) {
+        recordingViaLiveFxRef.current = false;
+        setIsRecording(false);
+        Alert.alert('Error', 'Could not start recording: ' + e.message);
       }
+      return;
     }
+
+    recordingViaLiveFxRef.current = false;
     if (!cameraRef.current) {
-      setIsCapturingLiveFx(false);
       Alert.alert('Error', 'Camera is not ready yet - try again in a moment.');
       return;
     }
@@ -4913,18 +4964,17 @@ export default function CreateScreen() {
               finalUri = await mergeDuetVideos(rawUri, duetPartnerUri);
             } catch { finalUri = rawUri; }
           }
+          setCapturedWithLiveFx(false);
           setOriginalMediaUri(finalUri);
           setMediaUri(finalUri);
           setMediaType('video');
           setIsRecording(false);
-          setIsCapturingLiveFx(false);
           setIsFinalizingRecording(false);
           setVideoPlaying(false);
           setScreenView('compose');
         },
         onRecordingError: (error: any) => {
           setIsRecording(false);
-          setIsCapturingLiveFx(false);
           setIsFinalizingRecording(false);
           if (!error.message?.includes('stopped')) {
             Alert.alert('Error', 'Could not record video: ' + error.message);
@@ -4933,13 +4983,44 @@ export default function CreateScreen() {
       });
     } catch (e: any) {
       setIsRecording(false);
-      setIsCapturingLiveFx(false);
       Alert.alert('Error', 'Could not start recording: ' + e.message);
     }
   };
 
   const handleStopRecording = async () => {
-    if (!cameraRef.current || !isRecording) return;
+    if (!isRecording) return;
+
+    // ✅ REAL FIX: matches handleStartRecording's live-fx branch — finalize
+    // through LiveEffectPreview's own recorder, no camera swap involved.
+    if (recordingViaLiveFxRef.current) {
+      setIsFinalizingRecording(true);
+      try {
+        const finalOutputPath = `${FileSystem.cacheDirectory}fx_final_${Date.now()}.mp4`.replace('file://', '');
+        const resultPath = await liveEffectPreviewRef.current?.stopRecording(finalOutputPath);
+        const finalUri = `file://${resultPath || finalOutputPath}`;
+        let mergedUri = finalUri;
+        if (duetMode && duetPartnerUri) {
+          try {
+            mergedUri = await mergeDuetVideos(finalUri, duetPartnerUri);
+          } catch { mergedUri = finalUri; }
+        }
+        setCapturedWithLiveFx(true);
+        setOriginalMediaUri(mergedUri);
+        setMediaUri(mergedUri);
+        setMediaType('video');
+        setIsRecording(false);
+        setIsFinalizingRecording(false);
+        setVideoPlaying(false);
+        setScreenView('compose');
+      } catch (e: any) {
+        setIsRecording(false);
+        setIsFinalizingRecording(false);
+        Alert.alert('Error', 'Could not finish recording: ' + e.message);
+      }
+      return;
+    }
+
+    if (!cameraRef.current) return;
     setIsFinalizingRecording(true);
     try {
       await cameraRef.current.stopRecording();
@@ -5286,7 +5367,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         // additive, not a replacement of what already works.
         const imgFxEffect = FX_EFFECTS.find(f => f.id === selectedFx);
 
-        if (imgFxEffect?.glShaderEffect) {
+        // ✅ FIX: skip re-applying the shader here when the photo was already
+        // captured with it composited in live (via capturePhoto() above) —
+        // otherwise this would run the face/hand-tracked bake a second time
+        // on footage that doesn't need it.
+        if (imgFxEffect?.glShaderEffect && !capturedWithLiveFx) {
           setUploadStage('Tracking face/hand for effect...');
           setUploadProgress(8);
 
@@ -5597,7 +5682,10 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         }
         const filterDefForBake = FILTERS.find(f => f.id === selectedFilter) || null;
         const fxEffect = FX_EFFECTS.find(f => f.id === selectedFx);
-        const needsBake = addWatermark || (!!fxEffect && selectedFx !== 'fx_none');
+        // ✅ FIX: skip the effect bake entirely when the video was already
+        // captured with it composited in live — only watermark (handled
+        // separately above) would still be needed in that case.
+        const needsBake = addWatermark || (!!fxEffect && selectedFx !== 'fx_none' && !capturedWithLiveFx);
 
         let uriToUpload = mediaUri;
 
@@ -5646,7 +5734,9 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             }
 
             if (fxEffect && selectedFx !== 'fx_none') {
-              if (fxEffect.glShaderEffect) {
+              // ✅ FIX: skip re-applying the shader when the video was
+              // already captured with it composited in live.
+              if (fxEffect.glShaderEffect && !capturedWithLiveFx) {
                 bakeOptions.effect = fxEffect.glShaderEffect;
                 bakeOptions.effectIntensity = 1;
 
@@ -5928,7 +6018,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
       <View style={ms.camScreen}>
         {/* Camera area */}
         <View style={[ms.camBox, { height: cH }]}>
-          {hasLiveGLEffect && !isCapturingLiveFx ? (
+          {hasLiveGLEffect ? (
             // A GL shader effect is selected (Mood Ring, Gaze Trail, etc.) —
             // switch from the normal camera views to the live GL renderer so
             // the effect is actually visible now, not just after posting.
@@ -5937,11 +6027,12 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             // you'll get a "camera in use" conflict. This ternary already
             // guarantees only one is mounted at once; if you later add a
             // background-camera-warm-up feature, revisit this.
-            // FIX: while isCapturingLiveFx is true (record was just pressed),
-            // we fall through to the real <Camera> branch below instead, so
-            // recording actually has a camera to record from. See
-            // isCapturingLiveFx declaration for the full explanation.
+            // ✅ FIX: this used to fall through to the real <Camera> the
+            // instant record was pressed (isCapturingLiveFx) — LiveEffectPreview
+            // now records itself via liveEffectPreviewRef, so it stays mounted
+            // the whole time and the view never changes.
             <LiveEffectPreview
+              ref={liveEffectPreviewRef}
               effect={activeFx?.glShaderEffect ?? null}
               facing={facing}
               fireVideoPath={fireVideoPath}

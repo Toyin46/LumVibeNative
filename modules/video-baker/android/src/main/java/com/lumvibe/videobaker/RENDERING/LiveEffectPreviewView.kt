@@ -428,6 +428,18 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         setupW = surfaceW
         setupH = surfaceH
 
+        // ✅ FIX: cameraManager used to only get initialized inside openCamera()
+        // (called further down) - moved earlier so chooseCameraOutputSize()
+        // below can use it. Reassigning it again inside openCamera() later is
+        // harmless (same system service instance).
+        cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val camIdForSizing = findCameraId(pendingFacing)
+        val camSize = if (camIdForSizing != null) {
+            chooseCameraOutputSize(camIdForSizing, surfaceW, surfaceH)
+        } else {
+            Size(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))
+        }
+
         eglCore = EglCore()
         eglSurface = eglCore!!.createWindowSurface(surface)
         eglCore!!.makeCurrent(eglSurface!!)
@@ -458,11 +470,16 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // instead of one real pixel away. That's the actual cause of the
         // grid/moire pattern: wildly out-of-range coordinates on an external
         // OES camera texture is undefined-behavior territory on real GPU
-        // drivers, and this is what it looks like on your device. Using
-        // surfaceW/surfaceH here matches exactly what setDefaultBufferSize
-        // configures the camera capture buffer to below, so this is the
-        // correct real size, not an approximation.
-        renderer?.setFrameSize(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))
+        // drivers, and this is what it looks like on your device. (Originally
+        // this used surfaceW/surfaceH directly since that's what was also fed
+        // into setDefaultBufferSize below — see the newer note just under
+        // this for why both now use the camera's actual output size instead.)
+        // ROOT CAUSE FIX (aspect ratio, see chooseCameraOutputSize's doc): this
+        // now uses the camera's own real, supported output size instead of
+        // the raw on-screen view size — that mismatch was the actual cause
+        // of the stretched/elongated preview, not a coincidence of this
+        // being the size used elsewhere in this comment block below.
+        renderer?.setFrameSize(camSize.width, camSize.height)
         // Apply whatever effect was requested before the renderer existed  -  see
         // pendingEffect's doc for why this line is the actual fix, not just belt-and-braces.
         renderer?.setEffect(pendingEffect)
@@ -473,7 +490,9 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         renderer?.fireVideoPath = pendingFireVideoPath
         cameraTexId = GlUtil.createExternalTexture()
         cameraSurfaceTexture = SurfaceTexture(cameraTexId).apply {
-            setDefaultBufferSize(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))
+            // Same fix as setFrameSize above — the camera's own real size,
+            // not the view's screen size.
+            setDefaultBufferSize(camSize.width, camSize.height)
             setOnFrameAvailableListener({ drawFrame() }, renderHandler)
         }
         cameraSurface = Surface(cameraSurfaceTexture)
@@ -612,6 +631,56 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val mgr = cameraManager ?: return null
         return mgr.cameraIdList.firstOrNull {
             mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == facing
+        }
+    }
+
+    // ✅ FIX (real root cause of the "stretched/elongated preview" bug): this
+    // view was calling cameraSurfaceTexture.setDefaultBufferSize(surfaceW,
+    // surfaceH) using the ON-SCREEN VIEW's raw pixel dimensions (e.g. a tall
+    // phone's full ~9:19.5 screen) as the camera's OWN capture buffer size.
+    // A camera sensor can only natively output specific fixed aspect ratios
+    // (commonly 4:3 or 16:9) - it can't optically capture in a screen's
+    // arbitrary aspect ratio. Requesting a buffer shaped like the screen
+    // forces the HAL to non-uniformly stretch its real (4:3 or 16:9) image
+    // to fill that mismatched buffer, which is exactly what "long"/elongated
+    // faces and stretched framing looks like. DeepARCameraView (used for
+    // actual recording) never had this problem because VisionCamera already
+    // does proper format negotiation internally - this view never did its
+    // own equivalent.
+    //
+    // The fix: ask the camera what sizes it can ACTUALLY output for a
+    // SurfaceTexture target (StreamConfigurationMap - the standard Camera2
+    // API for this), and pick whichever real, supported size has the
+    // closest aspect ratio to the screen - not the raw screen size itself.
+    // The GL draw step already renders the camera texture to fill
+    // styles.absoluteFill via its own texture coordinates, so a small
+    // aspect-ratio difference between the chosen sensor size and the exact
+    // screen ratio shows as an imperceptible edge crop, never a stretch.
+    private fun chooseCameraOutputSize(camId: String, targetW: Int, targetH: Int): Size {
+        val fallback = Size(targetW.coerceAtLeast(1), targetH.coerceAtLeast(1))
+        val mgr = cameraManager ?: return fallback
+        try {
+            val characteristics = mgr.getCameraCharacteristics(camId)
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return fallback
+            val sizes = map.getOutputSizes(SurfaceTexture::class.java) ?: return fallback
+            if (sizes.isEmpty()) return fallback
+
+            val targetRatio = targetW.toFloat() / targetH.toFloat()
+            // Cap candidate sizes at 1080p-equivalent pixel count - this is a
+            // small on-screen effect preview, not a photo/video capture
+            // target, so anything larger only costs GL/decode performance
+            // for zero visible benefit.
+            val maxPixels = 1920 * 1080
+            return sizes
+                .filter { (it.width.toLong() * it.height.toLong()) <= maxPixels }
+                .ifEmpty { sizes.toList() }
+                .minByOrNull { size ->
+                    val ratio = size.width.toFloat() / size.height.toFloat()
+                    kotlin.math.abs(ratio - targetRatio)
+                } ?: fallback
+        } catch (e: Exception) {
+            android.util.Log.e("LiveEffectPreview", "chooseCameraOutputSize failed, falling back to view size", e)
+            return fallback
         }
     }
 

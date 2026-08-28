@@ -71,6 +71,15 @@ export interface LiveEffectPreviewHandle {
    * show a short "processing" state rather than assume it's instant.
    */
   stopRecording: (finalOutputPath: string) => Promise<string>;
+  /**
+   * Captures a single photo from the live effect pipeline (already
+   * composited with whatever GL effect is active) to outputPath. Fixes
+   * create.tsx's real Photo-mode bug: it always called
+   * cameraRef.current.takePhoto(), but the regular Camera component isn't
+   * even mounted while a GL effect is active (LiveEffectPreview replaces
+   * it), so that call silently no-op'd on its own null-check.
+   */
+  capturePhoto: (outputPath: string) => Promise<void>;
 }
 
 const NativeView: React.ComponentType<LiveEffectPreviewProps & { ref?: React.Ref<any> }> =
@@ -98,6 +107,13 @@ export const LiveEffectPreview = forwardRef<LiveEffectPreviewHandle, LiveEffectP
         }
         const resultPath: string = await NativeLiveEffectPreviewModule.stopLiveRecording(tag, finalOutputPath);
         return resultPath;
+      },
+      capturePhoto: async (outputPath: string) => {
+        const tag = findNodeHandle(nativeRef.current);
+        if (tag == null) {
+          throw new Error('LiveEffectPreview: could not resolve native view tag - is the view mounted?');
+        }
+        await NativeLiveEffectPreviewModule.captureLivePhoto(tag, outputPath);
       },
     }), []);
 
