@@ -480,6 +480,14 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // of the stretched/elongated preview, not a coincidence of this
         // being the size used elsewhere in this comment block below.
         renderer?.setFrameSize(camSize.width, camSize.height)
+        // ✅ FIX (camera "too long"/stretched): tells the renderer the REAL
+        // on-screen output size so it can center-crop the camera texture to
+        // match, instead of the old naive full-quad stretch. See
+        // FrameRenderer.kt's cameraTexCoordBuffer doc for the full reasoning -
+        // this is the missing half of the aspect-ratio fix (the other half,
+        // picking a better-matched camSize in the first place, is
+        // chooseCameraOutputSize's existing fix above).
+        renderer?.setOutputSize(surfaceW, surfaceH)
         // Apply whatever effect was requested before the renderer existed  -  see
         // pendingEffect's doc for why this line is the actual fix, not just belt-and-braces.
         renderer?.setEffect(pendingEffect)
@@ -549,6 +557,32 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // normal build). That symptom pattern is exactly what was reported.
         // Isolating each one means a failure in any single tracker can no
         // longer take the other two down with it.
+        setupFaceTracker()
+        setupHandTracker()
+        setupSegmenter()
+    }
+
+    // ✅ FIX (real cause of Thermal Pulse/Gold Skin "shows for a second then
+    // disappears"): each tracker's setErrorListener used to be a no-op. In
+    // MediaPipe's LIVE_STREAM mode, setErrorListener is a SEPARATE channel
+    // from a synchronous detectAsync()/segmentAsync() exception (which the
+    // try/catch in maybeSubmitForTracking already handles) - it's how the
+    // task reports an ASYNC failure in the underlying graph after a frame
+    // was already accepted. Once that fires, the graph commonly stops
+    // producing further results for the rest of the session. A silent
+    // listener meant that failure was completely invisible - no Logcat
+    // line, no crash, nothing - which is exactly "worked once, then quietly
+    // died." These now log the real exception AND schedule a guarded
+    // recreate of just that one tracker, so a single bad frame can recover
+    // instead of permanently killing tracking for the whole session. The
+    // cooldown (RETRY_COOLDOWN_MS) stops a persistently-broken device/model
+    // from recreating in a tight loop.
+    private var lastFaceRetryMs = 0L
+    private var lastHandRetryMs = 0L
+    private var lastSegRetryMs = 0L
+    private val RETRY_COOLDOWN_MS = 3000L
+
+    private fun setupFaceTracker() {
         try {
             val faceOptions = FaceLandmarker.FaceLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").build())
@@ -561,26 +595,50 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 // fixing their onFaceResult cases, since they'd never get real pose data.
                 .setOutputFacialTransformationMatrixes(true)
                 .setResultListener { result, _ -> onFaceResult(result) }
-                .setErrorListener { /* transient  -  next frame will retry, nothing to surface here */ }
+                .setErrorListener { error ->
+                    android.util.Log.e("LiveEffectPreview", "face landmarker async error - recreating tracker", error)
+                    val now = System.currentTimeMillis()
+                    if (now - lastFaceRetryMs > RETRY_COOLDOWN_MS) {
+                        lastFaceRetryMs = now
+                        trackingHandler?.post {
+                            try { liveFaceLandmarker?.close() } catch (e: Exception) { /* best-effort */ }
+                            setupFaceTracker()
+                        }
+                    }
+                }
                 .build()
             liveFaceLandmarker = FaceLandmarker.createFromOptions(context, faceOptions)
         } catch (e: Exception) {
             android.util.Log.e("LiveEffectPreview", "face tracker init failed - is face_landmarker.task in app/src/main/assets/?", e)
         }
+    }
 
+    private fun setupHandTracker() {
         try {
             val handOptions = HandLandmarker.HandLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build())
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setNumHands(2)
                 .setResultListener { result, _ -> onHandResult(result) }
-                .setErrorListener { }
+                .setErrorListener { error ->
+                    android.util.Log.e("LiveEffectPreview", "hand landmarker async error - recreating tracker", error)
+                    val now = System.currentTimeMillis()
+                    if (now - lastHandRetryMs > RETRY_COOLDOWN_MS) {
+                        lastHandRetryMs = now
+                        trackingHandler?.post {
+                            try { liveHandLandmarker?.close() } catch (e: Exception) { /* best-effort */ }
+                            setupHandTracker()
+                        }
+                    }
+                }
                 .build()
             liveHandLandmarker = HandLandmarker.createFromOptions(context, handOptions)
         } catch (e: Exception) {
             android.util.Log.e("LiveEffectPreview", "hand tracker init failed - is hand_landmarker.task in app/src/main/assets/?", e)
         }
+    }
 
+    private fun setupSegmenter() {
         try {
             // Same segmenter SegmentationTracker uses for baking (selfie_segmenter.tflite,
             // category 1 = person), just in LIVE_STREAM/async mode instead of VIDEO/blocking  -
@@ -594,7 +652,17 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 .setOutputCategoryMask(true)
                 .setOutputConfidenceMasks(false)
                 .setResultListener { result, image -> onSegmentationResult(result) }
-                .setErrorListener { }
+                .setErrorListener { error ->
+                    android.util.Log.e("LiveEffectPreview", "segmenter async error - recreating tracker", error)
+                    val now = System.currentTimeMillis()
+                    if (now - lastSegRetryMs > RETRY_COOLDOWN_MS) {
+                        lastSegRetryMs = now
+                        trackingHandler?.post {
+                            try { liveSegmenter?.close() } catch (e: Exception) { /* best-effort */ }
+                            setupSegmenter()
+                        }
+                    }
+                }
                 .build()
             liveSegmenter = ImageSegmenter.createFromOptions(context, segOptions)
         } catch (e: Exception) {
@@ -652,10 +720,15 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // SurfaceTexture target (StreamConfigurationMap - the standard Camera2
     // API for this), and pick whichever real, supported size has the
     // closest aspect ratio to the screen - not the raw screen size itself.
-    // The GL draw step already renders the camera texture to fill
-    // styles.absoluteFill via its own texture coordinates, so a small
-    // aspect-ratio difference between the chosen sensor size and the exact
-    // screen ratio shows as an imperceptible edge crop, never a stretch.
+    // ✅ CORRECTED: this comment used to claim the GL draw step already
+    // cropped the camera texture to fill styles.absoluteFill via its own
+    // texture coordinates - it didn't; there was no such crop anywhere,
+    // just a fixed full 0..1 quad, so any real mismatch between the chosen
+    // sensor size and the exact screen ratio WAS a visible stretch, not an
+    // imperceptible edge crop. That crop now genuinely exists -
+    // FrameRenderer.kt's cameraTexCoordBuffer/setOutputSize - so this size
+    // selection only needs to get reasonably close; the crop absorbs
+    // whatever gap remains.
     private fun chooseCameraOutputSize(camId: String, targetW: Int, targetH: Int): Size {
         val fallback = Size(targetW.coerceAtLeast(1), targetH.coerceAtLeast(1))
         val mgr = cameraManager ?: return fallback
@@ -803,7 +876,12 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             // above) — meaning even with (1) fixed, it would have copied a
             // single 1x1 pixel, not the full photo. Both are now fixed.
             r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
-            if (r.currentEffect == VisualEffect.BLINK_FREEZE) r.captureFreezeFrame()
+            // ✅ FIX (Blink Freeze noise/garbage bug): must pass the REAL current
+            // framebuffer size (this on-screen surface is surfaceW x surfaceH),
+            // not the old no-args default (frameWidth/frameHeight = camera
+            // capture size) - see captureFreezeFrame()'s doc in FrameRenderer.kt
+            // for the full explanation.
+            if (r.currentEffect == VisualEffect.BLINK_FREEZE) r.captureFreezeFrame(surfaceW, surfaceH)
             // FIX: MOUTH_WORDS/ROCK_PAPER_SCISSORS overlay draw - was never
             // drawn live even on the rare chance the texture got built, since
             // nothing called drawWatermarkAt for either. Same reused
@@ -918,8 +996,8 @@ class LiveEffectPreviewView @JvmOverloads constructor(
      * (LiveEffectPreviewModule.kt) is responsible for hopping back to the
      * correct thread if needed, same as it already does for other results.
      */
-    fun stopRecording(finalOutputPath: String, onFinished: (String) -> Unit) {
-        val rec = liveRecorder ?: run { onFinished(finalOutputPath); return }
+    fun stopRecording(finalOutputPath: String, onFinished: (String, String) -> Unit) {
+        val rec = liveRecorder ?: run { onFinished(finalOutputPath, "no audio: recording was never started"); return }
         rec.stop()
         encoderEglSurface?.let { eglCore?.releaseSurface(it) }
         encoderEglSurface = null
@@ -929,7 +1007,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // preview frame while it runs.
         Thread {
             val result = rec.finalizeRecording(finalOutputPath)
-            onFinished(result)
+            onFinished(result, rec.audioStatus)
         }.start()
     }
 

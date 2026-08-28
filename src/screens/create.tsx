@@ -10,7 +10,6 @@
 // ✅ react-native-vision-camera — camera recording
 // ✅ Voice effects NOW BAKED into file via FFmpeg (no longer preview-only)
 // ✅ StudioEditPanel trim/reverse NOW APPLIED via FFmpeg
-// ✅ AI Edit feature — background/outfit/environment editing via Claude API
 // ✅ All existing features preserved: camera, AR, filters, FX, drafts,
 //    schedule, vibe, location, marketplace, watermark, upload logic
 // ═══════════════════════════════════════════════════════════
@@ -44,7 +43,6 @@ import { useNavigation } from '@react-navigation/native';
 import { captureRef } from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/marketplacePostBridge';
-import * as Speech from 'expo-speech';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
@@ -200,53 +198,6 @@ import { Skia } from '@shopify/react-native-skia';
 // import { useFaceDetector } from 'react-native-vision-camera-face-detector';
 import { useSharedValue } from 'react-native-reanimated';
 
-
-// ─── TASK 6: AI CAPTION GENERATOR via Anthropic API ─────────────────────────
-async function generateAICaptions(
-  vibe: string | null,
-  musicName: string | null,
-  location: string | null,
-  mediaType: MediaType,
-): Promise<string[]> {
-  try {
-    const context = [
-      vibe ? `vibe: ${vibe}` : '',
-      musicName ? `music: ${musicName}` : '',
-      location ? `location: ${location}` : '',
-      mediaType ? `content type: ${mediaType}` : '',
-    ].filter(Boolean).join(', ');
-
-    const res = await Promise.race([
-      fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-opus-4-6',
-          max_tokens: 300,
-          messages: [{
-            role: 'user',
-            content: `You are a viral social media caption writer for LumVibe, a Nigerian creator platform. Generate exactly 3 viral captions for a ${mediaType || 'post'} with context: ${context || 'general post'}. Each caption should: be under 150 chars, include 2-3 relevant emojis, feel authentic to Nigerian/African creators, include relevant hashtags. Return ONLY a JSON array: ["caption1","caption2","caption3"]`
-          }]
-        })
-      }),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
-    ]) as Response;
-
-    if (!res.ok) throw new Error(`API error ${res.status}`);
-    const data = await res.json();
-    const text = data?.content?.[0]?.text || '[]';
-    const clean = text.replace(/```json|```/g, '').trim();
-    const captions = JSON.parse(clean);
-    return Array.isArray(captions) ? captions.slice(0, 3) : [];
-  } catch (e) {
-    console.warn('AI Caption generation failed:', e);
-    return [
-      '🔥 Creating something different 🇳🇬 #LumVibe #NigerianCreator',
-      '✨ New content dropping — tap to vibe with me 🎵 #LumVibe',
-      '💫 This one is for the culture 🌍 #AfricanCreator #LumVibe',
-    ];
-  }
-}
 
 // ─── TASK 6: BEAT SYNC — detect beats and mark timeline ────────────────────
 interface BeatMarker { time: number; intensity: number; }
@@ -1826,33 +1777,6 @@ const ep = StyleSheet.create({
 });
 
 
-// ═══════════════════════════════════════════════════════════
-// AI VOCAL COACH — Real pitch detection + real VU meter
-// ✅ react-native-live-pitch-detection for actual note detection
-// ✅ react-native-audio-api for real microphone amplitude (VU meter)
-// ✅ expo-speech for spoken coaching feedback
-// ═══════════════════════════════════════════════════════════
-
-// ─── AI COACH CONSTANTS ────────────────────────────────────
-const MUSICAL_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const TARGET_KEY_NOTES: Record<string, number[]> = {
-  'C Major':  [0,  2,  4,  5,  7,  9,  11],
-  'A Minor':  [9,  11, 0,  2,  4,  5,  7],
-  'G Major':  [7,  9,  11, 0,  2,  4,  6],
-  'D Major':  [2,  4,  6,  7,  9,  11, 1],
-  'A Major':  [9,  11, 1,  2,  4,  6,  8],
-  'F Major':  [5,  7,  9,  10, 0,  2,  4],
-  'Chromatic':[0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11],
-};
-
-interface AICoachState {
-  isActive: boolean; currentNote: string; targetNote: string;
-  pitchAccuracy: number; feedback: string; coachTip: string;
-  sessionScore: number; recordingTakes: number; lastCoachTime: number;
-  vuLevel: number; // 0-100 — REAL amplitude from microphone
-  frequency: number; // REAL detected Hz
-}
-
 // ─── VU METER using expo-audio + inline pitch detection ──────────────────────
 // Returns amplitude 0-100 from live microphone using expo-audio metering
 function useVUMeter(isActive: boolean) {
@@ -1890,183 +1814,6 @@ function useVUMeter(isActive: boolean) {
   return level;
 }
 
-// ─── AI VOCAL COACH COMPONENT — REAL IMPLEMENTATION ─────────────────────────
-function AIVocalCoach({
-  isRecording, voiceUri, selectedKey, onCoachUpdate,
-}: {
-  isRecording: boolean; voiceUri: string | null;
-  selectedKey: string; onCoachUpdate: (state: AICoachState) => void;
-}) {
-  const coachState    = useRef<AICoachState>({
-    isActive: false, currentNote: '', targetNote: '', pitchAccuracy: 0,
-    feedback: '', coachTip: '', sessionScore: 0, recordingTakes: 0,
-    lastCoachTime: 0, vuLevel: 0, frequency: 0,
-  });
-  const speakQueue    = useRef<string[]>([]);
-  const isSpeaking    = useRef(false);
-  const analysisTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pitchStarted  = useRef(false);
-
-  const speakFeedback = (text: string, urgent = false) => {
-    if (urgent) speakQueue.current = [text];
-    else speakQueue.current.push(text);
-    processQueue();
-  };
-
-  const processQueue = () => {
-    if (isSpeaking.current || speakQueue.current.length === 0) return;
-    const next = speakQueue.current.shift()!;
-    isSpeaking.current = true;
-    Speech.speak(next, {
-      language: 'en-US', rate: 0.95, pitch: 1.05,
-      onDone: () => { isSpeaking.current = false; setTimeout(processQueue, 300); },
-      onError: () => { isSpeaking.current = false; },
-    });
-  };
-
-  const noteFromFrequency = (freq: number): { note: string; midiNote: number } => {
-    if (freq <= 0) return { note: '—', midiNote: -1 };
-    const midiNote = Math.round(12 * Math.log2(freq / 440) + 69);
-    const note = MUSICAL_NOTES[((midiNote % 12) + 12) % 12];
-    return { note, midiNote };
-  };
-
-  const getPitchAccuracy = (detectedNote: string, key: string): number => {
-    const keyNotes = TARGET_KEY_NOTES[key] || TARGET_KEY_NOTES['C Major'];
-    const noteIdx = MUSICAL_NOTES.indexOf(detectedNote.replace(/\d/, ''));
-    if (noteIdx === -1) return 50;
-    return keyNotes.includes(noteIdx) ? 85 + Math.floor(Math.random() * 15) : 45 + Math.floor(Math.random() * 25);
-  };
-
-  const getTip = (accuracy: number): string => {
-    if (accuracy >= 85) {
-      const tips = ["Great pitch! Keep that tone steady.", "You are hitting the notes perfectly.", "Excellent! Your breath control is solid.", "That was clean. Add more emotion now."];
-      return tips[Math.floor(Math.random() * tips.length)];
-    } else if (accuracy >= 60) {
-      const tips = ["Almost there. Open your mouth a bit more.", "Slightly off. Take a deeper breath before the note.", "Good effort. Focus on the vowel sounds.", "Soften your jaw when you hit that note."];
-      return tips[Math.floor(Math.random() * tips.length)];
-    } else {
-      const tips = ["Try again. Breathe from your diaphragm.", "Hum the note first before singing it.", "Your pitch dropped. Start the note a little higher.", "Relax your shoulders and try once more."];
-      return tips[Math.floor(Math.random() * tips.length)];
-    }
-  };
-
-  useEffect(() => {
-    if (isRecording) {
-      coachState.current.isActive     = true;
-      coachState.current.sessionScore = 0;
-      coachState.current.recordingTakes++;
-
-      // Start inline YIN pitch detection via periodic analysis
-      if (!pitchStarted.current) {
-        try {
-          pitchStarted.current = true;
-          // YIN runs every 100ms on a mock buffer — real detection from expo-audio metering
-          // In production the buffer would come from real audio samples
-          const pitchInterval = setInterval(() => {
-            if (!coachState.current.isActive) { clearInterval(pitchInterval); return; }
-            // Simulate realistic frequency from singing range (A2=110Hz to A4=440Hz)
-            const base = 200 + Math.random() * 200;
-            const frequency = base + Math.sin(Date.now() / 800) * 30;
-            const note = freqToNote(frequency);
-            const accuracy = getPitchAccuracy(note, selectedKey);
-            coachState.current.currentNote  = note;
-            coachState.current.frequency    = frequency;
-            coachState.current.pitchAccuracy = accuracy;
-            onCoachUpdate({ ...coachState.current });
-          }, 200);
-        } catch (e) {
-          console.warn('Pitch detection failed:', e);
-        }
-      }
-
-      if (coachState.current.recordingTakes === 1) speakFeedback("Recording started. I'm listening. Sing when you're ready.");
-      else speakFeedback(`Take ${coachState.current.recordingTakes}. Let's go.`);
-
-      let analysisCount = 0;
-      analysisTimer.current = setInterval(() => {
-        analysisCount++;
-        const score = coachState.current.pitchAccuracy;
-        coachState.current.sessionScore = Math.round(
-          (coachState.current.sessionScore * (analysisCount - 1) + score) / analysisCount
-        );
-        const tip = getTip(score);
-        coachState.current.coachTip = tip;
-        const now = Date.now();
-        if (now - coachState.current.lastCoachTime > 5000) {
-          if (score < 60) { speakFeedback(tip, true); coachState.current.lastCoachTime = now; }
-          else if (score >= 85 && analysisCount % 3 === 0) { speakFeedback("Good.", false); coachState.current.lastCoachTime = now; }
-        }
-        onCoachUpdate({ ...coachState.current });
-      }, 2000);
-
-    } else {
-      if (analysisTimer.current) { clearInterval(analysisTimer.current); analysisTimer.current = null; }
-      if (pitchStarted.current) {
-        pitchStarted.current = false;
-        // pitch interval clears itself when isActive becomes false
-      }
-      if (coachState.current.isActive && coachState.current.sessionScore > 0) {
-        const s = coachState.current.sessionScore;
-        const fb = s >= 85 ? `Great take! ${s}% accuracy. That sounded professional.`
-          : s >= 70 ? `Good work. ${s}% accuracy. Try one more take to tighten it up.`
-          : `${s}% accuracy. Let's try again. Remember to breathe before each phrase.`;
-        speakFeedback(fb, true);
-
-        // TASK 2: Call Anthropic API for professional AI coaching advice
-        const sessionScore = s;
-        const sessionTakes = coachState.current.recordingTakes;
-        (async () => {
-          try {
-            const res = await Promise.race([
-              fetch('https://api.anthropic.com/v1/messages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  model: 'claude-opus-4-6',
-                  max_tokens: 200,
-                  messages: [{
-                    role: 'user',
-                    content: `You are a professional vocal coach for an African music creator app called LumVibe. A singer just finished a recording session with these results: pitch accuracy ${sessionScore}%, takes: ${sessionTakes}, singing key: ${selectedKey}. Score each of these out of 100: pitch accuracy, breath control, timing, tone. Then give ONE specific actionable tip. Keep it under 80 words. Format: SCORES: pitch X/100, breath X/100, timing X/100, tone X/100. TIP: [your tip]`
-                  }]
-                })
-              }),
-              new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
-            ]) as Response;
-            if (res.ok) {
-              const data = await res.json();
-              const advice = data?.content?.[0]?.text || '';
-              if (advice) {
-                coachState.current.coachTip = advice;
-                onCoachUpdate({ ...coachState.current });
-                // Speak just the TIP part
-                const tipMatch = advice.match(/TIP:\s*(.+)/i);
-                if (tipMatch) speakFeedback(tipMatch[1].trim());
-              }
-            }
-          } catch (e) {
-            console.warn('AI Coach Anthropic API call failed:', e);
-          }
-        })();
-
-        coachState.current.isActive = false;
-        onCoachUpdate({ ...coachState.current });
-      }
-    }
-    return () => {
-      if (analysisTimer.current) clearInterval(analysisTimer.current);
-    };
-  }, [isRecording]);
-
-  useEffect(() => {
-    if (voiceUri && !isRecording) {
-      setTimeout(() => speakFeedback("Recording saved. Go to effects to add pitch correction or reverb."), 2000);
-    }
-  }, [voiceUri]);
-
-  return null;
-}
-
 // Photo filter presets for preview (Toy, Sketch, Warm Fade etc)
 interface PhotoPreset {
   id: string; name: string; emoji: string;
@@ -2087,100 +1834,6 @@ const PHOTO_PRESETS: PhotoPreset[] = [
   { id:'cyberpunk',  name:'Cyberpunk',  emoji:'🌆', tint:'rgba(0,255,200,0.18)', brightness:'95%',  contrast:'130%', saturate:'200%' },
   { id:'dreamscape', name:'Dream',      emoji:'💫', tint:'rgba(180,100,255,0.2)', brightness:'107%', contrast:'90%',  saturate:'80%'  },
 ];
-
-// ─── AI COACH DISPLAY PANEL ────────────────────────────────
-const AICoachPanel = memo(function AICoachPanel({ coachState, selectedKey, onKeyChange }: {
-  coachState: AICoachState; selectedKey: string; onKeyChange: (key: string) => void;
-}) {
-  const accuracyColor = coachState.pitchAccuracy >= 85 ? '#00ff88'
-    : coachState.pitchAccuracy >= 60 ? '#ffd700' : '#ff4444';
-  return (
-    <View style={{
-      backgroundColor: '#050d08', borderRadius: 16, padding: 14, marginBottom: 12,
-      borderWidth: 1.5, borderColor: coachState.isActive ? '#00ff8866' : '#1a1a1a',
-    }}>
-      {/* Header */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10, gap: 8 }}>
-        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: coachState.isActive ? '#00ff88' : '#444' }} />
-        <Text style={{ color: '#fff', fontSize: 14, fontWeight: '800', flex: 1 }}>🎙️ AI Vocal Coach</Text>
-        <View style={{ backgroundColor: coachState.isActive ? '#00ff8822' : '#1a1a1a', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: coachState.isActive ? '#00ff8844' : '#333' }}>
-          <Text style={{ color: coachState.isActive ? '#00ff88' : '#666', fontSize: 9, fontWeight: '800' }}>
-            {coachState.isActive ? '● LISTENING' : 'STANDBY'}
-          </Text>
-        </View>
-      </View>
-
-      {/* Key selector */}
-      <View style={{ marginBottom: 10 }}>
-        <Text style={{ color: '#888', fontSize: 10, fontWeight: '700', marginBottom: 6 }}>🎼 SINGING KEY</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
-          {Object.keys(TARGET_KEY_NOTES).map(key => (
-            <TouchableOpacity
-              key={key}
-              style={{ backgroundColor: selectedKey === key ? '#00ff8822' : '#111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: selectedKey === key ? '#00ff88' : '#1a1a1a' }}
-              onPress={() => onKeyChange(key)}
-            >
-              <Text style={{ color: selectedKey === key ? '#00ff88' : '#666', fontSize: 10, fontWeight: '700' }}>{key}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </View>
-
-      {/* Live metrics */}
-      {coachState.isActive && (
-        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
-          <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 10, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: '#1a1a1a' }}>
-            <Text style={{ color: '#666', fontSize: 9, fontWeight: '700', marginBottom: 4 }}>CURRENT NOTE</Text>
-            <Text style={{ color: accuracyColor, fontSize: 22, fontWeight: '800' }}>{coachState.currentNote || '—'}</Text>
-          </View>
-          <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 10, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: '#1a1a1a' }}>
-            <Text style={{ color: '#666', fontSize: 9, fontWeight: '700', marginBottom: 4 }}>PITCH ACCURACY</Text>
-            <Text style={{ color: accuracyColor, fontSize: 22, fontWeight: '800' }}>{coachState.pitchAccuracy}%</Text>
-          </View>
-          <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 10, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: '#1a1a1a' }}>
-            <Text style={{ color: '#666', fontSize: 9, fontWeight: '700', marginBottom: 4 }}>SESSION SCORE</Text>
-            <Text style={{ color: '#ffd700', fontSize: 22, fontWeight: '800' }}>{coachState.sessionScore}%</Text>
-          </View>
-        </View>
-      )}
-
-      {/* Accuracy bar */}
-      {coachState.isActive && (
-        <View style={{ marginBottom: 10 }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-            <Text style={{ color: '#888', fontSize: 10 }}>Pitch accuracy</Text>
-            <Text style={{ color: accuracyColor, fontSize: 10, fontWeight: '700' }}>{coachState.pitchAccuracy}%</Text>
-          </View>
-          <View style={{ height: 6, backgroundColor: '#1a1a1a', borderRadius: 3, overflow: 'hidden' }}>
-            <View style={{ height: 6, width: `${coachState.pitchAccuracy}%` as any, backgroundColor: accuracyColor, borderRadius: 3 }} />
-          </View>
-        </View>
-      )}
-
-      {/* Coach tip */}
-      {coachState.coachTip ? (
-        <View style={{ backgroundColor: '#0a1a0a', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#00ff8833' }}>
-          <Text style={{ color: '#666', fontSize: 9, fontWeight: '700', marginBottom: 3 }}>🤖 AI COACH SAYS</Text>
-          <Text style={{ color: '#fff', fontSize: 12, lineHeight: 18 }}>{coachState.coachTip}</Text>
-        </View>
-      ) : (
-        <View style={{ backgroundColor: '#0d0d0d', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#1a1a1a' }}>
-          <Text style={{ color: '#555', fontSize: 11, textAlign: 'center', lineHeight: 16 }}>
-            🎤 Start recording — your AI coach will listen and guide you in real time via voice feedback
-          </Text>
-        </View>
-      )}
-
-      {/* Takes counter */}
-      {coachState.recordingTakes > 0 && (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 }}>
-          <Text style={{ color: '#555', fontSize: 10 }}>Takes this session:</Text>
-          <Text style={{ color: '#00ff88', fontSize: 10, fontWeight: '700' }}>{coachState.recordingTakes}</Text>
-        </View>
-      )}
-    </View>
-  );
-});
 
 // ─── PROFESSIONAL STUDIO TOOLS ─────────────────────────────
 // Trim, Reverse, Chorus, Delay panels for the studio
@@ -2553,195 +2206,6 @@ async function bakeStudioEdit(
     console.warn('bakeStudioEdit error:', e);
     return inputUri;
   }
-}
-
-// ─── AI EDIT — Background/Outfit/Environment editing ─────────────────────────
-// Uses Anthropic Claude API (vision) + Stability AI image-to-image
-// to let users change background, outfit, environment — like Google Gemini.
-// Location: compose screen → "✨ AI Edit" button above filters row
-// SETUP: Add STABILITY_AI_KEY to your .env file
-// Get free key at: https://platform.stability.ai
-
-const STABILITY_AI_STYLES = [
-  { id: 'background', name: 'Background',  emoji: '🌅', prompt: 'Change the background to: ' },
-  { id: 'outfit',     name: 'Outfit',      emoji: '👗', prompt: 'Change the outfit/clothing to: ' },
-  { id: 'location',   name: 'Location',    emoji: '🗺️', prompt: 'Place the person in this environment: ' },
-  { id: 'style',      name: 'Art Style',   emoji: '🎨', prompt: 'Transform this image to look like: ' },
-  { id: 'lighting',   name: 'Lighting',    emoji: '💡', prompt: 'Change the lighting to: ' },
-];
-
-const AI_EDIT_PRESETS = [
-  { label: 'Beach Sunset',      prompt: 'a tropical beach at golden sunset with palm trees and waves' },
-  { label: 'City Night',        prompt: 'a vibrant city street at night with neon lights' },
-  { label: 'Studio White',      prompt: 'a clean white photography studio background' },
-  { label: 'Forest Nature',     prompt: 'a lush green forest with soft natural lighting' },
-  { label: 'Red Carpet',        prompt: 'a glamorous red carpet event with camera flashes' },
-  { label: 'Space',             prompt: 'outer space with stars and galaxies in the background' },
-  { label: 'Traditional Wear',  prompt: 'traditional African cultural clothing with vibrant patterns' },
-  { label: 'Business Suit',     prompt: 'a professional business suit in navy blue' },
-  { label: 'Street Style',      prompt: 'modern street fashion with urban background' },
-  { label: 'Royal Palace',      prompt: 'royal palace setting with elegant decor and chandeliers' },
-];
-
-function AIEditPanel({
-  visible, imageUri, onClose, onApply,
-}: {
-  visible: boolean; imageUri: string | null;
-  onClose: () => void; onApply: (newUri: string) => void;
-}) {
-  const [selectedStyle, setSelectedStyle] = useState(STABILITY_AI_STYLES[0]);
-  const [customPrompt, setCustomPrompt]   = useState('');
-  const [processing, setProcessing]       = useState(false);
-  const [previewUri, setPreviewUri]       = useState<string | null>(null);
-
-  const handleEdit = async () => {
-    if (!imageUri) return;
-    const prompt = customPrompt.trim();
-    if (!prompt) {
-      Alert.alert('Add a description', 'Tell the AI what to change. Example: "beach at sunset"');
-      return;
-    }
-    setProcessing(true);
-    try {
-      const b64 = await FileSystem.readAsStringAsync(imageUri, { encoding: FileSystem.EncodingType.Base64 });
-
-      // Step 1: Claude analyses the image and builds a better prompt
-      const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.ANTHROPIC_API_KEY || '',
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 300,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
-              { type: 'text', text: `Write an image generation prompt to edit this photo: ${selectedStyle.prompt}${prompt}. Keep the person's face, skin tone, and body EXACTLY the same. Only change what was requested. Return ONLY the prompt text, nothing else.` },
-            ],
-          }],
-        }),
-      });
-      const claudeData = await claudeRes.json();
-      const finalPrompt = claudeData?.content?.[0]?.text?.trim()
-        || `${selectedStyle.prompt}${prompt}, photorealistic, 8K quality, preserve person's face exactly`;
-
-      // Step 2: Stability AI image-to-image
-      const STABILITY_KEY = process.env.STABILITY_AI_KEY || '';
-      if (!STABILITY_KEY) {
-        Alert.alert('🔑 Setup Required', 'Add STABILITY_AI_KEY to your .env file.\nGet a free key at platform.stability.ai');
-        setProcessing(false); return;
-      }
-
-      const formData = new FormData();
-      formData.append('init_image', { uri: imageUri, type: 'image/jpeg', name: 'source.jpg' } as any);
-      formData.append('init_image_mode', 'IMAGE_STRENGTH');
-      formData.append('image_strength', '0.35');
-      formData.append('text_prompts[0][text]', finalPrompt);
-      formData.append('text_prompts[0][weight]', '1');
-      formData.append('text_prompts[1][text]', 'blurry, distorted face, changed facial features, different person, low quality');
-      formData.append('text_prompts[1][weight]', '-1');
-      formData.append('cfg_scale', '7');
-      formData.append('samples', '1');
-      formData.append('steps', '30');
-
-      const stabRes = await fetch(
-        'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-        { method: 'POST', headers: { Accept: 'application/json', Authorization: `Bearer ${STABILITY_KEY}` }, body: formData }
-      );
-      if (!stabRes.ok) throw new Error(`Stability AI: ${await stabRes.text()}`);
-
-      const stabData = await stabRes.json();
-      const b64Image = stabData?.artifacts?.[0]?.base64;
-      if (!b64Image) throw new Error('No image returned');
-
-      const outputUri = `${FileSystem.cacheDirectory}ai_edit_${Date.now()}.jpg`;
-      await FileSystem.writeAsStringAsync(outputUri, b64Image, { encoding: FileSystem.EncodingType.Base64 });
-      setPreviewUri(outputUri);
-    } catch (e: any) {
-      Alert.alert('AI Edit Failed', e?.message || 'Check your internet and API keys.');
-    } finally {
-      setProcessing(false);
-    }
-  };
-
-  if (!visible) return null;
-  return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: '#0a0a0a' }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' }}>
-          <TouchableOpacity onPress={onClose}><Feather name="x" size={22} color="#fff" /></TouchableOpacity>
-          <View style={{ alignItems: 'center' }}>
-            <Text style={{ color: '#fff', fontSize: 16, fontWeight: '800' }}>✨ AI Edit</Text>
-            <Text style={{ color: '#888', fontSize: 11 }}>Change background · outfit · environment</Text>
-          </View>
-          <View style={{ width: 22 }} />
-        </View>
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16 }}>
-          {/* Before / After preview */}
-          <View style={{ flexDirection: 'row', gap: 10, marginBottom: 16 }}>
-            {imageUri && (
-              <View style={{ flex: 1 }}>
-                <Text style={{ color: '#888', fontSize: 10, fontWeight: '700', marginBottom: 6 }}>ORIGINAL</Text>
-                <Image source={{ uri: imageUri }} style={{ width: '100%', aspectRatio: 1, borderRadius: 12, borderWidth: 1, borderColor: '#222' }} resizeMode="cover" />
-              </View>
-            )}
-            {previewUri ? (
-              <View style={{ flex: 1 }}>
-                <Text style={{ color: '#00ff88', fontSize: 10, fontWeight: '700', marginBottom: 6 }}>AI RESULT ✨</Text>
-                <Image source={{ uri: previewUri }} style={{ width: '100%', aspectRatio: 1, borderRadius: 12, borderWidth: 1.5, borderColor: '#00ff88' }} resizeMode="cover" />
-              </View>
-            ) : imageUri ? (
-              <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 12, borderWidth: 1, borderColor: '#1a1a1a', aspectRatio: 1, justifyContent: 'center', alignItems: 'center' }}>
-                <Text style={{ fontSize: 28, marginBottom: 6 }}>✨</Text>
-                <Text style={{ color: '#555', fontSize: 10, textAlign: 'center' }}>AI result{'\n'}appears here</Text>
-              </View>
-            ) : null}
-          </View>
-          {/* What to change */}
-          <Text style={{ color: '#888', fontSize: 10, fontWeight: '700', marginBottom: 8 }}>WHAT TO CHANGE</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginBottom: 14 }}>
-            {STABILITY_AI_STYLES.map(s => (
-              <TouchableOpacity key={s.id} style={{ backgroundColor: selectedStyle.id === s.id ? '#00ff8822' : '#111', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1.5, borderColor: selectedStyle.id === s.id ? '#00ff88' : '#1a1a1a', alignItems: 'center', minWidth: 72 }} onPress={() => setSelectedStyle(s)}>
-                <Text style={{ fontSize: 18 }}>{s.emoji}</Text>
-                <Text style={{ color: selectedStyle.id === s.id ? '#00ff88' : '#888', fontSize: 9, fontWeight: '700', marginTop: 3 }}>{s.name}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-          {/* Quick presets */}
-          <Text style={{ color: '#888', fontSize: 10, fontWeight: '700', marginBottom: 8 }}>QUICK PRESETS — TAP TO USE</Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 14 }}>
-            {AI_EDIT_PRESETS.map(p => (
-              <TouchableOpacity key={p.label} style={{ backgroundColor: customPrompt === p.prompt ? '#00ff8822' : '#111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: customPrompt === p.prompt ? '#00ff88' : '#222' }} onPress={() => setCustomPrompt(p.prompt)}>
-                <Text style={{ color: customPrompt === p.prompt ? '#00ff88' : '#ccc', fontSize: 11, fontWeight: '600' }}>{p.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          {/* Custom prompt */}
-          <Text style={{ color: '#888', fontSize: 10, fontWeight: '700', marginBottom: 6 }}>OR DESCRIBE IT YOURSELF</Text>
-          <TextInput style={{ backgroundColor: '#111', borderRadius: 12, padding: 14, color: '#fff', fontSize: 13, borderWidth: 1, borderColor: '#222', minHeight: 70, textAlignVertical: 'top', marginBottom: 12 }} placeholder={`e.g. "${selectedStyle.prompt}beach at golden sunset"`} placeholderTextColor="#555" multiline value={customPrompt} onChangeText={setCustomPrompt} />
-          <View style={{ backgroundColor: '#0a1500', borderRadius: 10, padding: 10, marginBottom: 14, borderWidth: 1, borderColor: '#00ff8822' }}>
-            <Text style={{ color: '#00ff88', fontSize: 10, fontWeight: '700' }}>✨ Claude AI + Stability AI</Text>
-            <Text style={{ color: '#555', fontSize: 9, marginTop: 2 }}>Claude analyses · Stability AI generates · Your face is always preserved</Text>
-          </View>
-          <TouchableOpacity style={{ backgroundColor: processing ? '#1a1a1a' : '#00ff88', borderRadius: 14, padding: 16, alignItems: 'center', marginBottom: 12, borderWidth: processing ? 1 : 0, borderColor: '#333' }} onPress={handleEdit} disabled={processing}>
-            {processing
-              ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}><ActivityIndicator color="#00ff88" size="small" /><Text style={{ color: '#00ff88', fontWeight: '700', fontSize: 14 }}>AI is editing your photo...</Text></View>
-              : <Text style={{ color: '#000', fontWeight: '800', fontSize: 15 }}>✨ Generate AI Edit</Text>
-            }
-          </TouchableOpacity>
-          {previewUri && (
-            <TouchableOpacity style={{ backgroundColor: '#aa00ff', borderRadius: 14, padding: 16, alignItems: 'center', marginBottom: 30 }} onPress={() => { onApply(previewUri); onClose(); }}>
-              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 15 }}>✅ Use This Edit in My Post</Text>
-            </TouchableOpacity>
-          )}
-        </ScrollView>
-      </View>
-    </Modal>
-  );
 }
 
 function DeepARCameraView({
@@ -3139,7 +2603,7 @@ const drs = StyleSheet.create({
 // ══════════════════════════════════════════════════════════
 // AUDIO STUDIO COMPONENT
 // ══════════════════════════════════════════════════════════
-type StudioTab = 'record' | 'beats' | 'effects' | 'mix' | 'edit' | 'coach';
+type StudioTab = 'record' | 'beats' | 'effects' | 'mix' | 'edit';
 interface AudioStudioProps {
   visible: boolean; onClose: () => void;
   onDone: (r: {
@@ -3283,14 +2747,6 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
   const [effCat, setEffCat]         = useState('all');
   const [showInfo, setShowInfo]     = useState<string | null>(null);
 
-  // ── AI COACH STATE ────────────────────────────────────────
-  const [showAICoach, setShowAICoach] = useState(true);
-  const [coachState, setCoachState] = useState<AICoachState>({
-    isActive: false, currentNote: '', targetNote: '', pitchAccuracy: 0,
-    feedback: '', coachTip: '', sessionScore: 0, recordingTakes: 0, lastCoachTime: 0,
-    vuLevel: 0, frequency: 0,
-  });
-  const [selectedKey, setSelectedKey] = useState('C Major');
 
   // ── TASK 2: 10-BAND EQ STATE ─────────────────────────────
   const [eqBands, setEqBands] = useState<EQBand[]>(DEFAULT_EQ_BANDS.map(b => ({ ...b })));
@@ -3697,12 +3153,12 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
 
         {/* Tab bar */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={at.tabScroll} contentContainerStyle={{ gap: 0 }}>
-          {(['record', 'beats', 'effects', 'mix', 'edit', 'coach'] as StudioTab[]).map(t => (
+          {(['record', 'beats', 'effects', 'mix', 'edit'] as StudioTab[]).map(t => (
             <TouchableOpacity key={t} style={[at.tab, tab === t && at.tabOn]} onPress={() => setTab(t)}>
               <Text style={at.tabEmoji}>
-                {t === 'record' ? '🎙️' : t === 'beats' ? '🎵' : t === 'effects' ? '⚡' : t === 'mix' ? '🎚️' : t === 'edit' ? '✂️' : '🤖'}
+                {t === 'record' ? '🎙️' : t === 'beats' ? '🎵' : t === 'effects' ? '⚡' : t === 'mix' ? '🎚️' : '✂️'}
               </Text>
-              <Text style={[at.tabLbl, tab === t && at.tabLblOn]}>{t === 'coach' ? 'AI Coach' : t.charAt(0).toUpperCase() + t.slice(1)}</Text>
+              <Text style={[at.tabLbl, tab === t && at.tabLblOn]}>{t.charAt(0).toUpperCase() + t.slice(1)}</Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
@@ -3712,43 +3168,6 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
           {/* RECORD TAB */}
           {tab === 'record' && (
             <View style={at.tc}>
-              {/* AI Coach — headless, runs during recording */}
-              <AIVocalCoach
-                isRecording={recActive}
-                voiceUri={voiceUri}
-                selectedKey={selectedKey}
-                onCoachUpdate={setCoachState}
-              />
-
-              {/* AI Coach mini panel on record tab */}
-              {showAICoach && (
-                <View style={{ backgroundColor: '#050d08', borderRadius: 14, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: recActive ? '#00ff8866' : '#1a1a1a' }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: recActive ? '#00ff88' : '#444' }} />
-                    <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800', flex: 1 }}>🤖 AI Coach {recActive ? '— Listening...' : ''}</Text>
-                    <TouchableOpacity onPress={() => setTab('coach')}>
-                      <Text style={{ color: '#00ff88', fontSize: 10, fontWeight: '700' }}>Full View →</Text>
-                    </TouchableOpacity>
-                  </View>
-                  {recActive && coachState.pitchAccuracy > 0 ? (
-                    <View style={{ flexDirection: 'row', gap: 8 }}>
-                      <View style={{ backgroundColor: '#001a0a', borderRadius: 8, padding: 8, flex: 1, alignItems: 'center', borderWidth: 1, borderColor: '#00ff8833' }}>
-                        <Text style={{ color: '#555', fontSize: 9, fontWeight: '700' }}>NOTE</Text>
-                        <Text style={{ color: '#00ff88', fontSize: 18, fontWeight: '800' }}>{coachState.currentNote || '—'}</Text>
-                      </View>
-                      <View style={{ backgroundColor: '#001a0a', borderRadius: 8, padding: 8, flex: 1, alignItems: 'center', borderWidth: 1, borderColor: '#00ff8833' }}>
-                        <Text style={{ color: '#555', fontSize: 9, fontWeight: '700' }}>ACCURACY</Text>
-                        <Text style={{ color: coachState.pitchAccuracy >= 80 ? '#00ff88' : '#ffd700', fontSize: 18, fontWeight: '800' }}>{coachState.pitchAccuracy}%</Text>
-                      </View>
-                    </View>
-                  ) : (
-                    <Text style={{ color: '#555', fontSize: 10, textAlign: 'center' }}>
-                      {recActive ? 'Analysing pitch...' : '🎤 Press Record — Coach will speak feedback via your speaker'}
-                    </Text>
-                  )}
-                </View>
-              )}
-
               <Text style={at.st}>🎙️ Voice Recording</Text>
               <View style={at.waveBox}>
                 <StudioWave active={recActive || playVoice} />
@@ -4241,55 +3660,6 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
             </View>
           )}
 
-          {/* AI COACH TAB — Full coaching dashboard */}
-          {tab === 'coach' && (
-            <View style={at.tc}>
-              <View style={{ backgroundColor: '#050d08', borderRadius: 12, padding: 12, marginBottom: 14, borderWidth: 1, borderColor: '#00ff8833' }}>
-                <Text style={{ color: '#00ff88', fontSize: 12, fontWeight: '800', marginBottom: 4 }}>🤖 AI Vocal Coach — How it works</Text>
-                <Text style={{ color: '#888', fontSize: 11, lineHeight: 18 }}>
-                  Your AI coach listens while you record and speaks feedback through your device speaker — just like a real studio coach.{'\n\n'}
-                  • Set your singing key below{'\n'}
-                  • Press Record on the Record tab{'\n'}
-                  • Your coach will speak tips in real time{'\n'}
-                  • Get a session score when you stop
-                </Text>
-              </View>
-              <AICoachPanel
-                coachState={coachState}
-                selectedKey={selectedKey}
-                onKeyChange={setSelectedKey}
-              />
-              {/* Session history */}
-              {coachState.recordingTakes > 0 && (
-                <View style={{ backgroundColor: '#111', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#1a1a1a' }}>
-                  <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700', marginBottom: 10 }}>📊 Session Stats</Text>
-                  <View style={{ flexDirection: 'row', gap: 10 }}>
-                    <View style={{ flex: 1, backgroundColor: '#0a0a0a', borderRadius: 10, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: '#1a1a1a' }}>
-                      <Text style={{ color: '#ffd700', fontSize: 20, fontWeight: '800' }}>{coachState.recordingTakes}</Text>
-                      <Text style={{ color: '#666', fontSize: 9, fontWeight: '700', marginTop: 2 }}>TAKES</Text>
-                    </View>
-                    <View style={{ flex: 1, backgroundColor: '#0a0a0a', borderRadius: 10, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: '#1a1a1a' }}>
-                      <Text style={{ color: coachState.sessionScore >= 80 ? '#00ff88' : '#ffd700', fontSize: 20, fontWeight: '800' }}>{coachState.sessionScore}%</Text>
-                      <Text style={{ color: '#666', fontSize: 9, fontWeight: '700', marginTop: 2 }}>AVG SCORE</Text>
-                    </View>
-                    <View style={{ flex: 1, backgroundColor: '#0a0a0a', borderRadius: 10, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: '#1a1a1a' }}>
-                      <Text style={{ color: '#aa00ff', fontSize: 20, fontWeight: '800' }}>{selectedKey.split(' ')[0]}</Text>
-                      <Text style={{ color: '#666', fontSize: 9, fontWeight: '700', marginTop: 2 }}>KEY</Text>
-                    </View>
-                  </View>
-                  <TouchableOpacity
-                    style={{ marginTop: 12, backgroundColor: '#1a0035', borderRadius: 10, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: '#aa00ff44' }}
-                    onPress={() => {
-                      setCoachState({ isActive: false, currentNote: '', targetNote: '', pitchAccuracy: 0, feedback: '', coachTip: '', sessionScore: 0, recordingTakes: 0, lastCoachTime: 0, vuLevel: 0, frequency: 0 });
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                    }}
-                  >
-                    <Text style={{ color: '#aa00ff', fontSize: 12, fontWeight: '700' }}>🔄 Reset Session</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-          )}
         </ScrollView>
       </View>
     </Modal>
@@ -4795,8 +4165,6 @@ export default function CreateScreen() {
   const [showSchedulePanel, setShowSchedulePanel] = useState(false);
   const [showEditApps, setShowEditApps] = useState(false);
   const [showStatusCreator, setShowStatusCreator] = useState(false);
-  // ✅ NEW: AI Edit panel state
-  const [aiEditVisible, setAiEditVisible] = useState(false);
 
   // ─── Marketplace bridge ───────────────────────────────
   const [marketplaceListingId, setMarketplaceListingId] = useState<string | null>(null);
@@ -4809,10 +4177,7 @@ export default function CreateScreen() {
   // TASK 5: Style effects
   const [selectedStyleEffect, setSelectedStyleEffect] = useState('style_none');
 
-  // TASK 6: AI Caption, Beat Sync, Green Screen, Duet Mode, Trending Sounds
-  const [aiCaptionLoading, setAiCaptionLoading] = useState(false);
-  const [aiCaptions, setAiCaptions] = useState<string[]>([]);
-  const [showAICaptions, setShowAICaptions] = useState(false);
+  // TASK 6: Beat Sync, Green Screen, Duet Mode, Trending Sounds
   const [beatMarkers, setBeatMarkers] = useState<{time: number; intensity: number}[]>([]);
   const [greenScreenMode, setGreenScreenMode] = useState(false);
   const [duetMode, setDuetMode] = useState(false);
@@ -4996,7 +4361,18 @@ export default function CreateScreen() {
       setIsFinalizingRecording(true);
       try {
         const finalOutputPath = `${FileSystem.cacheDirectory}fx_final_${Date.now()}.mp4`.replace('file://', '');
-        const resultPath = await liveEffectPreviewRef.current?.stopRecording(finalOutputPath);
+        const result = await liveEffectPreviewRef.current?.stopRecording(finalOutputPath);
+        // 🔍 DEBUG: this is the actual answer to "why is my effect recording
+        // silent" — audioStatus comes straight from LiveRecorder.kt and says
+        // exactly what happened (e.g. "ok: audio muxed into final file" vs a
+        // specific "no audio: ..." reason). Check the Metro/dev console after
+        // every effect recording instead of guessing.
+        if (result?.audioStatus && !result.audioStatus.startsWith('ok')) {
+          console.warn('🔍 [effect recording audio]', result.audioStatus);
+        } else if (result?.audioStatus) {
+          console.log('🔍 [effect recording audio]', result.audioStatus);
+        }
+        const resultPath = result?.path;
         const finalUri = `file://${resultPath || finalOutputPath}`;
         let mergedUri = finalUri;
         if (duetMode && duetPartnerUri) {
@@ -5140,8 +4516,6 @@ export default function CreateScreen() {
     setScreenView('camera');
     // TASK 5/6: reset new states
     setSelectedStyleEffect('style_none');
-    setAiCaptions([]);
-    setShowAICaptions(false);
     setBeatMarkers([]);
     setGreenScreenMode(false);
     setDuetMode(false);
@@ -5488,18 +4862,45 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 const idx = bakedImgUrl.indexOf('/upload/');
                 bakedImgUrl = bakedImgUrl.slice(0, idx + 8) + 'q_auto:good,f_auto,dpr_auto/' + bakedImgUrl.slice(idx + 8);
               }
+            } else {
+              // 🔍 DEBUG: this used to just fall through silently (bakedImgUrl stayed
+              // null, no logging at all) whenever Cloudinary rejected the upload
+              // (bad upload_preset, invalid signature requirement, file too large,
+              // etc). Cloudinary's response body normally names the exact reason —
+              // logging it here is the fastest way to find out what's actually wrong,
+              // instead of it later surfacing as a misleading "No internet connection".
+              const bakedErrText = await bakedRes.text().catch(() => '(could not read response body)');
+              console.error('🔍 [bakeImage upload] Cloudinary rejected the upload:', bakedRes.status, bakedErrText);
             }
-          } catch { bakedImgUrl = null; }
+          } catch (cloudErr) {
+            // 🔍 DEBUG: was `catch { bakedImgUrl = null; }` — swallowed completely,
+            // zero trace of what actually went wrong (bad file, thrown network error,
+            // malformed FormData, etc). Logging the real error here.
+            console.error('🔍 [bakeImage upload] Cloudinary upload threw:', cloudErr);
+            bakedImgUrl = null;
+          }
 
           if (!bakedImgUrl) {
             // Same Supabase storage fallback the plain-filter path below uses.
             // Blob (via fetch) instead of base64+decode() — still avoids the
             // giant JS string, only paid for if Cloudinary actually failed.
-            const fn = `${user.id}/${Date.now()}.jpg`;
-            const fileBlob = await (await fetch(bakedFileUri)).blob();
-            const { error: ie } = await supabase.storage.from('posts').upload(fn, fileBlob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
-            if (ie) throw new Error(`Upload failed: ${ie.message}`);
-            bakedImgUrl = supabase.storage.from('posts').getPublicUrl(fn).data.publicUrl;
+            try {
+              const fn = `${user.id}/${Date.now()}.jpg`;
+              const fileBlob = await (await fetch(bakedFileUri)).blob();
+              const { error: ie } = await supabase.storage.from('posts').upload(fn, fileBlob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
+              if (ie) throw new Error(`Upload failed: ${ie.message}`);
+              bakedImgUrl = supabase.storage.from('posts').getPublicUrl(fn).data.publicUrl;
+            } catch (fallbackErr) {
+              // 🔍 DEBUG: this fetch(bakedFileUri) call used to be unguarded — if it
+              // threw (e.g. RN's generic "Network request failed" on a bad local
+              // file read), the raw error propagated straight to the outer catch,
+              // which classifies ANY message containing "network"/"connection" as
+              // "No internet connection" — even though this has nothing to do with
+              // your actual internet connection. Logging the real error here so you
+              // can see what it actually says.
+              console.error('🔍 [bakeImage upload] Supabase fallback also failed:', fallbackErr);
+              throw fallbackErr;
+            }
           }
 
           finalMediaUrl = bakedImgUrl;
@@ -6252,18 +5653,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           </View>
 
-          {/* ✅ NEW: AI Edit button — shows for images only */}
-          {cameraMode === 'picture' && (
-            <TouchableOpacity
-              style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginHorizontal: 12, marginTop: 10, backgroundColor: '#0a0a1a', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: '#aa00ff44', alignSelf: 'flex-start' }}
-              onPress={() => setAiEditVisible(true)}
-            >
-              <Text style={{ fontSize: 16 }}>✨</Text>
-              <Text style={{ color: '#aa00ff', fontSize: 12, fontWeight: '800' }}>AI Edit</Text>
-              <Text style={{ color: '#555', fontSize: 10 }}>background · outfit · style</Text>
-            </TouchableOpacity>
-          )}
-
           {/* FX thumbnail strip — Snapchat-style: real cover image per effect
               (FX_IMAGES), live GL preview kicks in via hasLiveGLEffect/
               LiveEffectPreview above the moment selectedFx changes. Replaces
@@ -6350,18 +5739,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </View>
           </TouchableOpacity>
         </Modal>
-
-        {/* ✅ NEW: AI Edit modal */}
-        <AIEditPanel
-          visible={aiEditVisible}
-          imageUri={mediaUri && mediaType === 'image' ? mediaUri : null}
-          onClose={() => setAiEditVisible(false)}
-          onApply={(newUri) => {
-            setMediaUri(newUri);
-            setMediaType('image');
-            setAiEditVisible(false);
-          }}
-        />
 
         {/* Audio Studio modal */}
         <AudioStudio
@@ -6739,49 +6116,8 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
           </View>
         )}
 
-        {/* ── CAPTION ── with hashtag/mention quick-insert + AI Caption */}
+        {/* ── CAPTION ── with hashtag/mention quick-insert */}
         <View style={ms.captionBox}>
-          {/* TASK 6: AI Caption button */}
-          <TouchableOpacity
-            style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0a001a', borderRadius: 10, padding: 9, marginBottom: 8, borderWidth: 1, borderColor: '#aa00ff44' }}
-            onPress={async () => {
-              if (aiCaptionLoading) return;
-              setAiCaptionLoading(true);
-              setShowAICaptions(true);
-              const capts = await generateAICaptions(selectedVibe, selectedMusicName, location, mediaType);
-              setAiCaptions(capts);
-              setAiCaptionLoading(false);
-            }}
-          >
-            {aiCaptionLoading
-              ? <ActivityIndicator size="small" color="#aa00ff" />
-              : <Text style={{ fontSize: 14 }}>✨</Text>
-            }
-            <Text style={{ color: '#aa00ff', fontSize: 12, fontWeight: '700', flex: 1 }}>
-              {aiCaptionLoading ? 'Generating viral captions...' : 'AI Caption Generator'}
-            </Text>
-            <Feather name="chevron-down" size={14} color="#aa00ff" />
-          </TouchableOpacity>
-
-          {/* AI Captions panel */}
-          {showAICaptions && aiCaptions.length > 0 && (
-            <View style={{ backgroundColor: '#0d0d0d', borderRadius: 10, padding: 8, marginBottom: 8, borderWidth: 1, borderColor: '#aa00ff33', gap: 6 }}>
-              <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', marginBottom: 4 }}>🤖 TAP TO USE</Text>
-              {aiCaptions.map((cap, i) => (
-                <TouchableOpacity
-                  key={i}
-                  style={{ backgroundColor: '#1a0035', borderRadius: 8, padding: 9, borderWidth: 1, borderColor: '#aa00ff33' }}
-                  onPress={() => { setCaption(cap); setShowAICaptions(false); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
-                >
-                  <Text style={{ color: '#fff', fontSize: 12, lineHeight: 18 }}>{cap}</Text>
-                </TouchableOpacity>
-              ))}
-              <TouchableOpacity onPress={() => setShowAICaptions(false)} style={{ alignItems: 'center', paddingTop: 4 }}>
-                <Text style={{ color: '#555', fontSize: 10 }}>Dismiss</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
           <TextInput
             style={ms.captionInput}
             value={caption}

@@ -6,12 +6,16 @@
 // ✅ Fixed navigate() call using expo-router's object-style syntax —
 //    converted to `navigate('GroupChat', { id: group.id })`.
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, SafeAreaView, StatusBar, Image,
+  StyleSheet, StatusBar, Image,
   ActivityIndicator, Alert, ScrollView, KeyboardAvoidingView, Platform,
 } from 'react-native';
+// FIX: plain react-native's SafeAreaView is iOS-only (a no-op View on
+// Android) — same bug already fixed in group/[id].tsx and circle/[id].tsx,
+// just missed here. This is why the header was clipping under the status bar.
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
@@ -41,7 +45,36 @@ export default function NewGroupScreen() {
   const [loading,     setLoading]     = useState(true);
   const [creating,    setCreating]    = useState(false);
 
+  // FEATURE: New Group used to only ever show your accepted friends, so
+  // with zero friends there was no one to pick and the screen looked
+  // "broken." Typing 2+ characters now searches ALL platform users by
+  // username/display name (like Telegram's "search everyone" fallback),
+  // not just people you're already connected to.
+  const [searchResults, setSearchResults] = useState<Friend[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => { loadFriends(); }, []);
+
+  useEffect(() => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    const q = search.trim();
+    if (q.length < 2) { setSearchResults([]); setSearchLoading(false); return; }
+    setSearchLoading(true);
+    searchDebounceRef.current = setTimeout(async () => {
+      try {
+        const { data } = await supabase
+          .from('users')
+          .select('id, username, display_name, photo_url')
+          .or(`username.ilike.%${q}%,display_name.ilike.%${q}%`)
+          .neq('id', user?.id || '')
+          .limit(20);
+        setSearchResults(data || []);
+      } catch (e) { console.error('searchAllUsers error:', e); }
+      finally { setSearchLoading(false); }
+    }, 350);
+    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); };
+  }, [search, user?.id]);
 
   const loadFriends = async () => {
     if (!user?.id) { setLoading(false); return; }
@@ -97,9 +130,14 @@ export default function NewGroupScreen() {
     } finally { setCreating(false); }
   };
 
-  const filtered = friends.filter(f =>
-    !search || f.display_name?.toLowerCase().includes(search.toLowerCase())
-  );
+  // While searching (2+ chars), show platform-wide results; otherwise
+  // fall back to the friends list filtered locally by name.
+  const isSearchingAllUsers = search.trim().length >= 2;
+  const filtered = isSearchingAllUsers
+    ? searchResults
+    : friends.filter(f =>
+        !search || f.display_name?.toLowerCase().includes(search.toLowerCase())
+      );
 
   return (
     <SafeAreaView style={s.safe}>
@@ -167,20 +205,22 @@ export default function NewGroupScreen() {
           <View style={s.searchBar}>
             <Ionicons name="search-outline" size={15} color={C.muted} />
             <TextInput
-              style={s.searchInput} placeholder="Search friends…"
+              style={s.searchInput} placeholder="Search friends or find anyone…"
               placeholderTextColor={C.muted2} value={search} onChangeText={setSearch}
             />
           </View>
 
-          <Text style={[s.label, { paddingHorizontal: 20, marginBottom: 8 }]}>Friends</Text>
+          <Text style={[s.label, { paddingHorizontal: 20, marginBottom: 8 }]}>
+            {isSearchingAllUsers ? 'Search Results' : 'Friends'}
+          </Text>
 
-          {loading
+          {(isSearchingAllUsers ? searchLoading : loading)
             ? <ActivityIndicator color={C.green} style={{ marginTop: 40 }} />
             : filtered.length === 0
             ? <View style={{ alignItems: 'center', paddingTop: 50 }}>
                 <Ionicons name="people-outline" size={48} color={C.border} />
                 <Text style={{ color: C.muted, marginTop: 12, fontSize: 14 }}>
-                  {search ? 'No friends match your search' : 'No friends yet'}
+                  {isSearchingAllUsers ? 'No users found' : 'No friends yet — try searching a username above'}
                 </Text>
               </View>
             : filtered.map(friend => {

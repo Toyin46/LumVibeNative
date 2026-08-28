@@ -15,8 +15,11 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TextInput, FlatList, TouchableOpacity,
-  StyleSheet, SafeAreaView, StatusBar, ActivityIndicator, Image,
+  StyleSheet, StatusBar, ActivityIndicator, Image,
 } from 'react-native';
+// FIX: same iOS-only SafeAreaView bug found in new-group.tsx and
+// new-circle.tsx — plain react-native's version is a no-op on Android.
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 import { useNavigation } from '@react-navigation/native';

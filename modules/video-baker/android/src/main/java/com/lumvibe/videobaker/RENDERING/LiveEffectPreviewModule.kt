@@ -110,8 +110,13 @@ class LiveEffectPreviewModule : Module() {
                 return@AsyncFunction
             }
             view.post {
-                view.stopRecording(finalOutputPath) { resultPath ->
-                    promise.resolve(resultPath)
+                // ✅ DIAGNOSTIC: used to resolve with just the bare path string,
+                // so a silently-audio-less recording looked IDENTICAL to a normal
+                // one from JS's side - no way to tell without adb logcat. Now
+                // resolves with {path, audioStatus} so create.tsx can log/show
+                // exactly what happened with audio right after every recording.
+                view.stopRecording(finalOutputPath) { resultPath, audioStatus ->
+                    promise.resolve(mapOf("path" to resultPath, "audioStatus" to audioStatus))
                 }
             }
         }

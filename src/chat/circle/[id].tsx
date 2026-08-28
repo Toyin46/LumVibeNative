@@ -24,6 +24,7 @@ import {
 // iOS-only (a no-op View on Android); the safe-area-context version works
 // on both platforms.
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
@@ -51,7 +52,7 @@ interface CircleInfo {
 }
 interface CirclePost {
   id: string; circle_id: string; author_id: string; created_at: string;
-  content?: string; media_url?: string; message_type: string;
+  content?: string; media_url?: string; media_duration?: number; message_type: string;
   reactions?: { emoji: string; user_id: string }[];
 }
 
@@ -77,6 +78,13 @@ export default function CircleScreen() {
 
   const { user } = useAuthStore();
   const channelRef = useRef<RealtimeChannel | null>(null);
+  // FEATURE: Circles could only post text/images — WhatsApp/Telegram
+  // channels also let the owner broadcast voice notes. Same recorder
+  // setup and start/stop race-condition fix as group/[id].tsx.
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopRequestedRef = useRef(false);
+  const isStartingRef    = useRef(false);
 
   const [circle,       setCircle]       = useState<CircleInfo | null>(null);
   const [posts,        setPosts]        = useState<CirclePost[]>([]);
@@ -84,6 +92,8 @@ export default function CircleScreen() {
   const [isSubscribed, setIsSubscribed] = useState(false);
   const [inputText,    setInputText]    = useState('');
   const [posting,      setPosting]      = useState(false);
+  const [isRecording,  setIsRecording]  = useState(false);
+  const [recDur,       setRecDur]       = useState(0);
   const [selectedPost, setSelectedPost] = useState<CirclePost | null>(null);
   const [showReact,    setShowReact]    = useState(false);
 
@@ -101,10 +111,17 @@ export default function CircleScreen() {
 
   const loadCircle = async () => {
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('circles')
         .select('*, owner:owner_id (id, display_name, username, photo_url)')
         .eq('id', id).single();
+      if (error) {
+        // TEMP DEBUG — the policies on `circles` look correct on paper, so
+        // this will tell us exactly what Supabase is actually rejecting
+        // instead of guessing further. Remove this Alert once confirmed.
+        console.error('loadCircle error:', error);
+        Alert.alert('Debug: loadCircle failed', error.message);
+      }
       if (data) {
         setCircle({ ...data, owner: Array.isArray(data.owner) ? data.owner[0] : data.owner });
       }
@@ -201,6 +218,54 @@ export default function CircleScreen() {
     finally { setPosting(false); }
   };
 
+  const startRecording = async () => {
+    stopRequestedRef.current = false;
+    isStartingRef.current = true;
+    try {
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permission needed', 'Allow microphone access to send voice notes.');
+        return;
+      }
+      await AudioModule.setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await audioRecorder.prepareToRecordAsync();
+      if (stopRequestedRef.current) return; // user already let go — don't start at all
+      audioRecorder.record();
+      setIsRecording(true); setRecDur(0);
+      recordTimerRef.current = setInterval(() => setRecDur(p => p + 1), 1000);
+    } catch (e) { console.error(e); }
+    finally { isStartingRef.current = false; }
+  };
+
+  const stopRecording = async () => {
+    stopRequestedRef.current = true;
+    if (isStartingRef.current) return; // nothing recording yet — startRecording will bail itself out
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    if (!user?.id) return;
+    try {
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
+      setIsRecording(false);
+      if (uri && recDur > 0) {
+        setPosting(true);
+        const formData = new FormData();
+        formData.append('file', { uri, type: 'audio/m4a', name: `voice_${Date.now()}.m4a` } as any);
+        formData.append('upload_preset', UPLOAD_PRESET);
+        formData.append('folder', 'kinsta_circles/voices');
+        const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`, { method: 'POST', body: formData });
+        if (res.ok) {
+          const data = await res.json();
+          await supabase.from('circle_posts').insert({
+            circle_id: id, author_id: user.id, message_type: 'voice',
+            media_url: data.secure_url, media_duration: recDur,
+          });
+        }
+        setPosting(false);
+      }
+    } catch (e) { console.error(e); }
+    setRecDur(0);
+  };
+
   const handleReaction = async (emoji: string) => {
     if (!selectedPost || !user?.id) return;
     setShowReact(false);
@@ -238,6 +303,16 @@ export default function CircleScreen() {
 
         {item.message_type === 'image' && item.media_url
           ? <Image source={{ uri: item.media_url }} style={ps.postImg} resizeMode="cover" />
+          : item.message_type === 'voice' && item.media_url
+          ? <View style={ps.voiceRow}>
+              <View style={ps.voiceIconWrap}>
+                <Ionicons name="mic" size={16} color={C.green} />
+              </View>
+              <View style={ps.voiceBar} />
+              <Text style={ps.voiceDur}>
+                {item.media_duration ? `${Math.floor(item.media_duration / 60)}:${(item.media_duration % 60).toString().padStart(2, '0')}` : '0:00'}
+              </Text>
+            </View>
           : item.content
           ? <Text style={ps.postText}>{item.content}</Text>
           : null}
@@ -325,20 +400,33 @@ export default function CircleScreen() {
             <TouchableOpacity style={s.attachBtn} onPress={postImage} disabled={posting}>
               <Ionicons name="image-outline" size={20} color={C.muted} />
             </TouchableOpacity>
-            <View style={s.inputWrap}>
-              <TextInput
-                style={s.input}
-                placeholder="Post to your Circle…"
-                placeholderTextColor={C.muted2}
-                value={inputText}
-                onChangeText={setInputText}
-                multiline maxLength={1000}
-              />
+            <TouchableOpacity
+              style={[s.micBtn, isRecording && { borderColor: '#e53935' }]}
+              onPressIn={startRecording} onPressOut={stopRecording}
+              disabled={posting}
+            >
+              {isRecording
+                ? <Text style={{ color: '#e53935', fontSize: 9, fontWeight: '700' }}>
+                    {`${Math.floor(recDur / 60)}:${(recDur % 60).toString().padStart(2, '0')}`}
+                  </Text>
+                : <Ionicons name="mic-outline" size={18} color={C.muted} />}
+            </TouchableOpacity>
+            <View style={[s.inputWrap, isRecording && { borderColor: '#e53935' }]}>
+              {isRecording
+                ? <Text style={{ color: '#e53935', fontSize: 13, paddingVertical: 10 }}>🔴 Recording…</Text>
+                : <TextInput
+                    style={s.input}
+                    placeholder="Post to your Circle…"
+                    placeholderTextColor={C.muted2}
+                    value={inputText}
+                    onChangeText={setInputText}
+                    multiline maxLength={1000}
+                  />}
             </View>
             <TouchableOpacity
-              style={[s.sendBtn, (!inputText.trim() || posting) && { opacity: 0.4 }]}
+              style={[s.sendBtn, (!inputText.trim() || posting || isRecording) && { opacity: 0.4 }]}
               onPress={postText}
-              disabled={!inputText.trim() || posting}
+              disabled={!inputText.trim() || posting || isRecording}
             >
               {posting
                 ? <ActivityIndicator size="small" color="#000" />
@@ -375,6 +463,10 @@ const ps = StyleSheet.create({
   reactPill:  { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 20, paddingVertical: 3, paddingHorizontal: 8 },
   reactCount: { fontSize: 11, color: C.white, fontWeight: '600' },
   reactHint:  { fontSize: 10, color: C.muted2, marginTop: 8 },
+  voiceRow:   { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+  voiceIconWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: C.greenBg, alignItems: 'center', justifyContent: 'center' },
+  voiceBar:   { flex: 1, height: 3, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 2 },
+  voiceDur:   { fontSize: 11, color: C.muted },
 });
 
 const s = StyleSheet.create({
@@ -391,6 +483,7 @@ const s = StyleSheet.create({
   descText:  { fontSize: 13, color: C.muted, lineHeight: 20 },
   composer:  { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingBottom: Platform.OS === 'ios' ? 24 : 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.border, backgroundColor: C.black },
   attachBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: C.card, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  micBtn:    { width: 40, height: 40, borderRadius: 20, backgroundColor: C.card, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
   inputWrap: { flex: 1, backgroundColor: C.card, borderWidth: 1.5, borderColor: C.border, borderRadius: 22, paddingHorizontal: 12 },
   input:     { color: C.white, fontSize: 14, paddingVertical: 10, maxHeight: 80 },
   sendBtn:   { width: 44, height: 44, borderRadius: 22, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center' },

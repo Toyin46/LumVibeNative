@@ -79,6 +79,18 @@ class LiveRecorder(
     @Volatile private var audioRecording = false
     private var actualSampleRate = AUDIO_SAMPLE_RATE
 
+    /**
+     * ✅ DIAGNOSTIC (added so audio failures are visible from JS, not just
+     * Logcat): human-readable status of the LAST audio attempt. Every early
+     * return in startAudio() and every fallback branch in finalizeRecording()
+     * now writes a specific reason here instead of only logging it. Read this
+     * right after stopRecording() resolves in JS to see exactly what happened -
+     * see LiveEffectPreviewModule.kt's stopRecording result and create.tsx's
+     * console.warn after ensureFireVideoCached()/stopRecording().
+     */
+    @Volatile var audioStatus: String = "not started"
+        private set
+
     @Volatile var isRecording = false
         private set
 
@@ -124,6 +136,7 @@ class LiveRecorder(
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
+            audioStatus = "no audio: RECORD_AUDIO permission not granted at the moment recording started"
             Log.w(TAG, "RECORD_AUDIO not granted - recording without audio. " +
                 "This is very likely why exported videos have been silent: " +
                 "confirm the permission is actually being requested/granted at " +
@@ -138,6 +151,7 @@ class LiveRecorder(
             // the requested sample rate; if this ever happens in practice the
             // safe fallback is to skip audio entirely rather than crash the
             // whole recording - a silent video is recoverable, a crash isn't.
+            audioStatus = "no audio: AudioRecord.getMinBufferSize rejected 44100Hz/mono/16-bit on this device"
             Log.w(TAG, "AudioRecord.getMinBufferSize failed, recording without audio")
             return
         }
@@ -148,30 +162,44 @@ class LiveRecorder(
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize
             )
         } catch (e: Exception) {
+            audioStatus = "no audio: AudioRecord() constructor threw - ${e.message}"
             Log.w(TAG, "AudioRecord init failed, recording without audio", e)
             return
         }
         if (record.state != AudioRecord.STATE_INITIALIZED) {
+            // Common real-world cause: the mic input is already held by another
+            // active AudioRecord/MediaRecorder session (e.g. vision-camera's own
+            // Camera component hasn't fully released its audio session yet if it
+            // was unmounted a split-second before this LiveEffectPreview mounted).
+            audioStatus = "no audio: AudioRecord created but never reached STATE_INITIALIZED " +
+                "(often means the mic is already in use by another active recording session)"
             Log.w(TAG, "AudioRecord not initialized, recording without audio")
             return
         }
         actualSampleRate = AUDIO_SAMPLE_RATE
         audioRecord = record
         audioRecording = true
+        audioStatus = "capturing"
         val out = FileOutputStream(pcmPath)
         val thread = Thread {
             val buf = ByteArray(bufSize)
             record.startRecording()
+            var bytesWritten = 0L
             try {
                 while (audioRecording) {
                     val read = record.read(buf, 0, buf.size)
-                    if (read > 0) out.write(buf, 0, read)
+                    if (read > 0) { out.write(buf, 0, read); bytesWritten += read }
                 }
             } catch (e: Exception) {
+                audioStatus = "no audio: capture loop threw mid-recording - ${e.message}"
                 Log.w(TAG, "audio capture loop error", e)
             } finally {
                 try { record.stop() } catch (e: Exception) { /* already stopped/released elsewhere */ }
                 try { out.close() } catch (e: Exception) { /* best-effort */ }
+                if (audioStatus == "capturing") {
+                    audioStatus = if (bytesWritten > 0) "captured ${bytesWritten} bytes of PCM"
+                                  else "no audio: capture loop ran but AudioRecord.read() never returned any bytes"
+                }
             }
         }
         thread.start()
@@ -264,6 +292,9 @@ class LiveRecorder(
             // No audio captured - the video-only file IS the final file, just
             // rename/copy it to the expected output path so callers always
             // get a consistent path back regardless of whether audio worked.
+            if (audioStatus == "not started" || audioStatus == "capturing") {
+                audioStatus = "no audio: no PCM file was ever written (see audioStatus from startAudio for why)"
+            }
             File(videoOnlyPath).copyTo(File(outputPath), overwrite = true)
             return outputPath
         }
@@ -273,6 +304,7 @@ class LiveRecorder(
             encodePcmToAac(pcmFile, aacPath)
             true
         } catch (e: Exception) {
+            audioStatus = "no audio: PCM was captured but AAC encoding failed - ${e.message}"
             Log.w(TAG, "audio encode failed, falling back to silent video", e)
             false
         }
@@ -283,8 +315,10 @@ class LiveRecorder(
 
         return try {
             muxVideoAndAudio(videoOnlyPath, aacPath, outputPath)
+            audioStatus = "ok: audio muxed into final file"
             outputPath
         } catch (e: Exception) {
+            audioStatus = "no audio: AAC encoded fine but final mux with video failed - ${e.message}"
             Log.w(TAG, "final mux failed, falling back to silent video", e)
             File(videoOnlyPath).copyTo(File(outputPath), overwrite = true)
             outputPath

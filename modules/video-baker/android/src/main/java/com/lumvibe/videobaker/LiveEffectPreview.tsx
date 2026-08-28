@@ -65,12 +65,19 @@ export interface LiveEffectPreviewHandle {
   startRecording: (videoOnlyPath: string, pcmPath: string) => Promise<void>;
   /**
    * Stops recording and finalizes the real, playable output file at
-   * finalOutputPath. Resolves with the actual final path once ready - this
-   * can take a brief moment after the recording itself stops (see
-   * LiveRecorder.kt's finalizeRecording() docs for why), so callers should
-   * show a short "processing" state rather than assume it's instant.
+   * finalOutputPath. Resolves once ready - this can take a brief moment
+   * after the recording itself stops (see LiveRecorder.kt's
+   * finalizeRecording() docs for why), so callers should show a short
+   * "processing" state rather than assume it's instant.
+   *
+   * ✅ DIAGNOSTIC: resolves with {path, audioStatus} rather than a bare path
+   * string. audioStatus is a human-readable string from LiveRecorder.kt
+   * describing exactly what happened with audio on this recording (e.g.
+   * "ok: audio muxed into final file" or a specific "no audio: ..." reason).
+   * Log/inspect this after every recording instead of guessing why a video
+   * came out silent - see create.tsx's handleStopRecording.
    */
-  stopRecording: (finalOutputPath: string) => Promise<string>;
+  stopRecording: (finalOutputPath: string) => Promise<{ path: string; audioStatus: string }>;
   /**
    * Captures a single photo from the live effect pipeline (already
    * composited with whatever GL effect is active) to outputPath. Fixes
@@ -105,8 +112,8 @@ export const LiveEffectPreview = forwardRef<LiveEffectPreviewHandle, LiveEffectP
         if (tag == null) {
           throw new Error('LiveEffectPreview: could not resolve native view tag - is the view mounted?');
         }
-        const resultPath: string = await NativeLiveEffectPreviewModule.stopLiveRecording(tag, finalOutputPath);
-        return resultPath;
+        const result: { path: string; audioStatus: string } = await NativeLiveEffectPreviewModule.stopLiveRecording(tag, finalOutputPath);
+        return result;
       },
       capturePhoto: async (outputPath: string) => {
         const tag = findNodeHandle(nativeRef.current);

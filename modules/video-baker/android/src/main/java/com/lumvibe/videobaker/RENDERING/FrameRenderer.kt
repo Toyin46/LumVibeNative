@@ -120,6 +120,60 @@ class FrameRenderer(private val context: Context) {
     private val vertexBuffer: FloatBuffer = makeBuffer(vertexCoords)
     private val texCoordBuffer: FloatBuffer = makeBuffer(textureCoords)
 
+    // ✅ FIX (camera preview "too long"/stretched on the live path): drawVideoFrame()
+    // and drawEffectFrame() used to sample the camera texture with the plain,
+    // uncropped 0..1 texCoordBuffer above, unconditionally. That's exactly right
+    // for VideoTranscoder's bake path, where the render target is always the
+    // same aspect ratio as the source video (no mismatch possible). It's wrong
+    // for the live preview path: the camera can only capture in its own fixed
+    // sensor aspect ratios (commonly 4:3 or 16:9 - see chooseCameraOutputSize's
+    // own fix for the size-selection half of this bug), while the on-screen
+    // surface is the phone's actual screen shape (often ~9:19.5+, much taller/
+    // narrower than any camera size). Sampling the FULL camera buffer into a
+    // differently-shaped quad is a non-uniform stretch - that's the "too long"
+    // symptom. cameraTexCoordBuffer holds a CENTER-CROPPED version of the
+    // standard quad: same four corners, same winding order as textureCoords,
+    // just inset on whichever axis needs it so the sampled REGION already has
+    // the output's aspect ratio, matching how a normal camera app's preview
+    // behaves (crop-to-fill, never stretch). It deliberately does NOT touch
+    // rotation/mirroring in any way - see overlayTexCoordBuffer's comment above
+    // for why a previous rotation-motivated texture-coordinate change here
+    // caused a real regression; this only ever computes a symmetric inset
+    // around the existing 0..1 bounds, which cannot introduce a flip or rotate
+    // anything, on top of whatever this pipeline already does correctly for
+    // orientation today.
+    //
+    // Starts as an alias of the plain, uncropped texCoordBuffer (zero behavior
+    // change) until setOutputSize() is called with a real output size that
+    // actually differs in aspect from frameWidth/frameHeight - VideoTranscoder
+    // never calls it, so the bake path is provably unaffected by this.
+    private var cameraTexCoordBuffer: FloatBuffer = texCoordBuffer
+    private var outputW = -1
+    private var outputH = -1
+
+    private fun rebuildCameraTexCoords() {
+        if (outputW <= 0 || outputH <= 0) { cameraTexCoordBuffer = texCoordBuffer; return }
+        val camAspect = frameWidth.toFloat() / frameHeight.toFloat()
+        val outAspect = outputW.toFloat() / outputH.toFloat()
+        var u0 = 0f; var v0 = 0f; var u1 = 1f; var v1 = 1f
+        if (camAspect > outAspect) {
+            // Camera buffer is proportionally WIDER than the output - crop its
+            // width (sample a narrower horizontal slice), keep full height.
+            val cropW = outAspect / camAspect
+            val inset = (1f - cropW) / 2f
+            u0 = inset; u1 = 1f - inset
+        } else if (camAspect < outAspect) {
+            // Camera buffer is proportionally TALLER than the output - crop its
+            // height (sample a shorter vertical slice), keep full width.
+            val cropH = camAspect / outAspect
+            val inset = (1f - cropH) / 2f
+            v0 = inset; v1 = 1f - inset
+        }
+        // Same corner order as textureCoords = [0,0, 1,0, 0,1, 1,1] above, just
+        // with the cropped bounds substituted in for 0/1.
+        cameraTexCoordBuffer = makeBuffer(floatArrayOf(u0, v0, u1, v0, u0, v1, u1, v1))
+    }
+
     // Caption/watermark textures come from an Android Canvas Bitmap uploaded via
     // GLUtils.texImage2D, drawn onto a fixed, un-rotated quad  -  they're already in
     // correct upright screen orientation and should be drawn with the plain
@@ -269,6 +323,19 @@ class FrameRenderer(private val context: Context) {
     fun setFrameSize(width: Int, height: Int) {
         frameWidth = width.coerceAtLeast(1)
         frameHeight = height.coerceAtLeast(1)
+        rebuildCameraTexCoords()
+    }
+
+    /**
+     * The actual on-screen render target size (surfaceW x surfaceH in
+     * LiveEffectPreviewView.kt). Only the live preview path calls this -
+     * VideoTranscoder's bake path never does, so its draws keep using the
+     * plain uncropped texCoordBuffer exactly as before this fix.
+     */
+    fun setOutputSize(width: Int, height: Int) {
+        outputW = width.coerceAtLeast(1)
+        outputH = height.coerceAtLeast(1)
+        rebuildCameraTexCoords()
     }
 
     fun setEffect(effect: VisualEffect) {
@@ -307,7 +374,7 @@ class FrameRenderer(private val context: Context) {
         GLES20.glUniform1f(uContrast, contrast)
         GLES20.glUniform1f(uSaturation, saturation)
 
-        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
+        drawQuad(vertexBuffer, cameraTexCoordBuffer, aPosition, aTexCoord)
     }
 
     /**
@@ -438,7 +505,7 @@ class FrameRenderer(private val context: Context) {
             }
         }
 
-        drawQuad(vertexBuffer, texCoordBuffer, aPosition, aTexCoord)
+        drawQuad(vertexBuffer, cameraTexCoordBuffer, aPosition, aTexCoord)
     }
 
     /**
@@ -447,11 +514,27 @@ class FrameRenderer(private val context: Context) {
      * drawVideoFrame() (plain, no effect shader) so what gets frozen is the clean
      * video frame  -  not a half-composited overlay/effect frame. VideoTranscoder
      * calls this exactly once, on the frame a blink is first detected.
+     *
+     * ✅ FIX (Blink Freeze showing as GPU garbage/noise on the live path): this
+     * used to hardcode frameWidth/frameHeight as the copy region, which is only
+     * correct when the CURRENTLY BOUND framebuffer actually IS frameWidth x
+     * frameHeight - true for VideoTranscoder's offscreen bake target, but false
+     * for LiveEffectPreviewView's on-screen path, where frameWidth/frameHeight
+     * holds the camera's own capture size (chooseCameraOutputSize, capped at
+     * ~1920x1080) while the actually-bound framebuffer at this call site is the
+     * on-screen display surface (surfaceW x surfaceH - the phone's full screen,
+     * a different size AND aspect ratio). glCopyTexImage2D reading a region
+     * larger than the real bound framebuffer is invalid and leaves the texture
+     * full of undefined GPU memory - that's the shattered/static look, not a
+     * shader bug. [width]/[height] now default to the old frameWidth/frameHeight
+     * so VideoTranscoder's existing call site needs no change at all; the live
+     * path must pass the real current surface size explicitly (see
+     * LiveEffectPreviewView.kt's call site).
      */
-    fun captureFreezeFrame() {
+    fun captureFreezeFrame(width: Int = frameWidth, height: Int = frameHeight) {
         ensureFrozenTexture()
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, frozenTextureId)
-        GLES20.glCopyTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 0, 0, frameWidth, frameHeight, 0)
+        GLES20.glCopyTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 0, 0, width, height, 0)
         GlUtil.checkGlError("captureFreezeFrame glCopyTexImage2D")
     }
 
