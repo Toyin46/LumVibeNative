@@ -38,11 +38,15 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, TextInput,
-  StyleSheet, SafeAreaView, StatusBar, RefreshControl,
+  StyleSheet, StatusBar, RefreshControl,
   Image, ScrollView, ActivityIndicator, Alert, Modal,
   TouchableWithoutFeedback, Dimensions,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+// FIX: same iOS-only SafeAreaView bug found and fixed across the chat
+// folder this session (new.tsx, new-group.tsx, new-circle.tsx) — plain
+// react-native's version is a no-op View on Android.
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
@@ -238,23 +242,24 @@ async function fetchCircles(userId: string): Promise<Circle[]> {
 
 async function respondToFriendRequest(
   requestId: string, action: 'accepted' | 'declined'
-): Promise<void> {
+): Promise<{ error: string | null }> {
   try {
-    await supabase.from('friend_requests').update({ status: action }).eq('id', requestId);
-  } catch (e) { console.error('respondToFriendRequest error:', e); }
+    const { error } = await supabase.from('friend_requests').update({ status: action }).eq('id', requestId);
+    if (error) return { error: error.message };
+    return { error: null };
+  } catch (e: any) { return { error: e?.message || 'Failed to respond to request.' }; }
 }
 
 async function toggleCircleSubscription(
   circleId: string, userId: string, isSubscribed: boolean
-): Promise<void> {
+): Promise<{ error: string | null }> {
   try {
-    if (isSubscribed) {
-      await supabase.from('circle_subscribers').delete()
-        .eq('circle_id', circleId).eq('user_id', userId);
-    } else {
-      await supabase.from('circle_subscribers').insert({ circle_id: circleId, user_id: userId });
-    }
-  } catch (e) { console.error('toggleCircleSubscription error:', e); }
+    const { error } = isSubscribed
+      ? await supabase.from('circle_subscribers').delete().eq('circle_id', circleId).eq('user_id', userId)
+      : await supabase.from('circle_subscribers').insert({ circle_id: circleId, user_id: userId });
+    if (error) return { error: error.message };
+    return { error: null };
+  } catch (e: any) { return { error: e?.message || 'Failed to update subscription.' }; }
 }
 
 async function fetchStories(currentUserId: string): Promise<Story[]> {
@@ -395,10 +400,19 @@ function StoryViewer({
   if (!story) return;
   const markViewed = async () => {
     try {
-      await supabase.from('story_views').insert({
-        story_id: story.id, viewer_id: currentUserId,
-      });
-    } catch {}
+      // FIX: this used to blindly insert into story_views every time and
+      // never touched view_count at all — so profile story view counts
+      // never moved, and repeat views could silently duplicate rows.
+      // Same check-then-insert-then-increment pattern now used by the new
+      // per-chat/group/circle ContextStoryBar viewer.
+      const { data: existing } = await supabase
+        .from('story_views').select('story_id')
+        .eq('story_id', story.id).eq('viewer_id', currentUserId).maybeSingle();
+      if (!existing) {
+        await supabase.from('story_views').insert({ story_id: story.id, viewer_id: currentUserId });
+        await supabase.from('stories').update({ view_count: (story.view_count || 0) + 1 }).eq('id', story.id);
+      }
+    } catch (e) { console.error('markViewed error:', e); }
   };
   markViewed();
 }, [story?.id]);
@@ -459,6 +473,12 @@ function StoryViewer({
             <Text style={viewerStyles.captionText}>{story.caption}</Text>
           </View>
         ) : null}
+
+        {/* View count — was tracked in the DB but never actually shown */}
+        <View style={viewerStyles.viewCountWrap}>
+          <Ionicons name="eye-outline" size={13} color="rgba(255,255,255,0.7)" />
+          <Text style={viewerStyles.viewCountText}>{story.view_count || 0}</Text>
+        </View>
 
         {/* Tap zones — left goes back, right goes forward */}
         <View style={viewerStyles.tapZones}>
@@ -718,15 +738,34 @@ export default function MessagesScreen() {
     };
   }, [user?.id, loadAll]);
 
+  // FIX: this screen previously only ever fetched data once, on mount.
+  // subscribeConversations() only listens for DM-related tables
+  // (conversations/messages) — it was never told about group_members or
+  // circle_subscribers. Since this screen sits at the bottom of the stack
+  // the whole time (creation screens are pushed on top of it), coming
+  // back after making a group or circle never re-triggered a reload at
+  // all — the exact "erase after going back" symptom. This refetches
+  // every time the screen regains focus, on top of the mount-time load
+  // and subscription above (which stay as-is, so the realtime channel
+  // isn't torn down and rebuilt on every focus).
+  useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
+
   const handleRefresh = () => { setRefreshing(true); loadAll(); };
 
   const handleAcceptRequest = async (request: FriendRequest) => {
-    await respondToFriendRequest(request.id, 'accepted');
+    // FIX: this used to remove the request from the list unconditionally,
+    // even if the update silently failed — meaning a blocked accept would
+    // make the request just vanish with the two of you never actually
+    // becoming friends, and no error shown. Same silent-failure pattern
+    // fixed in cowatch.tsx/group/[id].tsx/circle/[id].tsx earlier.
+    const { error } = await respondToFriendRequest(request.id, 'accepted');
+    if (error) { Alert.alert('Error', error); return; }
     setRequests(prev => prev.filter(r => r.id !== request.id));
   };
 
   const handleDeclineRequest = async (request: FriendRequest) => {
-    await respondToFriendRequest(request.id, 'declined');
+    const { error } = await respondToFriendRequest(request.id, 'declined');
+    if (error) { Alert.alert('Error', error); return; }
     setRequests(prev => prev.filter(r => r.id !== request.id));
   };
 
@@ -736,7 +775,14 @@ export default function MessagesScreen() {
       ? { ...c, is_subscribed: !c.is_subscribed,
           subscriber_count: c.is_subscribed ? c.subscriber_count - 1 : c.subscriber_count + 1 }
       : c));
-    await toggleCircleSubscription(circle.id, user.id, circle.is_subscribed || false);
+    const { error } = await toggleCircleSubscription(circle.id, user.id, circle.is_subscribed || false);
+    if (error) {
+      // roll back the optimistic update since it didn't actually happen
+      setCircles(prev => prev.map(c => c.id === circle.id
+        ? { ...c, is_subscribed: circle.is_subscribed, subscriber_count: circle.subscriber_count }
+        : c));
+      Alert.alert('Error', error);
+    }
   };
 
   // FIX: real screen name + real param shape from ChatStackParamList,
@@ -1112,6 +1158,11 @@ const viewerStyles = StyleSheet.create({
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     flexDirection: 'row', zIndex: 5,
   },
+  viewCountWrap: {
+    position: 'absolute', bottom: 24, left: 16,
+    flexDirection: 'row', alignItems: 'center', gap: 4, zIndex: 10,
+  },
+  viewCountText: { color: 'rgba(255,255,255,0.7)', fontSize: 12 },
 });
 
 // ── STYLES ────────────────────────────────────────────────────

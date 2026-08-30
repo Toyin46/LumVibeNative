@@ -26,6 +26,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
+import ContextStoryBar from '../components/ContextStoryBar';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../../config/supabase';
@@ -115,13 +116,7 @@ export default function CircleScreen() {
         .from('circles')
         .select('*, owner:owner_id (id, display_name, username, photo_url)')
         .eq('id', id).single();
-      if (error) {
-        // TEMP DEBUG — the policies on `circles` look correct on paper, so
-        // this will tell us exactly what Supabase is actually rejecting
-        // instead of guessing further. Remove this Alert once confirmed.
-        console.error('loadCircle error:', error);
-        Alert.alert('Debug: loadCircle failed', error.message);
-      }
+      if (error) { console.error('loadCircle error:', error); return; }
       if (data) {
         setCircle({ ...data, owner: Array.isArray(data.owner) ? data.owner[0] : data.owner });
       }
@@ -189,11 +184,15 @@ export default function CircleScreen() {
     if (!text || !user?.id) return;
     setInputText(''); setPosting(true);
     try {
-      await supabase.from('circle_posts').insert({
+      const { error } = await supabase.from('circle_posts').insert({
         circle_id: id, author_id: user.id, message_type: 'text', content: text,
       });
+      if (error) throw error;
       await supabase.from('circles').update({ last_post: text, last_post_at: new Date().toISOString() }).eq('id', id);
-    } catch (e) { Alert.alert('Error', 'Failed to post.'); }
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to post.');
+      setInputText(text);
+    }
     finally { setPosting(false); }
   };
 
@@ -211,10 +210,11 @@ export default function CircleScreen() {
       const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`, { method: 'POST', body: formData });
       if (!res.ok) { Alert.alert('Upload failed', 'Try again.'); return; }
       const data = await res.json();
-      await supabase.from('circle_posts').insert({
+      const { error } = await supabase.from('circle_posts').insert({
         circle_id: id, author_id: user.id, message_type: 'image', media_url: data.secure_url,
       });
-    } catch (e) { Alert.alert('Error', 'Failed to post image.'); }
+      if (error) throw error;
+    } catch (e: any) { Alert.alert('Error', e?.message || 'Failed to post image.'); }
     finally { setPosting(false); }
   };
 
@@ -228,12 +228,26 @@ export default function CircleScreen() {
         return;
       }
       await AudioModule.setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-      await audioRecorder.prepareToRecordAsync();
+      try {
+        await audioRecorder.prepareToRecordAsync();
+      } catch (prepErr: any) {
+        // FIX: same expo-audio "already prepared" state quirk as group chat —
+        // force-release the stuck session and retry once.
+        if (String(prepErr?.message || prepErr).includes('already been prepared')) {
+          await audioRecorder.stop().catch(() => {});
+          await audioRecorder.prepareToRecordAsync();
+        } else {
+          throw prepErr;
+        }
+      }
       if (stopRequestedRef.current) return; // user already let go — don't start at all
       audioRecorder.record();
       setIsRecording(true); setRecDur(0);
       recordTimerRef.current = setInterval(() => setRecDur(p => p + 1), 1000);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Recording error', 'Could not start recording — try again.');
+    }
     finally { isStartingRef.current = false; }
   };
 
@@ -255,10 +269,13 @@ export default function CircleScreen() {
         const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`, { method: 'POST', body: formData });
         if (res.ok) {
           const data = await res.json();
-          await supabase.from('circle_posts').insert({
+          const { error } = await supabase.from('circle_posts').insert({
             circle_id: id, author_id: user.id, message_type: 'voice',
             media_url: data.secure_url, media_duration: recDur,
           });
+          if (error) Alert.alert('Error', error.message);
+        } else {
+          Alert.alert('Upload failed', 'Try again.');
         }
         setPosting(false);
       }
@@ -363,7 +380,19 @@ export default function CircleScreen() {
             </Text>
           </TouchableOpacity>
         )}
+        {isOwner && (
+          <TouchableOpacity
+            style={s.addStoryBtn}
+            onPress={() => (navigation as any).navigate('Story', {
+              contextType: 'circle', contextId: id, contextLabel: circle?.name || 'this circle',
+            })}
+          >
+            <Ionicons name="add-circle" size={28} color={C.green} />
+          </TouchableOpacity>
+        )}
       </View>
+
+      <ContextStoryBar contextType="circle" contextId={id} currentUserId={user?.id} />
 
       {circle?.description ? (
         <View style={s.descRow}>
@@ -477,6 +506,7 @@ const s = StyleSheet.create({
   circleName: { fontSize: 15, fontWeight: '700', color: C.white },
   subCount:  { fontSize: 11, color: C.muted, marginTop: 1 },
   subBtn:    { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: C.green, paddingVertical: 7, paddingHorizontal: 13, borderRadius: 20 },
+  addStoryBtn: { padding: 4 },
   subBtnActive: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.green },
   subBtnText: { fontSize: 12, fontWeight: '700', color: '#000' },
   descRow:   { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },

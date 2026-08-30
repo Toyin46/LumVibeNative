@@ -6,36 +6,33 @@
 // works inside an actual expo-router file-based app).
 //
 // ✅ Cowatch is registered and live.
-// ⚠️ GroupInfo still isn't — source file (group/info.tsx) hasn't been
-// sent/converted yet. The button that opens it in group/[id].tsx will
-// throw "not handled by any navigator" if tapped until this is added.
+// ✅ GroupInfo is now built and registered — see group/info.tsx.
+// ✅ MainTabs.tsx already renders <ChatStack /> for the "Messages" tab
+// (confirmed, not just a TODO) — so every screen below is reachable.
 //
-// ⚠️ STILL REQUIRED ELSEWHERE: MainTabs.tsx must render <ChatStack />
-// for the "Messages" tab, not <MessagesScreen /> directly — otherwise
-// none of the screens registered below are reachable at all, no matter
-// how correct their navigate() calls are. MessagesScreen becomes the
-// initial route ("MessagesHome") inside this stack instead.
+// FIX: MessagesHome points to the ORIGINAL messages.tsx (now fixed), not
+// the chat/index.tsx built earlier in the same session. The original
+// screen turned out to be far more complete — Friends/Groups/Requests/
+// Circles tabs, a working Stories viewer — none of which chat/index.tsx
+// has. It just had the same class of bugs everything else in this app
+// had (iOS-only SafeAreaView, silently-swallowed mutation errors, and a
+// mount-only data load with no focus-triggered refresh). All three are
+// now fixed directly in messages.tsx. chat/index.tsx is no longer wired
+// in anywhere — keep it only if you want a simpler alternative later.
 
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { ChatStackParamList } from './ChatStackTypes';
 
 import { MessagesScreen } from '../screens';
-import CowatchScreen from '@/chat/cowatch';
+import CowatchScreen    from '@/chat/cowatch';
 import ChatDMScreen     from '../chat/[id]';
 import NewChatScreen    from '../chat/new';
 import NewGroupScreen   from '../chat/new-group';
 import NewCircleScreen  from '../chat/new-circle';
 import GroupChatScreen  from '../chat/group/[id]';
+import GroupInfoScreen  from '../chat/group/info';
 import CircleScreen     from '../chat/circle/[id]';
-// TEMP DISABLED: cowatch.tsx imports livekit-client, which crashes on
-// the currently-installed @livekit/react-native-webrtc version (the
-// event-target-shim bug). Re-enable this import once the LiveKit
-// package versions are bumped and the dev client is rebuilt natively.
-// import CowatchScreen    from '../chat/cowatch';
-
-// TODO: uncomment once group/info.tsx is sent and converted:
-// import GroupInfoScreen from '../chat/group/info';
 
 const Stack = createNativeStackNavigator<ChatStackParamList>();
 
@@ -54,13 +51,11 @@ export function ChatStack() {
       <Stack.Screen name="NewGroup"     component={NewGroupScreen} />
       <Stack.Screen name="NewCircle"    component={NewCircleScreen} />
       <Stack.Screen name="GroupChat"    component={GroupChatScreen} />
+      <Stack.Screen name="GroupInfo"    component={GroupInfoScreen} />
       <Stack.Screen name="Circle"       component={CircleScreen} />
-      <Stack.Screen name='Cowatch'      component={CowatchScreen} />
-      {/* TEMP DISABLED — see import comment above */}
-      {/* <Stack.Screen name="Cowatch"      component={CowatchScreen} /> */}
-      {/* TODO: <Stack.Screen name="GroupInfo" component={GroupInfoScreen} /> */}
+      <Stack.Screen name="Cowatch"      component={CowatchScreen} />
     </Stack.Navigator>
   );
 }
 
-export default ChatStack; 
+export default ChatStack;

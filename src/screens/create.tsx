@@ -39,16 +39,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { captureRef } from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/marketplacePostBridge';
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
-import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
-import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
-import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
+import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
+import type { LiveEffectPreviewHandle } from '../../modules/video-baker/LiveEffectPreview';
+import { ensureFireVideoCached } from '../../modules/video-baker/fireVideoCache';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -1081,6 +1081,38 @@ function buildCloudinaryFilterEffect(filter: FilterDef | null | undefined): stri
   if (contrast   != null && contrast   !== 1) parts.push(`e_contrast:${Math.round((contrast - 1) * 100)}`);
   if (saturate   != null && saturate   !== 1) parts.push(`e_saturation:${Math.round((saturate - 1) * 100)}`);
   return parts.join(',');
+}
+
+// ✅ FIX (real cause of the feed showing a black box where the photo should
+// be): the existing warm-up pattern (`fetch(url,{method:'HEAD'})` + a fixed
+// 600ms delay) has two separate weak points. First, Cloudinary's lazy
+// transformation pipeline generates the derived asset in response to a GET
+// that actually needs to SERVE the bytes — a HEAD request isn't guaranteed
+// to trigger that generation at all on every account/plan configuration, so
+// the warm-up could easily complete without the transform being ready.
+// Second, even when it does trigger generation, a FIXED 600ms delay is a
+// guess — generation time scales with image size and Cloudinary's current
+// load, so anything larger or slower than what this was tuned against just
+// blows straight through the delay and the feed still loads too early. This
+// polls with real GETs (which do reliably trigger + serve generation) and
+// backs off, so it adapts to how long generation actually takes instead of
+// gambling on one fixed number — capped so a pathological case still can't
+// hang the post flow forever.
+async function warmUpCloudinaryUrl(url: string, maxAttempts = 4): Promise<void> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, { method: 'GET' });
+      const len = Number(res.headers.get('content-length') || '0');
+      if (res.ok && len > 0) return; // real image bytes came back — ready
+    } catch (_) { /* network hiccup on the warm-up itself — just retry */ }
+    // Backoff: 400ms, 800ms, 1200ms, 1600ms — short first attempt covers the
+    // common case fast, later ones give slower generations more room.
+    await new Promise(res => setTimeout(res, 400 * (attempt + 1)));
+  }
+  // Gave it a real, adaptive best-effort — if it's still not ready after
+  // this, saving the post now (rather than hanging indefinitely) is the
+  // right tradeoff; the feed's own image component retrying on load failure
+  // is the remaining safety net for a truly slow/edge case.
 }
 
 async function uploadVideoToCloudinary(
@@ -3941,9 +3973,31 @@ export default function CreateScreen() {
   const [showAspectMenu, setShowAspectMenu] = useState(false);
   // 'post' = normal feed post (current behaviour). 'story' / 'live' are UI-only
   // placeholders here — they don't yet route to different posting logic.
-  const [postMode, setPostMode]         = useState<'post' | 'story' | 'live'>('post');
+  // FIX: this is the hand-off point from the new story.tsx launcher —
+  // arriving here with { initialMode: 'story' } now actually pre-selects
+  // the Story tab instead of always defaulting to 'post'. Falls back to
+  // 'post' exactly as before for every existing entry point that doesn't
+  // pass this param (the bottom-tab Create button, etc.).
+  const route = useRoute<any>();
+  const [postMode, setPostMode]         = useState<'post' | 'story' | 'live'>(route.params?.initialMode || 'post');
+
+  // NEW: private/public story split. Context (contextType/contextId) is
+  // set only when arriving via one of the three new "+" buttons — chat,
+  // group info, or circle. With no context, there's nowhere for a
+  // "private" story to live other than your profile, so it's always
+  // public in that case (see the picker's render condition below).
+  const storyContextType  = route.params?.contextType as ('dm' | 'group' | 'circle' | undefined);
+  const storyContextId    = route.params?.contextId as (string | undefined);
+  const storyContextLabel = route.params?.contextLabel as (string | undefined);
+  const [storyVisibility, setStoryVisibility] = useState<'private' | 'public'>('public');
   const [showCamSettings, setShowCamSettings] = useState(false);
   const [isRecording, setIsRecording]   = useState(false);
+  // 🆕 Gives the shutter button an immediate visual reaction on tap — photo
+  // capture has no natural "in-progress" boolean the way recording does
+  // (isRecording), so without this the button just sits still for however
+  // long capturePhoto()/takePhoto() takes, which reads as unresponsive even
+  // when the haptic already fired right away.
+  const [isCapturingPhoto, setIsCapturingPhoto] = useState(false);
   const [recordingDur, setRecordingDur] = useState(0);
   const [cameraFeature, setCameraFeature] = useState<CameraFeature>('normal');
   const [selectedArEffect, setSelectedArEffect] = useState('ar_none');
@@ -4238,6 +4292,7 @@ export default function CreateScreen() {
     // null-check whenever an effect was selected. Branches to the real
     // capture path for whichever view is actually on screen.
     if (hasLiveGLEffect) {
+      setIsCapturingPhoto(true);
       try {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         const outputPath = `${FileSystem.cacheDirectory}fx_photo_${Date.now()}.jpg`.replace('file://', '');
@@ -4248,9 +4303,11 @@ export default function CreateScreen() {
         setMediaType('image');
         setScreenView('compose');
       } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + e.message); }
+      finally { setIsCapturingPhoto(false); }
       return;
     }
     if (!cameraRef.current) return;
+    setIsCapturingPhoto(true);
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       const photo = await cameraRef.current.takePhoto({
@@ -4264,6 +4321,7 @@ export default function CreateScreen() {
       setMediaType('image');
       setScreenView('compose');
     } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + e.message); }
+    finally { setIsCapturingPhoto(false); }
   };
 
   const handleStartRecording = async () => {
@@ -4300,8 +4358,18 @@ export default function CreateScreen() {
         const videoOnlyPath = `${FileSystem.cacheDirectory}fx_video_only_${stamp}.mp4`.replace('file://', '');
         const pcmPath = `${FileSystem.cacheDirectory}fx_audio_${stamp}.pcm`.replace('file://', '');
         recordingViaLiveFxRef.current = true;
-        await liveEffectPreviewRef.current?.startRecording(videoOnlyPath, pcmPath);
+        // ✅ FIX (the actual "recording feels slow to start" bug): this used
+        // to be `await startRecording(...)` THEN `setIsRecording(true)` — so
+        // the UI's recording indicator stayed off for however long native
+        // encoder/muxer/audio setup took (a few real seconds), even though
+        // actual frame capture starts close to the button press regardless.
+        // That's exactly backwards: show the state that's about to become
+        // true immediately, matching what the plain-camera path below
+        // already does correctly (setIsRecording(true) fires before its
+        // own native call too, just non-awaited there). If startRecording()
+        // below still fails, the catch block already rolls this back.
         setIsRecording(true);
+        await liveEffectPreviewRef.current?.startRecording(videoOnlyPath, pcmPath);
       } catch (e: any) {
         recordingViaLiveFxRef.current = false;
         setIsRecording(false);
@@ -4677,8 +4745,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         // Without this, the first feed load may hit a CDN edge that has not yet
         // received the file and return a 404 — causing expo-av to fail silently.
         setUploadStage('Finalising audio...');
-        try { await fetch(voiceCloudUrl, { method: 'HEAD' }); } catch (_) {}
-        await new Promise(res => setTimeout(res, 600));
+        await warmUpCloudinaryUrl(voiceCloudUrl);
 
         finalMediaUrl = voiceCloudUrl;
         finalMediaType = 'voice';
@@ -4721,8 +4788,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
         setUploadProgress(80);
         setUploadStage('Finalising beat...');
-        try { await fetch(beatFinalUrl, { method: 'HEAD' }); } catch (_) {}
-        await new Promise(res => setTimeout(res, 600));
+        await warmUpCloudinaryUrl(beatFinalUrl);
 
         finalMediaUrl = beatFinalUrl;
         finalMediaType = 'voice';
@@ -4852,8 +4918,16 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             bakedForm.append('file', { uri: bakedFileUri, type: 'image/jpeg', name: `img_${Date.now()}.jpg` } as any);
             bakedForm.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
             bakedForm.append('resource_type', 'image');
-            bakedForm.append('eager', 'w_1080,c_limit,q_auto:good,f_auto');
-            bakedForm.append('eager_async', 'false');
+            // FIX: 'eager'/'eager_async' require a SIGNED Cloudinary upload —
+            // this app uses an unsigned upload_preset, and Cloudinary flatly
+            // rejects the whole upload with a 400 ("Eager async parameter is
+            // not allowed when using unsigned upload") the instant these are
+            // present. This is the exact "network error" that was actually a
+            // 400 mislabeled by getFriendlyError(). The q_auto/f_auto URL
+            // rewrite below still gives the same end result — it's now a
+            // lazy transform instead of eager, so the warm-up request right
+            // after it (see FIX comment there) makes sure it's ready before
+            // this post is ever saved or viewed.
             const bakedRes = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, { method: 'POST', body: bakedForm });
             if (bakedRes.ok) {
               const bakedJson = await bakedRes.json();
@@ -4861,6 +4935,17 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               if (bakedImgUrl.includes('/upload/') && !bakedImgUrl.includes('q_auto')) {
                 const idx = bakedImgUrl.indexOf('/upload/');
                 bakedImgUrl = bakedImgUrl.slice(0, idx + 8) + 'q_auto:good,f_auto,dpr_auto/' + bakedImgUrl.slice(idx + 8);
+                // FIX: removing 'eager' above stopped the upload from being
+                // rejected, but it also means this q_auto URL is now a LAZY
+                // transform — Cloudinary only generates it on first request,
+                // which can take a couple seconds and is exactly why the post
+                // showed up as a solid black box the moment it was viewed.
+                // ✅ STRENGTHENED: was a HEAD request + fixed 600ms delay —
+                // HEAD isn't guaranteed to trigger Cloudinary's lazy-generation
+                // pipeline the way a real GET does, and 600ms was a guess that
+                // doesn't scale with image size/load. See warmUpCloudinaryUrl's
+                // doc above for the full reasoning.
+                await warmUpCloudinaryUrl(bakedImgUrl);
               }
             } else {
               // 🔍 DEBUG: this used to just fall through silently (bakedImgUrl stayed
@@ -4939,12 +5024,12 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         imgForm.append('file', { uri: bakedUri, type: imgMime, name: `img_${Date.now()}.${imgExt}` } as any);
         imgForm.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
         imgForm.append('resource_type', 'image');
-        // ✅ FIX: eager transformation forces Cloudinary to pre-generate the
-        // processed version immediately at upload time.  Without this, Cloudinary
-        // processes transformation URLs lazily on first request — which can take
-        // 2-8 seconds and causes a blank/black image the first time the feed loads it.
-        imgForm.append('eager', 'w_1080,c_limit,q_auto:good,f_auto');
-        imgForm.append('eager_async', 'false');
+        // FIX: same Cloudinary unsigned-upload rejection as the baked-image
+        // branch above — 'eager'/'eager_async' aren't allowed without a
+        // signed upload, and caused every plain image post to fail with a
+        // 400 that then got mislabeled "No internet connection". The
+        // q_auto/f_auto URL rewrite further down already covers the same
+        // optimization, just lazily on first view instead of at upload time.
 
         setUploadProgress(50);
         let imgCdnUrl: string | null = null;
@@ -4956,8 +5041,20 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
           if (imgCdnRes.ok) {
             const imgCdnJson = await imgCdnRes.json();
             imgCdnUrl = imgCdnJson.secure_url as string;
+          } else {
+            // 🔍 DEBUG: same fix as the baked-image branch above — this used to
+            // fall through with zero logging whenever Cloudinary rejected the
+            // upload, so the real reason (bad preset, oversized file, etc.)
+            // never surfaced. It later showed up mislabeled as "No internet
+            // connection" by getFriendlyError() just because the eventual
+            // fallback error happened to contain the word "network".
+            const imgErrText = await imgCdnRes.text().catch(() => '(could not read response body)');
+            console.error('🔍 [plain image upload] Cloudinary rejected the upload:', imgCdnRes.status, imgErrText);
           }
-        } catch { imgCdnUrl = null; }
+        } catch (cloudErr) {
+          console.error('🔍 [plain image upload] Cloudinary upload threw:', cloudErr);
+          imgCdnUrl = null;
+        }
 
         setUploadProgress(70);
 
@@ -5022,15 +5119,35 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
           if (finalMediaUrl && finalMediaUrl.includes('/upload/') && !finalMediaUrl.includes('q_auto')) {
             const idx = finalMediaUrl.indexOf('/upload/');
             finalMediaUrl = finalMediaUrl.slice(0, idx + 8) + 'q_auto:good,f_auto,dpr_auto/' + finalMediaUrl.slice(idx + 8);
+            // ✅ STRENGTHENED: same lazy-transform warm-up as the baked-image
+            // branch above, now using the more reliable GET-and-poll helper
+            // instead of a HEAD request + fixed 600ms guess — see
+            // warmUpCloudinaryUrl's doc for the full reasoning. This is the
+            // branch that actually runs for photos captured with a live GL
+            // effect (capturedWithLiveFx=true), so it's the most likely one
+            // behind the black-box-in-feed symptom.
+            await warmUpCloudinaryUrl(finalMediaUrl);
           }
         } else {
           // Cloudinary failed — fall back to Supabase storage (no tint baking)
           // Blob upload instead of base64+decode() — no giant JS string.
-          const fn = `${user.id}/${Date.now()}.jpg`;
-          const fileBlob = await (await fetch(bakedUri)).blob();
-          const { error: ie } = await supabase.storage.from('posts').upload(fn, fileBlob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
-          if (ie) throw new Error(`Upload failed: ${ie.message}`);
-          finalMediaUrl = supabase.storage.from('posts').getPublicUrl(fn).data.publicUrl;
+          // 🔍 DEBUG: this fetch(bakedUri) + upload call used to be unguarded —
+          // if it threw (e.g. RN's generic "Network request failed" on a bad
+          // local file read), the raw error propagated straight to the outer
+          // catch, which getFriendlyError() classifies as "No internet
+          // connection" for ANY message containing "network"/"connection" —
+          // even when it has nothing to do with your actual connection.
+          // Logging the real error here, same fix as the baked-image branch.
+          try {
+            const fn = `${user.id}/${Date.now()}.jpg`;
+            const fileBlob = await (await fetch(bakedUri)).blob();
+            const { error: ie } = await supabase.storage.from('posts').upload(fn, fileBlob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
+            if (ie) throw new Error(`Upload failed: ${ie.message}`);
+            finalMediaUrl = supabase.storage.from('posts').getPublicUrl(fn).data.publicUrl;
+          } catch (fallbackErr) {
+            console.error('🔍 [plain image upload] Supabase fallback also failed:', fallbackErr);
+            throw fallbackErr;
+          }
         }
 
         finalMediaType = 'image';
@@ -5302,13 +5419,85 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 if (musicRes.ok) {
                   const musicJson = await musicRes.json();
                   postData.music_url = musicJson.secure_url as string;
+                } else {
+                  // 🔍 DEBUG: this used to fall through with zero logging, and
+                  // — worse — postData.music_name/music_artist were already
+                  // set unconditionally further up regardless of whether this
+                  // upload actually succeeded. That's exactly why the feed
+                  // showed a real song name with "Tap to play" on a post that
+                  // had no playable music_url at all: tapping just silently
+                  // no-ops in toggleMusicPlayback since it checks music_url,
+                  // not music_name. Logging the real rejection reason, and
+                  // clearing the name/artist below so the post doesn't claim
+                  // to have music it doesn't actually have.
+                  const musicErrText = await musicRes.text().catch(() => '(could not read response body)');
+                  console.error('🔍 [music upload] Cloudinary rejected the upload:', musicRes.status, musicErrText);
+                  delete postData.music_name; delete postData.music_artist;
+                  delete postData.music_volume; delete postData.original_volume;
                 }
               } else {
                 Alert.alert('🎵 Music File Too Large', `Your music file is ${sizeMb.toFixed(1)}MB. Files over ${MUSIC_UPLOAD_LIMIT_MB}MB can't be uploaded.\n\nPost saved without music.`);
+                delete postData.music_name; delete postData.music_artist;
+                delete postData.music_volume; delete postData.original_volume;
               }
             }
           }
-        } catch (me) { console.warn('Music upload skipped:', me); }
+        } catch (me) {
+          console.error('🔍 [music upload] threw:', me);
+          delete postData.music_name; delete postData.music_artist;
+          delete postData.music_volume; delete postData.original_volume;
+        }
+      }
+
+      // ─────────────────────────────────────────────────────────────
+      // STORY MODE — wires up the previously UI-only 'story' tab.
+      // Reuses every upload step above completely unchanged
+      // (finalMediaUrl/finalMediaType are already computed by this point
+      // regardless of postMode) and just saves to `stories` instead of
+      // `posts`, using exactly the schema messages.tsx's fetchStories()
+      // already reads: user_id, media_url, media_type, caption,
+      // created_at, expires_at, is_active, view_count.
+      //
+      // SCOPE NOTE: this covers a plain public story to your own profile
+      // only. The private/per-chat-group-circle story split discussed
+      // separately needs new columns on `stories` (visibility,
+      // context_type, context_id) that don't exist yet — intentionally
+      // not built here until that schema change is confirmed, so this
+      // doesn't guess at a bigger change than what was asked for.
+      // ─────────────────────────────────────────────────────────────
+      if (postMode === 'story') {
+        const storyData: Record<string, any> = {
+          user_id: user.id,
+          caption: statusContent || caption.trim() || '',
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          is_active: true,
+          view_count: 0,
+          // NEW: private/public + context. No context (plain Create tab
+          // entry) always saves as a normal public profile story — private
+          // only makes sense when there's a specific chat/group/circle to
+          // keep it in instead.
+          visibility: storyContextType ? storyVisibility : 'public',
+          context_type: storyContextType || null,
+          context_id: storyContextId || null,
+        };
+        if (finalMediaUrl) { storyData.media_url = finalMediaUrl; storyData.media_type = finalMediaType; }
+
+        const { error: storyError } = await supabase.from('stories').insert(storyData);
+        if (storyError) throw storyError;
+
+        setUploadProgress(100);
+        setUploadStage('Story posted! 🎉');
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        await new Promise(r => setTimeout(r, 1200));
+        const visMsg = storyData.visibility === 'private' && storyContextLabel
+          ? `Only visible in ${storyContextLabel} for 24 hours.`
+          : storyContextLabel
+          ? `Visible on your profile and in ${storyContextLabel} for 24 hours.`
+          : 'Visible on your profile for 24 hours.';
+        Alert.alert('🎉 Story Posted!', visMsg,
+          [{ text: 'Done', onPress: () => { handleBackToCamera(); navigation.goBack(); } }]);
+        return;
       }
 
       const { error: postError } = await supabase.from('posts').insert(postData);
@@ -5620,8 +5809,8 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
             {/* Shutter */}
             {cameraMode === 'picture' ? (
-              <TouchableOpacity style={ms.shutterBtn} onPress={handleTakePhoto}>
-                <View style={ms.shutterInner} />
+              <TouchableOpacity style={ms.shutterBtn} onPress={handleTakePhoto} disabled={isCapturingPhoto}>
+                <View style={[ms.shutterInner, isCapturingPhoto && { opacity: 0.4 }]} />
                 {/* FIX: Snapchat-style selected-effect badge - shows which
                     filter/effect is active right on the capture button, using
                     the same real cover images (FX_IMAGES) already proven in
@@ -5702,9 +5891,10 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             ))}
           </ScrollView>
 
-          {/* Post / Story / Live tabs — UI-only mode switch for now; postMode
-              isn't yet wired into executePost's branching logic. Flag this to
-              Toyin before shipping if Story/Live need different upload paths. */}
+          {/* Post / Story / Live tabs. 'story' is now wired into executePost's
+              branching logic — saves to `stories` instead of `posts`. 'live'
+              is still a UI-only placeholder (falls through to a normal post),
+              since actual live streaming is a separate, bigger feature. */}
           <View style={ms.postModeRow}>
             {(['post', 'story', 'live'] as const).map(m => (
               <TouchableOpacity key={m} onPress={() => setPostMode(m)}>
@@ -5712,6 +5902,40 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               </TouchableOpacity>
             ))}
           </View>
+
+          {/* NEW: private/public story picker. Only shown in story mode
+              AND when there's an actual context (arrived via chat/group/
+              circle's + button) — with no context there's nowhere for a
+              "private" story to live other than the profile, so it's
+              always public in that case and this row just doesn't render. */}
+          {postMode === 'story' && storyContextType && (
+            <View style={ms.storyVisRow}>
+              <Text style={ms.storyVisLabel} numberOfLines={1}>
+                {storyContextLabel ? `To: ${storyContextLabel}` : 'Story'}
+              </Text>
+              <View style={ms.storyVisToggle}>
+                <TouchableOpacity
+                  style={[ms.storyVisBtn, storyVisibility === 'private' && ms.storyVisBtnActive]}
+                  onPress={() => setStoryVisibility('private')}
+                >
+                  <Ionicons name="lock-closed" size={12} color={storyVisibility === 'private' ? '#000' : '#888'} />
+                  <Text style={[ms.storyVisBtnTxt, storyVisibility === 'private' && ms.storyVisBtnTxtActive]}>Private</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[ms.storyVisBtn, storyVisibility === 'public' && ms.storyVisBtnActive]}
+                  onPress={() => setStoryVisibility('public')}
+                >
+                  <Ionicons name="globe" size={12} color={storyVisibility === 'public' ? '#000' : '#888'} />
+                  <Text style={[ms.storyVisBtnTxt, storyVisibility === 'public' && ms.storyVisBtnTxtActive]}>Public</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={ms.storyVisHint}>
+                {storyVisibility === 'private'
+                  ? `Only visible in ${storyContextLabel || 'this chat'}`
+                  : `Also visible on your profile`}
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Aspect ratio backdrop — closes the dropdown on outside tap */}
@@ -6626,6 +6850,14 @@ const ms = StyleSheet.create({
   postModeRow: { flexDirection: 'row', justifyContent: 'center', gap: 22, marginTop: 12, paddingBottom: 6 },
   postModeTxt: { color: '#888', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },
   postModeTxtActive: { color: '#00ff88' },
+  storyVisRow: { alignItems: 'center', paddingHorizontal: 20, paddingBottom: 10, gap: 6 },
+  storyVisLabel: { color: '#fff', fontSize: 12, fontWeight: '600', maxWidth: 240 },
+  storyVisToggle: { flexDirection: 'row', backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 20, padding: 3 },
+  storyVisBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 6, paddingHorizontal: 14, borderRadius: 17 },
+  storyVisBtnActive: { backgroundColor: '#00ff88' },
+  storyVisBtnTxt: { color: '#888', fontSize: 12, fontWeight: '700' },
+  storyVisBtnTxtActive: { color: '#000' },
+  storyVisHint: { color: '#888', fontSize: 10 },
 
   // Camera settings sheet
   settingsBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },

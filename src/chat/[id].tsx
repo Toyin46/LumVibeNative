@@ -13,6 +13,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
+import ContextStoryBar from './components/ContextStoryBar';
 // FIX: react-native's own SafeAreaView is iOS-only — on Android it's a
 // no-op View, which is exactly why the header (back button, avatar, call
 // icons) was rendering underneath the status bar/battery indicator.
@@ -1270,6 +1271,14 @@ export default function ChatScreen() {
             : null}
         </View>
         <View style={styles.chatActions}>
+          <TouchableOpacity
+            style={styles.chatActBtn}
+            onPress={() => (navigation as any).navigate('Story', {
+              contextType: 'dm', contextId: id, contextLabel: otherName || 'this chat',
+            })}
+          >
+            <Ionicons name="add-circle-outline" size={19} color={C.green} />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.chatActBtn} onPress={() => startCall(id, 'voice')}>
             <Ionicons name="call-outline" size={17} color={C.white} />
           </TouchableOpacity>
@@ -1281,6 +1290,8 @@ export default function ChatScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      <ContextStoryBar contextType="dm" contextId={id!} currentUserId={user?.id} />
 
       {/* Feature chips */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false}

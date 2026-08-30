@@ -196,11 +196,21 @@ export default function GroupChatScreen() {
     if (!text || !user?.id || !id) return;
     setInputText(''); setSending(true);
     try {
-      await supabase.from('group_messages').insert({
+      // FIX: this used to be `await supabase.from(...).insert(...)` with no
+      // error check. Supabase-js does NOT throw on an RLS-denied insert —
+      // it resolves normally with { error } populated. Since nothing checked
+      // that, an RLS-blocked message failed completely silently: input
+      // cleared as if sent, nothing ever landed in group_messages, so the
+      // realtime subscription had nothing to show. Now it actually surfaces.
+      const { error } = await supabase.from('group_messages').insert({
         group_id: id, sender_id: user.id, message_type: 'text', content: text,
       });
+      if (error) throw error;
       await supabase.from('groups').update({ last_message: text, last_message_at: new Date().toISOString() }).eq('id', id);
-    } catch (e) { Alert.alert('Error', 'Failed to send message.'); }
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to send message.');
+      setInputText(text); // give the message back so it isn't lost
+    }
     finally { setSending(false); }
   };
 
@@ -213,10 +223,11 @@ export default function GroupChatScreen() {
     try {
       const url = await uploadImage(result.assets[0].uri);
       if (!url) { Alert.alert('Upload failed', 'Try again.'); return; }
-      await supabase.from('group_messages').insert({
+      const { error } = await supabase.from('group_messages').insert({
         group_id: id, sender_id: user.id, message_type: 'image', media_url: url,
       });
-    } catch (e) { Alert.alert('Error', 'Failed to send image.'); }
+      if (error) throw error;
+    } catch (e: any) { Alert.alert('Error', e?.message || 'Failed to send image.'); }
     finally { setSending(false); }
   };
 
@@ -239,12 +250,29 @@ export default function GroupChatScreen() {
         return;
       }
       await AudioModule.setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-      await audioRecorder.prepareToRecordAsync();
+      try {
+        await audioRecorder.prepareToRecordAsync();
+      } catch (prepErr: any) {
+        // FIX: expo-audio can leave the recorder stuck thinking it's still
+        // "prepared" from the previous voice note even after stop() ran
+        // (documented native state-tracking quirk, not unique to this app —
+        // see github.com/expo/expo issues on useAudioRecorder state races).
+        // Force-release the stuck session, then retry once.
+        if (String(prepErr?.message || prepErr).includes('already been prepared')) {
+          await audioRecorder.stop().catch(() => {});
+          await audioRecorder.prepareToRecordAsync();
+        } else {
+          throw prepErr;
+        }
+      }
       if (stopRequestedRef.current) return; // user already let go — don't start at all
       audioRecorder.record();
       setIsRecording(true); setRecDur(0);
       recordTimerRef.current = setInterval(() => setRecDur(p => p + 1), 1000);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Recording error', 'Could not start recording — try again.');
+    }
     finally { isStartingRef.current = false; }
   };
 
@@ -266,10 +294,13 @@ export default function GroupChatScreen() {
         const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`, { method: 'POST', body: formData });
         if (res.ok) {
           const data = await res.json();
-          await supabase.from('group_messages').insert({
+          const { error } = await supabase.from('group_messages').insert({
             group_id: id, sender_id: user.id, message_type: 'voice',
             media_url: data.secure_url, media_duration: recDur,
           });
+          if (error) Alert.alert('Error', error.message);
+        } else {
+          Alert.alert('Upload failed', 'Try again.');
         }
         setSending(false);
       }
@@ -372,14 +403,7 @@ export default function GroupChatScreen() {
           <Text style={s.memberCount}>{group?.member_count || 0} members</Text>
         </View>
         <TouchableOpacity style={s.infoBtn}
-          onPress={() => {
-            // FIX: GroupInfo isn't registered in ChatStack.tsx yet (see the
-            // TODO there) — navigating to it crashes with the same "not
-            // handled by any navigator" error the old CoWatch bug had.
-            // Guarding it with a clear message instead of a crash until
-            // that screen is built.
-            Alert.alert('Coming soon', 'Group info & member management is on the way.');
-          }}>
+          onPress={() => navigation.navigate('GroupInfo', { id: id! })}>
           <Ionicons name="information-circle-outline" size={22} color={C.muted} />
         </TouchableOpacity>
       </View>

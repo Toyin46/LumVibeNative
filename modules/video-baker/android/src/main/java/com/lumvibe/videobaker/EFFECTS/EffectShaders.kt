@@ -177,7 +177,7 @@ enum class VisualEffect {
             "double_take" -> DOUBLE_TAKE
             "blink_freeze" -> BLINK_FREEZE
             "gold_skin" -> GOLD_SKIN
-            "mouth_fire" -> MOUTH_FIRE
+            // ⛔ REMOVED (not working reliably, cut per user request): "mouth_fire" -> MOUTH_FIRE
             "snow_fall" -> SNOW_FALL
             "throw_confetti" -> THROW_CONFETTI
             "raise_eyebrow" -> RAISE_EYEBROW
@@ -191,7 +191,7 @@ enum class VisualEffect {
             "tap_shockwave" -> TAP_SHOCKWAVE
             "spin_effect" -> SPIN_EFFECT
             "face_morph" -> FACE_MORPH
-            "fire_book" -> FIRE_BOOK
+            // ⛔ REMOVED (not working reliably, cut per user request): "fire_book" -> FIRE_BOOK
             "stickers_react" -> STICKERS_REACT
             "bokeh_lights" -> BOKEH_LIGHTS
             "particle_flow" -> PARTICLE_FLOW

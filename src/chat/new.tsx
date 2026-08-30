@@ -127,7 +127,9 @@ export default function NewChatScreen() {
     try {
       const conv = await getOrCreateConversation(user.id, otherUser.id);
       if (conv?.id) {
-        navigation.navigate('ChatDM', {
+        // FIX: same stack issue as group/circle creation — replace() so
+        // back doesn't land on the "New Message" search screen.
+        navigation.replace('ChatDM', {
           id:          conv.id,
           otherUserId: otherUser.id,
           otherName:   otherUser.display_name || otherUser.username,

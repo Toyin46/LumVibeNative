@@ -172,7 +172,11 @@ const globalAudioManager = {
   async play(sound: any, postId: string) {
     await this.stopCurrent();
     this.currentSound = sound; this.currentPostId = postId;
-    try { await sound.playAsync(); } catch (_) {}
+    // FIX: was sound.playAsync() — an expo-av Audio.Sound method that
+    // doesn't exist on an expo-audio AudioPlayer (this file already uses
+    // the correct .pause()/.remove() pair in stopCurrent() above; this
+    // method was just missed in the same migration).
+    try { sound.play(); } catch (_) {}
   },
 };
 
@@ -783,7 +787,12 @@ const PostCard = memo(({
       } else {
         cancelled = true;
         if (soundRef.current) {
-          try { await soundRef.current.stopAsync(); await soundRef.current.unloadAsync(); } catch (_) {}
+          // FIX: stopAsync()/unloadAsync() are expo-av methods — they don't
+          // exist on the expo-audio AudioPlayer created in startAudio()
+          // below, which is exactly what soundRef.current is. This is the
+          // "soundRef.current.stopAsync is not a function" crash. Same
+          // pause()/remove() pair already used correctly in stopAudio().
+          try { soundRef.current.pause(); soundRef.current.remove(); } catch (_) {}
           soundRef.current = null;
         }
         if (globalAudioManager.currentPostId === item.id) {
@@ -796,8 +805,8 @@ const PostCard = memo(({
     return () => {
       cancelled = true;
       if (soundRef.current) {
-        soundRef.current.stopAsync().catch(() => {});
-        soundRef.current.unloadAsync().catch(() => {});
+        // FIX: same expo-av/expo-audio mismatch as above.
+        try { soundRef.current.pause(); soundRef.current.remove(); } catch (_) {}
         soundRef.current = null;
       }
       if (globalAudioManager.currentPostId === item.id) {
@@ -876,26 +885,27 @@ const PostCard = memo(({
 
   const toggleVoicePlayback = async () => {
     if (!item.media_url || !isRemoteUrl(item.media_url)) return;
-    // ✅ FIX: If soundRef exists and is loaded, toggle play/pause normally.
-    // If soundRef exists but isn't loaded (e.g. error state), unload and reload.
-    // If soundRef is null (auto-play hasn't completed yet), start fresh.
+    // FIX: getStatusAsync()/playAsync()/pauseAsync() are expo-av methods.
+    // expo-audio's AudioPlayer exposes isLoaded/playing as plain synchronous
+    // properties instead, and play()/pause() are synchronous calls, not
+    // promises to await. Same "already been prepared"-style mismatch class
+    // of bug fixed in cowatch.tsx/circle chat this session, just for
+    // playback instead of recording.
     if (soundRef.current) {
       try {
-        const status = await soundRef.current.getStatusAsync();
-        if (status.isLoaded) {
-          if (isPlaying) { await soundRef.current.pauseAsync(); setIsPlaying(false); }
-          else           { await soundRef.current.playAsync();  setIsPlaying(true);  }
+        if (soundRef.current.isLoaded) {
+          if (isPlaying) { soundRef.current.pause(); setIsPlaying(false); }
+          else            { soundRef.current.play();  setIsPlaying(true);  }
           return;
         }
-        // Sound exists but isn't loaded — unload and fall through to reload below
-        try { await soundRef.current.unloadAsync(); } catch (_) {}
+        // Player exists but isn't loaded — release and fall through to reload
+        try { soundRef.current.remove(); } catch (_) {}
         soundRef.current = null;
         if (globalAudioManager.currentPostId === item.id) {
           globalAudioManager.currentSound = null; globalAudioManager.currentPostId = null;
         }
       } catch (_) {
-        // getStatusAsync failed — unload and reload
-        try { await soundRef.current?.unloadAsync(); } catch (_) {}
+        try { soundRef.current?.remove(); } catch (_) {}
         soundRef.current = null;
       }
     }
@@ -907,19 +917,18 @@ const PostCard = memo(({
     if (!item.music_url || !isRemoteUrl(item.music_url)) return;
     if (soundRef.current) {
       try {
-        const status = await soundRef.current.getStatusAsync();
-        if (status.isLoaded) {
-          if (isPlaying) { await soundRef.current.pauseAsync(); setIsPlaying(false); }
-          else           { await soundRef.current.playAsync();  setIsPlaying(true);  }
+        if (soundRef.current.isLoaded) {
+          if (isPlaying) { soundRef.current.pause(); setIsPlaying(false); }
+          else            { soundRef.current.play();  setIsPlaying(true);  }
           return;
         }
-        try { await soundRef.current.unloadAsync(); } catch (_) {}
+        try { soundRef.current.remove(); } catch (_) {}
         soundRef.current = null;
         if (globalAudioManager.currentPostId === item.id) {
           globalAudioManager.currentSound = null; globalAudioManager.currentPostId = null;
         }
       } catch (_) {
-        try { await soundRef.current?.unloadAsync(); } catch (_) {}
+        try { soundRef.current?.remove(); } catch (_) {}
         soundRef.current = null;
       }
     }

@@ -9,10 +9,13 @@
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, SafeAreaView, StatusBar,
+  StyleSheet, StatusBar,
   ActivityIndicator, Alert, ScrollView,
   KeyboardAvoidingView, Platform, Switch,
 } from 'react-native';
+// FIX: same iOS-only SafeAreaView bug as new-group.tsx — the detail screen
+// (circle/[id].tsx) already uses the correct cross-platform import.
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
@@ -54,7 +57,9 @@ export default function NewCircleScreen() {
       await supabase.from('circle_subscribers').insert({
         circle_id: circle.id, user_id: user.id,
       });
-      navigation.navigate('Circle', { id: circle.id });
+      // FIX: same stack issue as new-group.tsx — replace() instead of
+      // navigate() so back doesn't land on the empty creation form.
+      navigation.replace('Circle', { id: circle.id });
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to create Circle. Please try again.');
     } finally { setCreating(false); }

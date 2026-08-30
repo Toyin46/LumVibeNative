@@ -124,7 +124,12 @@ export default function NewGroupScreen() {
         role: uid === user.id ? 'admin' : 'member',
       }));
       await supabase.from('group_members').insert(memberRows);
-      navigation.navigate('GroupChat', { id: group.id });
+      // FIX: was navigate(), which PUSHES GroupChat on top of this form —
+      // so pressing back landed you right back on an empty "New Group"
+      // form, looking exactly like your group had vanished. replace()
+      // swaps this screen out instead, so back goes to wherever you were
+      // BEFORE you opened this form.
+      navigation.replace('GroupChat', { id: group.id });
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to create group. Please try again.');
     } finally { setCreating(false); }

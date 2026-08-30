@@ -304,7 +304,14 @@ class LiveRecorder(
             encodePcmToAac(pcmFile, aacPath)
             true
         } catch (e: Exception) {
-            audioStatus = "no audio: PCM was captured but AAC encoding failed - ${e.message}"
+            // 🔍 DEBUG: .message alone came back null last time, which told us
+            // NOTHING (a bare IllegalStateException(), a stripped Kotlin null-
+            // assertion, and several other real causes all report a null
+            // message). The exception's actual CLASS plus a short stack trace
+            // is far more diagnostic - that's what actually pins this down.
+            val trace = e.stackTrace.take(4).joinToString(" | ") { it.toString() }
+            audioStatus = "no audio: PCM was captured but AAC encoding failed - " +
+                "${e.javaClass.simpleName}: ${e.message} [${trace}]"
             Log.w(TAG, "audio encode failed, falling back to silent video", e)
             false
         }
@@ -352,30 +359,51 @@ class LiveRecorder(
         // 2 bytes per sample (16-bit PCM) * channel count
         val bytesPerSample = 2 * AUDIO_CHANNELS
         var eosSent = false
+        // ✅ HARDENING: this loop previously had no ceiling - a codec that
+        // never produces BUFFER_FLAG_END_OF_STREAM (wedged device/driver)
+        // would hang finalizeRecording() forever, holding the UI's
+        // "processing" state indefinitely with no way to recover. 20000
+        // iterations at the 10ms dequeue timeouts below is ~200s of worst-
+        // case wall time, far beyond any real recording's audio length.
+        var loopGuard = 0
+        val maxLoopIterations = 20000
 
         input.use { stream ->
-            while (true) {
+            while (loopGuard++ < maxLoopIterations) {
                 if (!eosSent) {
                     val inIndex = encoder.dequeueInputBuffer(10000)
                     if (inIndex >= 0) {
                         val read = stream.read(chunk)
-                        val inBuf = encoder.getInputBuffer(inIndex)!!
-                        inBuf.clear()
-                        if (read > 0) {
-                            inBuf.put(chunk, 0, read)
-                            // presentationTimeUs derived from how many audio
-                            // frames have been fed so far, NOT wall-clock time -
-                            // keeps audio internally consistent even if this
-                            // post-process pass runs faster or slower than
-                            // real time (it will, since there's no live-frame
-                            // pacing here, unlike the video encoder above).
-                            val presentationTimeUs = (totalBytesRead / bytesPerSample) * 1_000_000L / actualSampleRate
-                            encoder.queueInputBuffer(inIndex, 0, read, presentationTimeUs, 0)
-                            totalBytesRead += read
+                        // ✅ FIX: was encoder.getInputBuffer(inIndex)!! - if this
+                        // ever returned null (codec in an unexpected state), the
+                        // Kotlin !! assertion throws an exception whose message
+                        // is frequently null/unhelpful (a bare IllegalStateException
+                        // or a stripped null-check message), which is exactly the
+                        // opaque "AAC encoding failed - null" this was flagged from.
+                        // A real null here means this specific buffer index can't be
+                        // used - log clearly and skip it (encoder will offer another
+                        // index next iteration) instead of crashing the whole encode.
+                        val inBuf = encoder.getInputBuffer(inIndex)
+                        if (inBuf == null) {
+                            Log.w(TAG, "encoder.getInputBuffer($inIndex) returned null - skipping this buffer")
                         } else {
-                            val presentationTimeUs = (totalBytesRead / bytesPerSample) * 1_000_000L / actualSampleRate
-                            encoder.queueInputBuffer(inIndex, 0, 0, presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            eosSent = true
+                            inBuf.clear()
+                            if (read > 0) {
+                                inBuf.put(chunk, 0, read)
+                                // presentationTimeUs derived from how many audio
+                                // frames have been fed so far, NOT wall-clock time -
+                                // keeps audio internally consistent even if this
+                                // post-process pass runs faster or slower than
+                                // real time (it will, since there's no live-frame
+                                // pacing here, unlike the video encoder above).
+                                val presentationTimeUs = (totalBytesRead / bytesPerSample) * 1_000_000L / actualSampleRate
+                                encoder.queueInputBuffer(inIndex, 0, read, presentationTimeUs, 0)
+                                totalBytesRead += read
+                            } else {
+                                val presentationTimeUs = (totalBytesRead / bytesPerSample) * 1_000_000L / actualSampleRate
+                                encoder.queueInputBuffer(inIndex, 0, 0, presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                eosSent = true
+                            }
                         }
                     }
                 }
@@ -406,6 +434,16 @@ class LiveRecorder(
                 }
             }
         }
+        // ✅ HARDENING: loop hit maxLoopIterations without ever seeing
+        // BUFFER_FLAG_END_OF_STREAM - clean up and fail loudly (caught by
+        // finalizeRecording's try/catch) instead of silently falling out of
+        // the loop and returning as if this had succeeded, which would have
+        // left aacPath a truncated/invalid file for muxVideoAndAudio to trip
+        // over next with an even less clear error.
+        try { muxer.release() } catch (e: Exception) { /* best-effort */ }
+        try { encoder.stop() } catch (e: Exception) { /* best-effort */ }
+        try { encoder.release() } catch (e: Exception) { /* best-effort */ }
+        throw IllegalStateException("AAC encode loop exceeded $maxLoopIterations iterations without reaching end-of-stream")
     }
 
     /** Combines the silent video-only file and the standalone AAC file into

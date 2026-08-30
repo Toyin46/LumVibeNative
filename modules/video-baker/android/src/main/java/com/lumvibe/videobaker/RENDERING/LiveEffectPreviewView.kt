@@ -128,6 +128,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     /** Same VisualEffect enum EffectShaders/FrameRenderer already use  -  no new effect vocabulary. */
     fun setEffect(effect: VisualEffect) {
         pendingEffect = effect
+        // 🔍 DEBUG: reset tracking health counters on every effect switch so the
+        // periodic log in maybeSubmitForTracking() reflects the CURRENTLY
+        // selected effect's own activity, not a running total across switches.
+        faceSubmitCount = 0; faceResultCount = 0
+        segSubmitCount = 0; segResultCount = 0
         renderHandler?.post { renderer?.setEffect(effect) }
     }
 
@@ -217,6 +222,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     // measured one.
     private val trackingIntervalMs = 70L
     private var lastTrackingSubmitMs = 0L
+    // 🔍 DEBUG counters for the tracking health-check log in maybeSubmitForTracking()
+    private var faceSubmitCount = 0
+    private var faceResultCount = 0
+    private var segSubmitCount = 0
+    private var segResultCount = 0
     // FIX: COLOR_DRAIN/SPLIT_PRISM had no motion-detection in the live path at
     // all (VideoTranscoder's frame-to-frame luma-delta trick, which they both
     // depend on, was never replicated here) - meaning both looked completely
@@ -738,7 +748,28 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             val sizes = map.getOutputSizes(SurfaceTexture::class.java) ?: return fallback
             if (sizes.isEmpty()) return fallback
 
-            val targetRatio = targetW.toFloat() / targetH.toFloat()
+            // ✅ FIX (real cause of the residual stretch/off-center crop after the
+            // first aspect-ratio fix): StreamConfigurationMap.getOutputSizes()
+            // always reports sizes in the SENSOR's own native coordinate space
+            // (commonly landscape, width >= height - e.g. 1920x1080, 1280x720).
+            // targetW/targetH here is surfaceW/surfaceH - the phone's CURRENT
+            // portrait UI dimensions. Comparing size.width/size.height directly
+            // against targetW/targetH's ratio was comparing two numbers from two
+            // different coordinate spaces, off by the sensor's mounting angle -
+            // so "closest ratio" often wasn't actually close once you account for
+            // that. SENSOR_ORIENTATION (almost always 90 or 270 on phones,
+            // confirmed here because orientation itself already renders upright
+            // and correct on-device - this change only affects WHICH size gets
+            // requested, never rotation) tells us how many degrees the sensor
+            // image needs rotating to match the device's natural orientation;
+            // swapping target width/height when that's 90/270 puts both sides of
+            // the comparison in the same (sensor-native) space.
+            val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            val targetRatio = if (sensorOrientation == 90 || sensorOrientation == 270) {
+                targetH.toFloat() / targetW.toFloat()
+            } else {
+                targetW.toFloat() / targetH.toFloat()
+            }
             // Cap candidate sizes at 1080p-equivalent pixel count - this is a
             // small on-screen effect preview, not a photo/video capture
             // target, so anything larger only costs GL/decode performance
@@ -875,7 +906,30 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             // 1x1 default the entire live session (see the setFrameSize fix
             // above) — meaning even with (1) fixed, it would have copied a
             // single 1x1 pixel, not the full photo. Both are now fixed.
-            r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+            // ✅ REAL FIX (Blink Freeze static/noise, confirmed from your
+            // screenshot — the earlier captureFreezeFrame() size fix was a
+            // real bug too, but this is the one actually causing what you're
+            // seeing): outside an active freeze hold, BLINK_FREEZE has no
+            // "normal" shader look of its own — its fragment shader only
+            // declares uFrozenTexture (a plain sampler2D expecting the
+            // captured snapshot) and never touches uTexture at all. Routing
+            // the LIVE camera feed through drawEffectFrame() here picks up
+            // that same shader from effectPrograms (setEffect() compiles
+            // every selected effect's shader unconditionally, freeze
+            // included) and leaves uFrozenTexture unbound — which defaults
+            // to sampling texture unit 0, currently holding the live feed
+            // bound as GL_TEXTURE_EXTERNAL_OES, not GL_TEXTURE_2D. Sampling
+            // a sampler2D against an EXTERNAL_OES-bound unit is a type
+            // mismatch — undefined per spec, and exactly the static/shatter
+            // pattern real GPU drivers render for it. VideoTranscoder.kt's
+            // bake path already skips drawEffectFrame() for this exact
+            // reason (see its own "BLINK_FREEZE has no normal shader look"
+            // comment) — this mirrors that same guard here.
+            if (r.currentEffect == VisualEffect.BLINK_FREEZE) {
+                r.drawVideoFrame(cameraTexId, texMatrix)
+            } else {
+                r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+            }
             // ✅ FIX (Blink Freeze noise/garbage bug): must pass the REAL current
             // framebuffer size (this on-screen surface is surfaceW x surfaceH),
             // not the old no-args default (frameWidth/frameHeight = camera
@@ -1096,7 +1150,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             // gets logged and skipped instead of permanently breaking
             // tracking for the rest of the session.
             if (wantsFace) {
-                try { liveFaceLandmarker?.detectAsync(mpImage, ts) }
+                try { liveFaceLandmarker?.detectAsync(mpImage, ts); faceSubmitCount++ }
                 catch (e: Exception) { android.util.Log.e("LiveEffectPreview", "face detectAsync failed, skipping this frame", e) }
             }
             if (wantsHand) {
@@ -1104,8 +1158,25 @@ class LiveEffectPreviewView @JvmOverloads constructor(
                 catch (e: Exception) { android.util.Log.e("LiveEffectPreview", "hand detectAsync failed, skipping this frame", e) }
             }
             if (wantsSeg) {
-                try { liveSegmenter?.segmentAsync(mpImage, ts) }
+                try { liveSegmenter?.segmentAsync(mpImage, ts); segSubmitCount++ }
                 catch (e: Exception) { android.util.Log.e("LiveEffectPreview", "segmentAsync failed, skipping this frame", e) }
+            }
+            // 🔍 DEBUG (Thermal Pulse/Gold Skin/Aura Glow "shows then disappears"):
+            // the error-listener fix (setErrorListener logging+recreate) covers
+            // one failure mode, but if submissions silently stop happening at
+            // all, or happen but results never come back, that listener never
+            // fires either - this is invisible without a direct count. Logs
+            // roughly every ~2s (every 30th submission) so it doesn't spam:
+            // submit vs result counts should track closely together and both
+            // keep climbing for as long as the effect stays selected. If
+            // submit keeps climbing but result stalls, the async pipeline is
+            // stuck (not erroring, just never calling back). If submit itself
+            // stalls, maybeSubmitForTracking() isn't being invoked at all.
+            if ((faceSubmitCount + segSubmitCount) % 30 == 1) {
+                android.util.Log.d("LiveEffectPreview", "🔍 tracking health: effect=${effect} " +
+                    "faceSubmit=$faceSubmitCount faceResult=$faceResultCount " +
+                    "segSubmit=$segSubmitCount segResult=$segResultCount " +
+                    "effectIntensity=${renderer?.effectIntensity}")
             }
         }
     }
@@ -1146,6 +1217,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
     private fun onFaceResult(result: FaceLandmarkerResult) {
         val r = renderer ?: return
+        faceResultCount++
         if (result.faceLandmarks().isEmpty()) return
         val landmarks = result.faceLandmarks()[0]
         // Bounding box from raw landmarks  -  same min/max approach FaceTracker.faceBoundingBox()
@@ -1806,6 +1878,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
 
     private fun onSegmentationResult(result: ImageSegmenterResult) {
         val r = renderer ?: return
+        segResultCount++
         val categoryMask = result.categoryMask().orElse(null) ?: return
         val w = categoryMask.width
         val h = categoryMask.height
