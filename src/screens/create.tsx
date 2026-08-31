@@ -46,9 +46,9 @@ import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/m
 import NetInfo from '@react-native-community/netinfo';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
-import { LiveEffectPreview } from '../../modules/video-baker/LiveEffectPreview';
-import type { LiveEffectPreviewHandle } from '../../modules/video-baker/LiveEffectPreview';
-import { ensureFireVideoCached } from '../../modules/video-baker/fireVideoCache';
+import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
+import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
+import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -545,11 +545,11 @@ const FX_EFFECTS: FxEffect[] = [
   {id:'fx_gl_wink_spark',      name:'Wink Spark',     emoji:'✨',category:'creative', desc:'Wink triggers a spark burst — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'wink_spark'},
   {id:'fx_gl_smile_shatter',   name:'Smile Shatter',  emoji:'💥',category:'creative', desc:'Smile cracks the screen — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'smile_shatter'},
   {id:'fx_gl_head_tilt_zoom',  name:'Tilt Zoom',      emoji:'🎯',category:'creative', desc:'Head tilt drives a dynamic zoom — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'head_tilt_zoom'},
-  {id:'fx_gl_aura_glow',       name:'Aura Glow (GL)', emoji:'🌟',category:'creative', desc:'Glowing outline, reacts to audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'aura_glow'},
+  // ⛔ REMOVED (broken — audio-reactive tracking effect never stabilized, cut per user request): {id:'fx_gl_aura_glow',       name:'Aura Glow (GL)', emoji:'🌟',category:'creative', desc:'Glowing outline, reacts to audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'aura_glow'},
   {id:'fx_gl_color_drain',     name:'Color Drain',    emoji:'🩶',category:'mood',     desc:'Desaturates the longer you hold still — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'color_drain'},
   {id:'fx_gl_silence_ripple',  name:'Silence Ripple',  emoji:'🔵',category:'mood',    desc:'Ripples out when audio goes quiet — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'silence_ripple'},
   // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_voice_halo',      name:'Voice Halo',     emoji:'⭕',category:'creative', desc:'Glow ring around your face, reacts to voice — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'voice_halo'},
-  {id:'fx_gl_thermal_pulse',   name:'Thermal Pulse',  emoji:'🌡️',category:'creative', desc:'Heat-map skin tone, pulses with audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'thermal_pulse'},
+  // ⛔ REMOVED (broken — audio-reactive tracking effect never stabilized, cut per user request): {id:'fx_gl_thermal_pulse',   name:'Thermal Pulse',  emoji:'🌡️',category:'creative', desc:'Heat-map skin tone, pulses with audio — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'thermal_pulse'},
   // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_depth_bloom',     name:'Depth Bloom',    emoji:'🌫️',category:'mood',    desc:'Background blooms with audio, you stay sharp — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'depth_bloom'},
   {id:'fx_gl_split_prism',     name:'Split Prism',    emoji:'🔺',category:'creative', desc:'Background splits into RGB layers on motion — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'split_prism'},
   // ⚠️ Requires a portal scene image picked at bake time — see pickPortalScene()
@@ -564,8 +564,14 @@ const FX_EFFECTS: FxEffect[] = [
   // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_gaze_trail',      name:'Gaze Trail',     emoji:'👀',category:'creative', desc:'Particles trail where you look — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gaze_trail'},
   {id:'fx_gl_double_take',     name:'Double Take',    emoji:'👥',category:'creative', desc:'Fast head turn leaves a ghost streak — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'double_take'},
   {id:'fx_gl_blink_freeze',    name:'Blink Freeze',   emoji:'📸',category:'creative', desc:'Blink freezes the frame + zoom punch — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'blink_freeze'},
-  {id:'fx_gl_gold_skin',       name:'Gold Skin',      emoji:'👑',category:'creative', desc:'Metallic gold body — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gold_skin'},
-  {id:'fx_gl_mouth_fire',      name:'Mouth Fire',     emoji:'🔥',category:'creative', desc:'Flame when mouth opens — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_fire'},
+  // ⛔ REMOVED (broken — segmentation-tracking effect never stabilized, cut per user request): {id:'fx_gl_gold_skin',       name:'Gold Skin',      emoji:'👑',category:'creative', desc:'Metallic gold body — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gold_skin'},
+  // 🆕 Replaces Thermal Pulse/Gold Skin/Aura Glow (all three removed — broken,
+  // MediaPipe/audio-reactive, never stabilized). Deliberately pure-shader: no
+  // face/hand/segmentation tracker, no audio reader — nothing that can
+  // silently stop delivering results mid-recording the way those three did.
+  // Always-on, consistent smoothing every frame.
+  {id:'fx_gl_skin_smooth',     name:'Skin Smooth',    emoji:'🌸',category:'beauty',   desc:'Smooths skin, subtle glow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'skin_smooth'},
+  // ⛔ COMMENTED OUT (not working reliably — fire-video texture dependency, cut per user request): {id:'fx_gl_mouth_fire',      name:'Mouth Fire',     emoji:'🔥',category:'creative', desc:'Flame when mouth opens — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'mouth_fire'},
   {id:'fx_gl_snow_fall',       name:'Snow Fall',      emoji:'❄️',category:'mood',     desc:'Ambient falling snow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'snow_fall'},
   // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_throw_confetti',  name:'Throw Confetti', emoji:'🎉',category:'creative', desc:'Throw motion bursts real confetti — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'throw_confetti'},
   // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_raise_eyebrow',   name:'Raise Eyebrow',  emoji:'🤨',category:'creative', desc:'Glow lifts with your brow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'raise_eyebrow'},
@@ -5873,7 +5879,18 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 }}
               >
                 <View style={[ms.filterThumb, selectedFx === f.id && ms.filterThumbActive, { overflow: 'hidden' }]}>
-                  <Image source={FX_IMAGES[f.id]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  {/* ✅ FIX: was unconditional — new effects added without a
+                      thumbnail PNG on disk yet (e.g. fx_gl_skin_smooth) would
+                      render <Image source={undefined}>, a blank/broken thumb.
+                      Same emoji-fallback pattern already used a bit further
+                      down for the other filter strip. */}
+                  {FX_IMAGES[f.id] ? (
+                    <Image source={FX_IMAGES[f.id]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  ) : (
+                    <View style={{ width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1a1a1a' }}>
+                      <Text style={{ fontSize: 22 }}>{f.emoji}</Text>
+                    </View>
+                  )}
                   {selectedFx === f.id && (
                     <View style={ms.filterThumbCheck}><Feather name="check" size={11} color="#000" /></View>
                   )}

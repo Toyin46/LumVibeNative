@@ -373,21 +373,25 @@ class LiveRecorder(
                 if (!eosSent) {
                     val inIndex = encoder.dequeueInputBuffer(10000)
                     if (inIndex >= 0) {
-                        val read = stream.read(chunk)
-                        // ✅ FIX: was encoder.getInputBuffer(inIndex)!! - if this
-                        // ever returned null (codec in an unexpected state), the
-                        // Kotlin !! assertion throws an exception whose message
-                        // is frequently null/unhelpful (a bare IllegalStateException
-                        // or a stripped null-check message), which is exactly the
-                        // opaque "AAC encoding failed - null" this was flagged from.
-                        // A real null here means this specific buffer index can't be
-                        // used - log clearly and skip it (encoder will offer another
-                        // index next iteration) instead of crashing the whole encode.
                         val inBuf = encoder.getInputBuffer(inIndex)
                         if (inBuf == null) {
                             Log.w(TAG, "encoder.getInputBuffer($inIndex) returned null - skipping this buffer")
                         } else {
                             inBuf.clear()
+                            // ✅ REAL FIX (confirmed by the actual stack trace this
+                            // time — BufferOverflowException at DirectByteBuffer.put,
+                            // line 392): chunk is a fixed 4096-byte scratch array, but
+                            // the MediaCodec input buffer's TRUE capacity depends on
+                            // this device's/encoder's own configuration (KEY_MAX_INPUT_
+                            // SIZE if set, otherwise whatever the codec picks) and can
+                            // be smaller than 4096 — reading a full 4096 bytes and then
+                            // calling put() on a buffer with less remaining room than
+                            // that overflows immediately. inBuf.remaining() right after
+                            // clear() IS this buffer's real capacity — never read or
+                            // put more than that, whatever chunk's array size is.
+                            val capacity = inBuf.remaining()
+                            val readLimit = minOf(chunk.size, capacity)
+                            val read = if (readLimit > 0) stream.read(chunk, 0, readLimit) else 0
                             if (read > 0) {
                                 inBuf.put(chunk, 0, read)
                                 // presentationTimeUs derived from how many audio

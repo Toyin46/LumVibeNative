@@ -21,6 +21,15 @@ enum class VisualEffect {
     DUOTONE_PULSE,
     LIQUID_CHROME,
     INK_WASH,
+    // 🆕 Replaces THERMAL_PULSE/GOLD_SKIN/AURA_GLOW (removed — all three were
+    // MediaPipe/audio-reactive and never stabilized). Deliberately pure-shader,
+    // same category as NEON_EDGE above: no face/hand/segmentation tracker, no
+    // audio reader, nothing that can silently stop delivering results mid-
+    // session. Runs through the exact same generic uTexture/uTexMatrix/
+    // uTexelSize/uIntensity pipeline every other Phase 1 effect already uses,
+    // so it needed zero new Kotlin wiring beyond this enum entry + the two
+    // `when` branches below.
+    SKIN_SMOOTH,
     // ---- Phase 2: needs FaceTracker's per-frame blendshape score, driven through
     // the same repurposed-uIntensity pattern MOOD_RING introduced. See
     // VideoTranscoder.FACE_SCORE_EFFECTS for the generic wiring (added below  -
@@ -159,15 +168,16 @@ enum class VisualEffect {
             "duotone_pulse" -> DUOTONE_PULSE
             "liquid_chrome" -> LIQUID_CHROME
             "ink_wash" -> INK_WASH
+            "skin_smooth" -> SKIN_SMOOTH
             "mood_ring" -> MOOD_RING
             "wink_spark" -> WINK_SPARK
             "smile_shatter" -> SMILE_SHATTER
             "head_tilt_zoom" -> HEAD_TILT_ZOOM
-            "aura_glow" -> AURA_GLOW
+            // ⛔ REMOVED (broken — audio-reactive tracking effect never stabilized, cut per user request): "aura_glow" -> AURA_GLOW
             "color_drain" -> COLOR_DRAIN
             "silence_ripple" -> SILENCE_RIPPLE
             "voice_halo" -> VOICE_HALO
-            "thermal_pulse" -> THERMAL_PULSE
+            // ⛔ REMOVED (broken — audio-reactive tracking effect never stabilized, cut per user request): "thermal_pulse" -> THERMAL_PULSE
             "depth_bloom" -> DEPTH_BLOOM
             "split_prism" -> SPLIT_PRISM
             "hand_portal" -> HAND_PORTAL
@@ -176,7 +186,7 @@ enum class VisualEffect {
             "gaze_trail" -> GAZE_TRAIL
             "double_take" -> DOUBLE_TAKE
             "blink_freeze" -> BLINK_FREEZE
-            "gold_skin" -> GOLD_SKIN
+            // ⛔ REMOVED (broken — segmentation-tracking effect never stabilized, cut per user request): "gold_skin" -> GOLD_SKIN
             // ⛔ REMOVED (not working reliably, cut per user request): "mouth_fire" -> MOUTH_FIRE
             "snow_fall" -> SNOW_FALL
             "throw_confetti" -> THROW_CONFETTI
@@ -287,6 +297,66 @@ object EffectShaders {
             vec3 outColor = mix(dark, dark + glow, uIntensity);
 
             gl_FragColor = vec4(outColor, base.a);
+        }
+    """.trimIndent()
+
+    private val skinSmooth = EXT_HEADER + """
+        varying vec2 vTexCoord;
+        uniform samplerExternalOES uTexture;
+        uniform vec2 uTexelSize;
+        uniform float uIntensity;
+
+        void main() {
+            vec4 center = texture2D(uTexture, vTexCoord);
+            vec3 cc = center.rgb;
+
+            // 8-neighbor ring, same offset pattern neonEdge already uses for its
+            // Sobel taps — 1.5x texel stride smooths visibly without needing a
+            // much larger (slower) kernel.
+            vec2 o = uTexelSize * 1.5;
+            vec3 c00 = texture2D(uTexture, vTexCoord + o * vec2(-1.0,  1.0)).rgb;
+            vec3 c01 = texture2D(uTexture, vTexCoord + o * vec2( 0.0,  1.0)).rgb;
+            vec3 c02 = texture2D(uTexture, vTexCoord + o * vec2( 1.0,  1.0)).rgb;
+            vec3 c10 = texture2D(uTexture, vTexCoord + o * vec2(-1.0,  0.0)).rgb;
+            vec3 c12 = texture2D(uTexture, vTexCoord + o * vec2( 1.0,  0.0)).rgb;
+            vec3 c20 = texture2D(uTexture, vTexCoord + o * vec2(-1.0, -1.0)).rgb;
+            vec3 c21 = texture2D(uTexture, vTexCoord + o * vec2( 0.0, -1.0)).rgb;
+            vec3 c22 = texture2D(uTexture, vTexCoord + o * vec2( 1.0, -1.0)).rgb;
+
+            // Range weight: a sample close in color to the center pixel counts
+            // (near) fully; a sample far off (a real edge — eyebrow against
+            // skin, eye against eyelid, hairline, jewelry) gets pushed toward
+            // zero weight. THIS is what keeps skin looking smoothed instead of
+            // the whole frame looking blurred — 8.0 is tuned to roughly zero
+            // out anything more than ~12% off in any channel.
+            float wSum = 1.0;
+            vec3 sum = cc;
+            float w;
+            w = 1.0 - clamp(distance(c00, cc) * 8.0, 0.0, 1.0); sum += c00 * w; wSum += w;
+            w = 1.0 - clamp(distance(c01, cc) * 8.0, 0.0, 1.0); sum += c01 * w; wSum += w;
+            w = 1.0 - clamp(distance(c02, cc) * 8.0, 0.0, 1.0); sum += c02 * w; wSum += w;
+            w = 1.0 - clamp(distance(c10, cc) * 8.0, 0.0, 1.0); sum += c10 * w; wSum += w;
+            w = 1.0 - clamp(distance(c12, cc) * 8.0, 0.0, 1.0); sum += c12 * w; wSum += w;
+            w = 1.0 - clamp(distance(c20, cc) * 8.0, 0.0, 1.0); sum += c20 * w; wSum += w;
+            w = 1.0 - clamp(distance(c21, cc) * 8.0, 0.0, 1.0); sum += c21 * w; wSum += w;
+            w = 1.0 - clamp(distance(c22, cc) * 8.0, 0.0, 1.0); sum += c22 * w; wSum += w;
+            vec3 smoothed = sum / wSum;
+
+            // Blend toward smoothed rather than replacing outright — even
+            // though the range weighting already preserves edges, mixing at
+            // 0.7 instead of going fully smoothed keeps real skin texture
+            // instead of an airbrushed/plastic look. uIntensity defaults to
+            // 1.0 here (SKIN_SMOOTH isn't in audioDirectEffects/motionEffects/
+            // stillnessEffects, so nothing ever overwrites it) — full, steady
+            // strength every frame, no tracking signal required.
+            vec3 outColor = mix(cc, smoothed, 0.7 * uIntensity);
+
+            // Small, consistent brightness + warmth lift rather than a color
+            // grade — reads as "healthy glow", not a filter.
+            outColor *= 1.03;
+            outColor += vec3(0.012, 0.008, 0.0) * uIntensity;
+
+            gl_FragColor = vec4(outColor, center.a);
         }
     """.trimIndent()
 
@@ -2391,6 +2461,7 @@ object EffectShaders {
     fun source(effect: VisualEffect): Pair<String, String> = when (effect) {
         VisualEffect.VINTAGE_FLICKER -> effectVertexShader to vintageFlicker
         VisualEffect.NEON_EDGE -> effectVertexShader to neonEdge
+        VisualEffect.SKIN_SMOOTH -> effectVertexShader to skinSmooth
         VisualEffect.DUOTONE_PULSE -> effectVertexShader to duotonePulse
         VisualEffect.LIQUID_CHROME -> effectVertexShader to liquidChrome
         VisualEffect.INK_WASH -> effectVertexShader to inkWash

@@ -748,28 +748,21 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             val sizes = map.getOutputSizes(SurfaceTexture::class.java) ?: return fallback
             if (sizes.isEmpty()) return fallback
 
-            // ✅ FIX (real cause of the residual stretch/off-center crop after the
-            // first aspect-ratio fix): StreamConfigurationMap.getOutputSizes()
-            // always reports sizes in the SENSOR's own native coordinate space
-            // (commonly landscape, width >= height - e.g. 1920x1080, 1280x720).
-            // targetW/targetH here is surfaceW/surfaceH - the phone's CURRENT
-            // portrait UI dimensions. Comparing size.width/size.height directly
-            // against targetW/targetH's ratio was comparing two numbers from two
-            // different coordinate spaces, off by the sensor's mounting angle -
-            // so "closest ratio" often wasn't actually close once you account for
-            // that. SENSOR_ORIENTATION (almost always 90 or 270 on phones,
-            // confirmed here because orientation itself already renders upright
-            // and correct on-device - this change only affects WHICH size gets
-            // requested, never rotation) tells us how many degrees the sensor
-            // image needs rotating to match the device's natural orientation;
-            // swapping target width/height when that's 90/270 puts both sides of
-            // the comparison in the same (sensor-native) space.
-            val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
-            val targetRatio = if (sensorOrientation == 90 || sensorOrientation == 270) {
-                targetH.toFloat() / targetW.toFloat()
-            } else {
-                targetW.toFloat() / targetH.toFloat()
-            }
+            // ⛔ REVERTED: a sensor-orientation-based target-ratio swap was
+            // added here on the theory that getOutputSizes() reports sizes in
+            // the sensor's native (landscape) space while targetW/targetH is
+            // in portrait UI space, so they needed to be reconciled before
+            // comparing. On this device that made the live preview visibly
+            // TOO WIDE - worse than the mild stretch before it - so the
+            // theory was wrong for this hardware (likely: this device's
+            // SurfaceTexture/HAL path already normalizes orientation
+            // somewhere before these numbers reach this code, so the extra
+            // swap double-corrected it). Back to the plain, direct
+            // comparison. cameraTexCoordBuffer's crop is still active and
+            // still does the real work of matching the displayed aspect
+            // ratio - this only affects which discrete size gets requested
+            // as the source for that crop.
+            val targetRatio = targetW.toFloat() / targetH.toFloat()
             // Cap candidate sizes at 1080p-equivalent pixel count - this is a
             // small on-screen effect preview, not a photo/video capture
             // target, so anything larger only costs GL/decode performance
