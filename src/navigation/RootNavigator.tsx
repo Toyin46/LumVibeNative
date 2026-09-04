@@ -32,6 +32,7 @@ import ConnectAccountsScreen     from '../connect-accounts';
 import LanguagePickerScreen      from '../language-picker';
 import ApplySubscriptions        from '../apply-subscriptions';
 import PremiumScreen             from '../premium-subscription';
+import StoryScreen                from '../story';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -97,6 +98,7 @@ export function RootNavigator() {
           <Stack.Screen name="ConnectAccounts"     component={ConnectAccountsScreen as any} />
           <Stack.Screen name="LanguagePicker"      component={LanguagePickerScreen as any} />
           <Stack.Screen name="Premium"             component={PremiumScreen as any} />
+          <Stack.Screen name="Story"               component={StoryScreen} />
         </>
       ) : (
         <Stack.Screen name="Auth" component={AuthStack as any} />

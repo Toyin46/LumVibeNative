@@ -120,14 +120,14 @@ export default function MarketplaceScreen() {
       <View style={s.header}>
         <Text style={s.headerTitle}>🛍️ {t.marketplace.title}</Text>
         <View style={s.headerRight}>
-          <TouchableOpacity style={s.walletBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/buy-coins' as never)}>
+          <TouchableOpacity style={s.walletBtn} onPress={() => navigation.navigate('BuyCoins')}>
             <Text style={s.walletCoins}>{mktCoins} 🪙</Text>
             <View style={s.walletAdd}><Feather name="plus" size={12} color="#000" /></View>
           </TouchableOpacity>
-          <TouchableOpacity style={s.withdrawBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/withdraw' as never)}>
+          <TouchableOpacity style={s.withdrawBtn} onPress={() => navigation.navigate('Withdraw')}>
             <Feather name="arrow-up-circle" size={16} color="#ffd700" />
           </TouchableOpacity>
-          <TouchableOpacity style={s.createBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/create-listing' as never)}>
+          <TouchableOpacity style={s.createBtn} onPress={() => navigation.navigate('CreateListing')}>
             <Feather name="plus" size={18} color="#000" />
             <Text style={s.createBtnText}>'Sell'</Text>
           </TouchableOpacity>
@@ -141,8 +141,8 @@ export default function MarketplaceScreen() {
             style={[s.tab, activeTab === tab && s.tabActive]}
             onPress={() => {
               setActiveTab(tab);
-              if (tab === 'orders')  navigation.navigate('/(tabs)/marketplace/orders' as never);
-              if (tab === 'selling') navigation.navigate('/(tabs)/marketplace/my-listings' as never);
+              if (tab === 'orders')  navigation.navigate('Orders');
+              if (tab === 'selling') navigation.navigate('MyListings');
             }}
           >
             <Text style={[s.tabText, activeTab === tab && s.tabTextActive]}>
@@ -189,14 +189,14 @@ export default function MarketplaceScreen() {
           showsVerticalScrollIndicator={false}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00ff88" />}
           renderItem={({ item }) => (
-            <ListingCard item={item} onPress={() => navigation.navigate(`/(tabs)/marketplace/listing/${item.id}` as never)} />
+            <ListingCard item={item} onPress={() => navigation.navigate('ListingDetail', { listingId: item.id })} />
           )}
           ListEmptyComponent={
             <View style={s.empty}>
               <Text style={{ fontSize: 48 }}>🛒</Text>
               <Text style={s.emptyTitle}>{t.marketplace.noListings}</Text>
               <Text style={s.emptySubtitle}>Be the first to offer a service!</Text>
-              <TouchableOpacity style={s.emptyBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/create-listing' as never)}>
+              <TouchableOpacity style={s.emptyBtn} onPress={() => navigation.navigate('CreateListing')}>
                 <Text style={s.emptyBtnText}>{t.marketplace.addListing}</Text>
               </TouchableOpacity>
             </View>

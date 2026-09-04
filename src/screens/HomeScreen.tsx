@@ -31,6 +31,19 @@ import { useAudioPlayer, useAudioPlayerStatus, AudioModule } from 'expo-audio';
 import { useTranslation } from '../locales/LanguageContext';
 import NetInfo from '@react-native-community/netinfo';
 
+// ✅ NEW: when a caught error is network-shaped (or the device is
+// confirmed offline), shows a clear "No internet" message instead of a
+// raw JS error like "TypeError: Network request failed". For any other
+// error (a real, human-readable message from Supabase/Paystack/etc.), the
+// original message passes through completely unchanged — this never
+// alters any error message that was already working correctly.
+function getFriendlyErrorMessage(e: any, isOffline: boolean, fallback: string): string {
+  const msg = String(e?.message || '');
+  const isNetworkErr = isOffline || /network request failed|failed to fetch|timeout|abort|no internet/i.test(msg);
+  return isNetworkErr ? 'No internet connection. Please check your network and try again.' : (msg || fallback);
+}
+
+
 const { width } = Dimensions.get('window');
 
 // ─── FEED PERFORMANCE SETTINGS ───────────────────────────────────────────────
@@ -273,9 +286,20 @@ function computeScore(
 // display latency. shouldLoad starts true so the <Image> renders immediately.
 function LazyImage({ uri, isVisible, style }: { uri: string; isVisible: boolean; style?: any }) {
   const [imgHeight, setImgHeight] = useState(width * 0.75); // sensible default — no layout jump
+  // ✅ FIX (real remaining cause of the black-box-in-feed): this had zero
+  // retry handling — if the very first network attempt for this image URI
+  // failed (Cloudinary still finishing a lazy transform it hadn't generated
+  // yet, or just a transient blip), the <Image> stayed blank forever with no
+  // second attempt. maxRetries short backoff attempts, each forcing a real
+  // remount (via the key prop below) rather than relying on RN's image cache
+  // to naturally retry — a failed load is sometimes cached as "this URI
+  // doesn't work" until something forces a fresh fetch.
+  const [retryKey, setRetryKey] = useState(0);
+  const maxRetries = 3;
 
   useEffect(() => {
     if (!uri) return;
+    setRetryKey(0); // new uri — reset retry state so old failures don't carry over
     Image.getSize(
       uri,
       (w, h) => { if (w > 0) setImgHeight(Math.round((h / w) * width)); },
@@ -283,12 +307,25 @@ function LazyImage({ uri, isVisible, style }: { uri: string; isVisible: boolean;
     );
   }, [uri]);
 
+  const handleError = () => {
+    if (retryKey >= maxRetries) {
+      // ✅ NEW: this used to fail silently after 3 retries — no way to tell
+      // WHY an image never showed. Logging the URI so the real cause (bad
+      // URL, 404, expired Cloudinary transform, etc.) is visible next time.
+      console.warn('[LumVibe] image failed to load after', maxRetries, 'retries:', uri);
+      return;
+    }
+    setTimeout(() => setRetryKey(k => k + 1), 900 * (retryKey + 1));
+  };
+
   return (
     <Image
+      key={`${uri}-${retryKey}`}
       source={{ uri }}
       style={[{ width, height: imgHeight, backgroundColor: '#1a1a1a' }, style]}
       resizeMode="contain"
       fadeDuration={100}
+      onError={handleError}
     />
   );
 }
@@ -389,6 +426,7 @@ interface Post {
   coins_received: number; liked_by: string[]; saved_by: string[];
   location?: string; music_url?: string; music_name?: string;
   music_artist?: string; created_at: string; has_watermark?: boolean;
+  music_start_offset_ms?: number; music_end_offset_ms?: number;
   text_gradient?: string; voice_duration?: number; _score?: number;
   video_filter_tint?: string | null; applied_filter?: string | null;
   video_effect?: string | null; vibe_type?: string | null;
@@ -783,7 +821,12 @@ const PostCard = memo(({
             ? item.music_url
             : null;
         const loop = !isVoice; // voice plays once, background music loops
-        if (audioUri && !cancelled) await startAudio(audioUri, loop, () => cancelled);
+        // ✅ Pass the poster's trim window through so background music
+        // actually starts/loops where they picked, instead of always
+        // playing the full track from 0:00 (see startAudio's fix note).
+        const startOffsetMs = !isVoice ? (item.music_start_offset_ms || 0) : 0;
+        const endOffsetMs   = !isVoice ? (item.music_end_offset_ms   || 0) : 0;
+        if (audioUri && !cancelled) await startAudio(audioUri, loop, () => cancelled, startOffsetMs, endOffsetMs);
       } else {
         cancelled = true;
         if (soundRef.current) {
@@ -821,7 +864,13 @@ const PostCard = memo(({
   // shouldPlay:true in createAsync starts playback immediately as the first
   // bytes arrive (progressive download) — much faster on slow networks than
   // calling createAsync then playAsync as two separate native calls.
-  const startAudio = async (uri: string, loop: boolean, isCancelled: () => boolean) => {
+  const startAudio = async (
+    uri: string,
+    loop: boolean,
+    isCancelled: () => boolean,
+    startOffsetMs: number = 0,
+    endOffsetMs: number = 0,
+  ) => {
     if (!uri || (!isRemoteUrl(uri) && !uri.startsWith('file://'))) return;
     try {
       if (soundRef.current) {
@@ -855,16 +904,48 @@ const PostCard = memo(({
       globalAudioManager.currentSound = player;
       globalAudioManager.currentPostId = item.id;
       player.volume = loop ? 0.7 : 1.0;
-      player.loop = loop;
+      // ✅ FIX (music trim / "start from the middle" not respected in feed):
+      // native player.loop only loops the WHOLE file start-to-end — it has
+      // no concept of the poster's custom trim window. When create.tsx's
+      // waveform trim set a real end offset, we loop that exact window
+      // manually (same currentTime-polling approach create.tsx's own
+      // preview already uses for this) instead of the native full-file loop.
+      const hasCustomWindow = endOffsetMs > startOffsetMs;
+      player.loop = loop && !hasCustomWindow;
 
-      if (!loop) {
-        player.addListener('playbackStatusUpdate', (status: any) => {
-          if (status.isLoaded && status.duration > 0)
-            setVoiceProgress(status.currentTime / status.duration);
-          if (status.didJustFinish) { setIsPlaying(false); setVoiceProgress(0); }
-        });
-      }
+      // ✅ FIX: this listener used to only attach when `!loop` — meaning
+      // background/looped music tracks (loop:true) had ZERO visibility into
+      // whether the audio actually loaded or played. The UI would flip to
+      // "Playing" the instant .play() was *called*, regardless of whether
+      // anything was actually coming out of the speaker — a bad/unreachable
+      // URL would fail completely silently. Now every player gets this
+      // listener; loop tracks just skip the voice-only progress bar update.
+      player.addListener('playbackStatusUpdate', (status: any) => {
+        if (!loop && status.isLoaded && status.duration > 0)
+          setVoiceProgress(status.currentTime / status.duration);
+        if (!loop && status.didJustFinish) { setIsPlaying(false); setVoiceProgress(0); }
+        // ✅ Manual loop-back to the poster's chosen trim START once
+        // playback crosses their chosen trim END — this is what actually
+        // makes a 15s trim starting mid-song loop that 15s window forever,
+        // instead of the native loop silently ignoring it and looping the
+        // entire original track from 0:00.
+        if (loop && hasCustomWindow && status.isLoaded && status.currentTime * 1000 >= endOffsetMs) {
+          player.seekTo(startOffsetMs / 1000).catch(() => {});
+        }
+        if (status.error) {
+          console.warn('[LumVibe] playback error for', uri, '-', status.error);
+          if (!isCancelled()) setIsPlaying(false);
+        }
+      });
       await player.play();
+      // ✅ Seek to the poster's chosen start point (e.g. "start from the
+      // middle"). startOffsetMs comes straight from create.tsx's trim
+      // slider (music_start_offset_ms) — previously never read here at
+      // all, so every post's background music always played from 0:00
+      // regardless of what the poster picked when trimming.
+      if (startOffsetMs > 0) {
+        try { await player.seekTo(startOffsetMs / 1000); } catch (_) {}
+      }
       if (!isCancelled()) setIsPlaying(true);
     } catch (e) {
       console.warn('[LumVibe] startAudio failed for uri:', uri, e);
@@ -932,7 +1013,7 @@ const PostCard = memo(({
         soundRef.current = null;
       }
     }
-    await startAudio(item.music_url, true, () => false);
+    await startAudio(item.music_url, true, () => false, item.music_start_offset_ms || 0, item.music_end_offset_ms || 0);
   };
 
   const handleFollow = async () => {
@@ -1317,10 +1398,20 @@ export default function HomeScreen() {
     // immediately. debouncedLoadFeed already existed in this file but was
     // never actually wired up here — now realtime events collapse into at
     // most one reload every 2 seconds instead of one per event.
-    const postsChannel         = supabase.channel('posts-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, () => { if (!isLoadingRef.current) debouncedLoadFeed(); }).subscribe();
-    const commentsChannel      = supabase.channel('comments-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'comments' }, () => { if (!isLoadingRef.current && selectedPost) handleComment(selectedPost); }).subscribe();
-    const likesChannel         = supabase.channel('likes-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'likes' }, () => { if (!isLoadingRef.current) debouncedLoadFeed(); }).subscribe();
-    const notificationsChannel = supabase.channel('notifications-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, () => { loadUnreadNotifications(); }).subscribe();
+    // FIX: "cannot add postgres_changes callbacks... after subscribe()" —
+    // these four channel names were completely fixed strings. removeChannel()
+    // in the cleanup below is async (it's a websocket unsubscribe), so if
+    // this screen unmounts/freezes-and-reconnects quickly (navigating away
+    // and back, Fast Refresh in dev), the new mount's .channel('posts-changes')
+    // can grab the SAME not-yet-fully-torn-down channel object from the old
+    // mount — which is already subscribed — and .on() on it throws exactly
+    // this error. A unique suffix per mount means a new subscribe can never
+    // collide with a stale one still being removed.
+    const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const postsChannel         = supabase.channel(`posts-changes-${mountId}`).on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, () => { if (!isLoadingRef.current) debouncedLoadFeed(); }).subscribe();
+    const commentsChannel      = supabase.channel(`comments-changes-${mountId}`).on('postgres_changes', { event: '*', schema: 'public', table: 'comments' }, () => { if (!isLoadingRef.current && selectedPost) handleComment(selectedPost); }).subscribe();
+    const likesChannel         = supabase.channel(`likes-changes-${mountId}`).on('postgres_changes', { event: '*', schema: 'public', table: 'likes' }, () => { if (!isLoadingRef.current) debouncedLoadFeed(); }).subscribe();
+    const notificationsChannel = supabase.channel(`notifications-changes-${mountId}`).on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, () => { loadUnreadNotifications(); }).subscribe();
     return () => {
       supabase.removeChannel(postsChannel); supabase.removeChannel(commentsChannel);
       supabase.removeChannel(likesChannel); supabase.removeChannel(notificationsChannel);
@@ -1444,6 +1535,8 @@ export default function HomeScreen() {
           liked_by: likes.users, saved_by: post.saved_by || [],
           location: post.location, music_url: post.music_url,
           music_name: post.music_name, music_artist: post.music_artist,
+          music_start_offset_ms: post.music_start_offset_ms || 0,
+          music_end_offset_ms: post.music_end_offset_ms || 0,
           created_at: post.created_at, has_watermark: post.has_watermark || false,
           text_gradient: post.text_gradient, voice_duration: post.voice_duration,
           video_filter_tint: post.video_filter_tint || null,
@@ -1493,7 +1586,7 @@ export default function HomeScreen() {
       await loadFollowStatus(userIds);
     } catch (e: any) {
       console.error('Error loading feed:', e);
-      Alert.alert('Error', `Failed to load feed: ${e.message || 'Unknown error'}`);
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to load feed.'));
     } finally { clearTimeout(loadTimeout); setLoading(false); setRefreshing(false); isLoadingRef.current = false; }
   };
 
@@ -1571,6 +1664,8 @@ export default function HomeScreen() {
           liked_by: likes.users, saved_by: post.saved_by || [],
           location: post.location, music_url: post.music_url,
           music_name: post.music_name, music_artist: post.music_artist,
+          music_start_offset_ms: post.music_start_offset_ms || 0,
+          music_end_offset_ms: post.music_end_offset_ms || 0,
           created_at: post.created_at, has_watermark: post.has_watermark || false,
           text_gradient: post.text_gradient, voice_duration: post.voice_duration,
           video_filter_tint: post.video_filter_tint || null,
@@ -1905,7 +2000,7 @@ export default function HomeScreen() {
       setPosts(prev => prev.map(updateComments));
       setFeedItems(prev => prev.map(item => (!isAd(item) && !isWinnerCard(item)) ? updateComments(item as Post) : item));
       await handleComment(selectedPost);
-    } catch (e: any) { Alert.alert('Error', `Failed to post comment: ${e.message || 'Unknown error'}`); }
+    } catch (e: any) { Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to post comment.')); }
     finally { setSubmittingComment(false); }
   }, [commentText, selectedPost, userId, submittingComment, replyingTo]);
 

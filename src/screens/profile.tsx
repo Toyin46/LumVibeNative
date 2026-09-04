@@ -17,6 +17,19 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as FileSystem from 'expo-file-system/legacy';
 import { decode } from 'base64-arraybuffer';
 import NetInfo from '@react-native-community/netinfo';
+
+// ✅ NEW: when a caught error is network-shaped (or the device is
+// confirmed offline), shows a clear "No internet" message instead of a
+// raw JS error like "TypeError: Network request failed". For any other
+// error (a real, human-readable message from Supabase/Paystack/etc.), the
+// original message passes through completely unchanged — this never
+// alters any error message that was already working correctly.
+function getFriendlyErrorMessage(e: any, isOffline: boolean, fallback: string): string {
+  const msg = String(e?.message || '');
+  const isNetworkErr = isOffline || /network request failed|failed to fetch|timeout|abort|no internet/i.test(msg);
+  return isNetworkErr ? 'No internet connection. Please check your network and try again.' : (msg || fallback);
+}
+
 import { getWithdrawingUserReferrer } from '../utils/referralRewards';
 import { WinnerProfileBadge } from '../components/LeaderboardWinnerCelebration'; 
 
@@ -286,11 +299,20 @@ const THEMES: Record<string, { background: string; card: string; primary: string
 };
 
 const UNLOCKABLE_FEATURES = [
-  { id: 'custom_themes',      name: 'Custom Profile Themes',    icon: '🎨', requiredInvites: 3  },
-  { id: 'advanced_analytics', name: 'Advanced Analytics',       icon: '📊', requiredInvites: 5  },
-  { id: 'priority_support',   name: 'Priority Support',         icon: '💬', requiredInvites: 10 },
-  { id: 'glowing_avatar',     name: 'Glowing Avatar Border ✨', icon: '🌟', requiredInvites: 20 },
+  { id: 'custom_themes',      name: 'Custom Profile Themes',    icon: '🎨', requiredInvites: 1 },
+  { id: 'advanced_analytics', name: 'Advanced Analytics',       icon: '📊', requiredInvites: 3 },
+  { id: 'priority_support',   name: 'Priority Support',         icon: '💬', requiredInvites: 5 },
+  { id: 'glowing_avatar',     name: 'Glowing Avatar Border ✨', icon: '🌟', requiredInvites: 5 },
 ];
+
+// ✅ NEW: Verified-tick rules.
+// — First 100 signups ever get it permanently, alongside the Founding
+//   Creator badge (see checkAndAwardBadges). Never earnable after #100.
+// — Everyone else earns it once their follower count reaches this number.
+//   STICKY: once granted it's never re-checked or removed. Bump this single
+//   number later (e.g. to 10_000_000) as the platform grows — nothing else
+//   needs to change.
+const VERIFICATION_FOLLOWER_THRESHOLD = 2000;
 
 const SOCIAL_PLATFORMS = [
   { id: 'twitter',   label: 'X (Twitter)', prefix: 'https://twitter.com/',  color: '#e7e9ea', initial: 'X'  },
@@ -746,7 +768,7 @@ function ContactInviteModal({
 // ─── ProfileScreen ────────────────────────────────────────────────────────────
 
 export default function ProfileScreen() {
-  const { userProfile, user, logout } = useAuthStore();
+  const { userProfile, user, logout, loadProfile } = useAuthStore();
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
   const [isOffline, setIsOffline] = useState(false);
@@ -1064,11 +1086,10 @@ export default function ProfileScreen() {
   const checkAndAwardBadges = async (existingBadges: any[]) => {
     if (!user?.id) return;
     try {
-      const [userDataRes, userCountRes, pcRes, uRes, upRes] = await Promise.all([
-        supabase.from('users').select('points').eq('id', user.id).single(),
-        supabase.from('users').select('id', { count: 'exact', head: true }),
+      const [userDataRes, pcRes, uRes, upRes] = await Promise.all([
+        supabase.from('users').select('points, created_at').eq('id', user.id).single(),
         supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', user.id),
-        supabase.from('users').select('followers_count, current_streak').eq('id', user.id).single(),
+        supabase.from('users').select('followers_count, current_streak, is_verified').eq('id', user.id).single(),
         supabase.from('posts').select('id').eq('user_id', user.id),
       ]);
       let lks = 0;
@@ -1076,10 +1097,28 @@ export default function ProfileScreen() {
         const { count } = await supabase.from('likes').select('*', { count: 'exact', head: true }).in('post_id', upRes.data.map((p: any) => p.id));
         lks = count || 0;
       }
-      const currentUserCount = userCountRes.count ?? 999999;
+
+      // ✅ FIXED: this used to be `supabase.from('users').select('id', { count:
+      // 'exact', head: true })` — i.e. the TOTAL number of users in the table
+      // right now. That grows forever, so it silently broke for early users
+      // the moment total signups passed 100/1000 — UNLESS they'd already
+      // opened their profile before that point. Below, we instead count only
+      // users created at-or-before THIS user's own signup time, which is
+      // this user's actual, permanent signup rank. It never changes no
+      // matter how many people join later.
+      let mySignupRank = 999999;
+      const myCreatedAt = userDataRes.data?.created_at;
+      if (myCreatedAt) {
+        const { count } = await supabase
+          .from('users')
+          .select('id', { count: 'exact', head: true })
+          .lte('created_at', myCreatedAt);
+        mySignupRank = count ?? 999999;
+      }
+
       const criteria = [
-        { id: 'founding_member', bonusPoints: 100, check: () => currentUserCount <= 100 },
-        { id: 'early_adopter',   bonusPoints: 50,  check: () => currentUserCount <= 1000 },
+        { id: 'founding_member', bonusPoints: 100, check: () => mySignupRank <= 100 },
+        { id: 'early_adopter',   bonusPoints: 50,  check: () => mySignupRank <= 1000 },
         { id: 'streak_7',        bonusPoints: 50,  check: () => (uRes.data?.current_streak || 0) >= 7 },
         { id: 'streak_30',       bonusPoints: 200, check: () => (uRes.data?.current_streak || 0) >= 30 },
         { id: 'posts_10',        bonusPoints: 100, check: () => (pcRes.count || 0) >= 10 },
@@ -1116,6 +1155,28 @@ export default function ProfileScreen() {
       if (pointsToAdd > 0) {
         const newPoints = (userDataRes.data?.points || 0) + pointsToAdd;
         await supabase.from('users').update({ points: newPoints }).eq('id', user.id);
+      }
+
+      // ✅ NEW: Verified-tick assignment.
+      // — First 100 signups ever: permanent tick, granted alongside Founding
+      //   Creator. Never revoked, never earnable again after user #100.
+      // — Everyone else (#101+): earns the tick once follower count reaches
+      //   VERIFICATION_FOLLOWER_THRESHOLD. STICKY — once true, this is never
+      //   re-checked or removed, even if followers later drop. Matches how
+      //   Instagram/TikTok/YouTube verification actually behaves in
+      //   practice: an earned, kept status — not a live recalculated quota.
+      const alreadyVerified = uRes.data?.is_verified === true;
+      if (!alreadyVerified) {
+        const qualifiesFounding  = mySignupRank <= 100;
+        const qualifiesFollowers = (uRes.data?.followers_count || 0) >= VERIFICATION_FOLLOWER_THRESHOLD;
+        if (qualifiesFounding || qualifiesFollowers) {
+          const { error: verifyError } = await supabase.from('users').update({ is_verified: true }).eq('id', user.id);
+          if (!verifyError) {
+            try { await loadProfile?.(); } catch {}
+          } else {
+            console.warn('Verified-tick update error:', verifyError.message);
+          }
+        }
       }
     } catch (e: any) {
       console.warn('checkAndAwardBadges error:', e?.message);
@@ -1445,7 +1506,7 @@ export default function ProfileScreen() {
       Alert.alert('Account Deleted', 'Your account and all data have been permanently deleted.');
       navigation.dispatch(CommonActions.reset({ index: 0, routes: [{ name: 'Login' }] }));
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to delete account. Please contact lumvibesupport@gmail.com');
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to delete account. Please contact lumvibesupport@gmail.com'));
     } finally {
       setDeletingAccount(false);
       setDeleteAccountModalVisible(false);
@@ -1580,7 +1641,7 @@ export default function ProfileScreen() {
       setEditModalVisible(false);
       await onRefresh();
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to update profile');
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to update profile'));
     } finally {
       setSaving(false);
     }
@@ -1607,7 +1668,7 @@ export default function ProfileScreen() {
         await onRefresh();
       }
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to update avatar');
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to update avatar'));
     } finally {
       setUploadingAvatar(false);
     }
@@ -1626,7 +1687,7 @@ export default function ProfileScreen() {
       setSocialModalVisible(false);
       Alert.alert('Saved! ✅', 'Social links updated.');
     } catch (e: any) {
-      Alert.alert('Error', e.message);
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Something went wrong. Please try again.'));
     } finally {
       setSavingSocial(false);
     }
@@ -1681,7 +1742,7 @@ export default function ProfileScreen() {
       setPaystackConnectModalVisible(false);
       Alert.alert('Bank Connected! ✅', `Your ${selectedCountry.name} bank has been saved.`);
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to connect bank');
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to connect bank'));
     } finally {
       setConnectingPaystack(false);
     }
@@ -1718,7 +1779,7 @@ export default function ProfileScreen() {
         Alert.alert('Verification Failed', result.message || 'Invalid account details');
       }
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Verification failed');
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Verification failed'));
     } finally {
       setVerifyingAccount(false);
     }
@@ -1743,7 +1804,7 @@ export default function ProfileScreen() {
       setPaystackConnectModalVisible(false);
       Alert.alert('Success! 🎉', 'Bank account connected! You can now withdraw.');
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to connect account');
+      Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to connect account'));
     } finally {
       setConnectingPaystack(false);
     }
@@ -1914,9 +1975,9 @@ export default function ProfileScreen() {
         } catch (refundErr) {
           console.error('CRITICAL: Coin refund failed for user', user!.id, refundErr);
         }
-        Alert.alert('Withdrawal Failed', `${e.message || 'Please try again.'}\n\nYour coins have been refunded. Contact lumvibesupport@gmail.com if this persists.`);
+        Alert.alert('Withdrawal Failed', `${getFriendlyErrorMessage(e, isOffline, 'Please try again.')}\n\nYour coins have been refunded. Contact lumvibesupport@gmail.com if this persists.`);
       } else {
-        Alert.alert('Withdrawal Failed', e.message || 'Failed to process. Your coins are safe.');
+        Alert.alert('Withdrawal Failed', getFriendlyErrorMessage(e, isOffline, 'Failed to process. Your coins are safe.'));
       }
     } finally {
       setWithdrawing(false);
@@ -2054,7 +2115,9 @@ export default function ProfileScreen() {
                 )}
                 <View style={s.avatarContainer}>
                   <TouchableOpacity onPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
-                    <ReferralGlowBorder color={theme.primary} size={90}>{AvatarImg}</ReferralGlowBorder>
+                    {hasGlowingAvatar
+                      ? <ReferralGlowBorder color={theme.primary} size={90}>{AvatarImg}</ReferralGlowBorder>
+                      : AvatarImg}
                   </TouchableOpacity>
                   <TouchableOpacity style={[th.cameraBadge, { bottom: -2, right: -2 }]} onPress={handleChangeAvatar}>
                     {uploadingAvatar
@@ -2066,9 +2129,14 @@ export default function ProfileScreen() {
 
               <View style={s.nameRowCenter}>
                 <Text style={s.nameCenter}>{userProfile.display_name}</Text>
-                {userProfile.is_premium
-                  ? <MaterialCommunityIcons name="crown" size={18} color="#ffd700" />
-                  : <Feather name="check-circle" size={16} color={theme.primary} />}
+                {userProfile.is_premium && <MaterialCommunityIcons name="crown" size={18} color="#ffd700" />}
+                {/* ✅ FIXED: this used to show a check-circle for EVERY non-premium
+                    user unconditionally — meaning brand-new, unverified accounts
+                    displayed a fake verified tick. Now it only renders when the
+                    account is actually verified (first-100 founding creators,
+                    permanently, or anyone else once they cross the follower
+                    threshold — see checkAndAwardBadges / VERIFICATION_FOLLOWER_THRESHOLD). */}
+                {userProfile.is_verified && <Feather name="check-circle" size={16} color={theme.primary} />}
               </View>
               <Text style={s.usernameCenter}>@{userProfile.username}</Text>
 
@@ -2191,6 +2259,11 @@ export default function ProfileScreen() {
 
             <View style={s.newProfileRow}>
               <View style={[s.avatarContainer, hasGlowingAvatar && { marginRight: 28 }]}>
+                {(earnedBadgeIds.includes('founding_member') || earnedBadgeIds.includes('early_adopter')) && (
+                  <View style={s.founderPillWrap}>
+                    <FounderBadgePill isFounder={earnedBadgeIds.includes('founding_member')} primaryColor={theme.primary} />
+                  </View>
+                )}
                 <TouchableOpacity onPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
                   {AvatarNode}
                 </TouchableOpacity>
@@ -2220,6 +2293,7 @@ export default function ProfileScreen() {
               <View style={s.nameRow}>
                 <Text style={s.name}>{userProfile.display_name}</Text>
                 {userProfile.is_premium && <MaterialCommunityIcons name="crown" size={20} color="#ffd700" />}
+                {userProfile.is_verified && <Feather name="check-circle" size={17} color={theme.primary} />}
                 {hasGlowingAvatar && (
                   <View style={[s.glowBadge, { backgroundColor: theme.primary + '22', borderColor: theme.primary + '66' }]}>
                     <Text style={[s.glowBadgeText, { color: theme.primary }]}>✨ Top Referrer</Text>
@@ -2966,7 +3040,7 @@ export default function ProfileScreen() {
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>🎁</Text><Text style={s.benefitText}>You get: 100 points when they join</Text></View>
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>✨</Text><Text style={s.benefitText}>Friend gets: 50 points on signup</Text></View>
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>💰</Text><Text style={s.benefitText}>You earn: 5% coins on every withdrawal they make — forever!</Text></View>
-                  <View style={s.benefitItem}><Text style={s.benefitIcon}>🌟</Text><Text style={s.benefitText}>Refer 20 friends: unlock a glowing avatar border!</Text></View>
+                  <View style={s.benefitItem}><Text style={s.benefitIcon}>🌟</Text><Text style={s.benefitText}>Refer 5 friends: unlock a glowing avatar border!</Text></View>
                 </View>
               </View>
 
@@ -3063,11 +3137,11 @@ export default function ProfileScreen() {
                 <Text style={{ fontSize: 20 }}>🌐</Text><Text style={s.settingsText}>{t.common.language}</Text><Feather name="chevron-right" size={18} color="#555" />
               </TouchableOpacity>
               <TouchableOpacity style={th.settingsItem} onPress={() => { setSettingsVisible(false); setTimeout(() => { setEditingSocial({ ...socialLinks }); setSocialModalVisible(true); }, 300); }}>
-                <Feather name="link" size={20} color={theme.primary} /><Text style={s.settingsText}>Social Links</Text><Feather name="chevron-right" size={18} color="#555" />
+                <Feather name="link" size={20} color={theme.primary} /><Text style={s.settingsText}>{t.settings.socialLinks}</Text><Feather name="chevron-right" size={18} color="#555" />
               </TouchableOpacity>
               <View style={th.settingsItem}>
                 <Feather name="layout" size={20} color={theme.primary} />
-                <Text style={s.settingsText}>New Profile Layout</Text>
+                <Text style={s.settingsText}>{t.settings.newProfileLayout}</Text>
                 <Switch
                   value={useNewLayout}
                   onValueChange={async v => { setUseNewLayout(v); try { await supabase.from('users').update({ use_new_profile_layout: v }).eq('id', user!.id); } catch {} }}
@@ -3077,24 +3151,32 @@ export default function ProfileScreen() {
               </View>
               <View style={th.settingsItem}>
                 <Feather name="bell" size={20} color={theme.primary} />
-                <Text style={s.settingsText}>Notifications</Text>
+                <Text style={s.settingsText}>{t.common.notifications}</Text>
                 <Switch value={notificationsEnabled} onValueChange={setNotificationsEnabled} trackColor={{ false: '#333', true: theme.primary }} thumbColor="#fff" />
               </View>
               <View style={th.settingsItem}>
                 <Feather name="moon" size={20} color={theme.primary} />
-                <Text style={s.settingsText}>Dark Mode</Text>
+                <Text style={s.settingsText}>{t.settings.darkMode}</Text>
                 <Switch value={darkModeEnabled} onValueChange={setDarkModeEnabled} trackColor={{ false: '#333', true: theme.primary }} thumbColor="#fff" />
               </View>
               <View style={{ padding: 15, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' }}>
-                <Text style={[s.settingsText, { marginBottom: 10 }]}>App Theme</Text>
+                <Text style={[s.settingsText, { marginBottom: 10 }]}>{t.settings.appearance}</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  {Object.entries(THEMES).map(([key, tConfig]) => (
-                    <TouchableOpacity
-                      key={key}
-                      onPress={() => handleThemeChange(key)}
-                      style={{ backgroundColor: tConfig.primary, width: 36, height: 36, borderRadius: 18, margin: 4, borderWidth: activeThemeId === key ? 2 : 0, borderColor: '#fff' }}
-                    />
-                  ))}
+                  {Object.entries(THEMES).map(([key, tConfig]) => {
+                    const themeUnlocked = key === 'default' || unlockedFeatures.includes('custom_themes');
+                    return (
+                      <TouchableOpacity
+                        key={key}
+                        onPress={() => {
+                          if (!themeUnlocked) { Alert.alert('Feature Locked 🔒', `Custom themes unlock after ${UNLOCKABLE_FEATURES.find(f => f.id === 'custom_themes')?.requiredInvites} invites.\n\nYou have ${inviteCount}.`); return; }
+                          handleThemeChange(key);
+                        }}
+                        style={{ backgroundColor: tConfig.primary, width: 36, height: 36, borderRadius: 18, margin: 4, borderWidth: activeThemeId === key ? 2 : 0, borderColor: '#fff', opacity: themeUnlocked ? 1 : 0.35, alignItems: 'center', justifyContent: 'center' }}
+                      >
+                        {!themeUnlocked && <Feather name="lock" size={14} color="#fff" />}
+                      </TouchableOpacity>
+                    );
+                  })}
                 </ScrollView>
               </View>
               <View style={s.settingsDivider} />
@@ -3102,23 +3184,23 @@ export default function ProfileScreen() {
                 <Feather name="info" size={20} color={theme.primary} /><Text style={s.settingsText}>{t.settings.about}</Text><Feather name="chevron-right" size={18} color="#555" />
               </TouchableOpacity>
               <TouchableOpacity style={th.settingsItem} onPress={() => Linking.openURL('mailto:lumvibesupport@gmail.com')}>
-                <Feather name="mail" size={20} color={theme.primary} /><Text style={s.settingsText}>Contact Support</Text><Feather name="chevron-right" size={18} color="#555" />
+                <Feather name="mail" size={20} color={theme.primary} /><Text style={s.settingsText}>{t.about.support}</Text><Feather name="chevron-right" size={18} color="#555" />
               </TouchableOpacity>
               <View style={s.settingsDivider} />
               {/* ✅ NEW: Privacy & Compliance Section */}
               <TouchableOpacity style={th.settingsItem} onPress={() => { setSettingsVisible(false); setTimeout(handleDownloadData, 300); }}>
                 <Feather name="download" size={20} color={theme.primary} />
-                <Text style={s.settingsText}>Download My Data</Text>
+                <Text style={s.settingsText}>{t.settings.downloadMyData}</Text>
                 <Feather name="chevron-right" size={18} color="#555" />
               </TouchableOpacity>
               <TouchableOpacity style={th.settingsItem} onPress={() => { setSettingsVisible(false); setTimeout(handleDoNotSell, 300); }}>
                 <Feather name="shield" size={20} color={theme.primary} />
-                <Text style={s.settingsText}>Do Not Sell My Information</Text>
+                <Text style={s.settingsText}>{t.settings.doNotSellInfo}</Text>
                 <Feather name="chevron-right" size={18} color="#555" />
               </TouchableOpacity>
               <TouchableOpacity style={th.settingsItem} onPress={() => Linking.openURL('https://lumvibe.site/privacy')}>
                 <Feather name="file-text" size={20} color={theme.primary} />
-                <Text style={s.settingsText}>Privacy Policy</Text>
+                <Text style={s.settingsText}>{t.about.privacy}</Text>
                 <Feather name="chevron-right" size={18} color="#555" />
               </TouchableOpacity>
               <View style={s.settingsDivider} />
@@ -3126,7 +3208,7 @@ export default function ProfileScreen() {
                 <Feather name="log-out" size={20} color="#ff6b6b" /><Text style={[s.settingsText, { color: '#ff6b6b' }]}>{t.common.logout}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={th.settingsItem} onPress={() => { setSettingsVisible(false); setTimeout(() => { setDeleteConfirmText(''); setDeleteAccountModalVisible(true); }, 300); }}>
-                <Feather name="trash-2" size={20} color="#ff4444" /><Text style={[s.settingsText, { color: '#ff4444' }]}>Delete Account</Text>
+                <Feather name="trash-2" size={20} color="#ff4444" /><Text style={[s.settingsText, { color: '#ff4444' }]}>{t.settings.deleteAccount}</Text>
               </TouchableOpacity>
             </ScrollView>
           </View>

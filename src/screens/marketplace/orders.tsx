@@ -68,7 +68,7 @@ export default function OrdersScreen() {
     const cfg   = STATUS_CONFIG[item.status] || STATUS_CONFIG.in_progress;
     const other = tab === 'buying' ? item.seller : item.buyer;
     return (
-      <TouchableOpacity style={s.orderCard} onPress={() => navigation.navigate(`/(tabs)/marketplace/order/${item.id}` as never)} activeOpacity={0.85}>
+      <TouchableOpacity style={s.orderCard} onPress={() => navigation.navigate('OrderDetail', { orderId: item.id })} activeOpacity={0.85}>
         <View style={s.orderLeft}>
           {other?.avatar_url
             ? <Image source={{ uri: other.avatar_url }} style={s.avatar} />
@@ -100,7 +100,7 @@ export default function OrdersScreen() {
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>My Orders</Text>
-        <TouchableOpacity onPress={() => navigation.navigate('/(tabs)/marketplace/seller-dashboard' as never)}>
+        <TouchableOpacity onPress={() => navigation.navigate('SellerDashboard')}>
           <Feather name="bar-chart-2" size={22} color="#00ff88" />
         </TouchableOpacity>
       </View>
@@ -132,7 +132,7 @@ export default function OrdersScreen() {
               </Text>
               <TouchableOpacity
                 style={s.emptyBtn}
-                onPress={() => navigation.navigate(tab === 'buying' ? '/(tabs)/marketplace' : '/(tabs)/marketplace/create-listing' as never)}
+                onPress={() => tab === 'buying' ? navigation.navigate('MarketplaceHome') : navigation.navigate('CreateListing')}
               >
                 <Text style={s.emptyBtnText}>{tab === 'buying' ? t.marketplace.browse : t.marketplace.addListing}</Text>
               </TouchableOpacity>

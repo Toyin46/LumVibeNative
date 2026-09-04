@@ -18,7 +18,7 @@ const COUNTRIES = [
 ];
 
 export default function SellerVerificationScreen() {
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>();
   const { user, userProfile, loadProfile } = useAuthStore();
   const [country,  setCountry]  = useState('');
   const [payEmail, setPayEmail] = useState('');
@@ -52,10 +52,10 @@ export default function SellerVerificationScreen() {
           <Text style={{ fontSize: 72 }}>🎉</Text>
           <Text style={s.doneTitle}>You're a Seller!</Text>
           <Text style={s.doneSub}>Your account is now verified. Create your first listing and start earning.</Text>
-          <TouchableOpacity style={s.doneBtn} onPress={() => navigation.navigate('/marketplace/create-listing' as never)}>
+          <TouchableOpacity style={s.doneBtn} onPress={() => navigation.navigate('CreateListing')}>
             <Text style={s.doneBtnText}>Create First Listing</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={s.backLink} onPress={() => navigation.navigate('/(tabs)/marketplace' as never)}>
+          <TouchableOpacity style={s.backLink} onPress={() => navigation.navigate('MarketplaceHome')}>
             <Text style={s.backLinkText}>Go to Marketplace</Text>
           </TouchableOpacity>
         </View>

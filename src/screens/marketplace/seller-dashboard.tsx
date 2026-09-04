@@ -21,7 +21,7 @@ function toNGN(coins: number) {
 }
 
 export default function SellerDashboardScreen() {
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>();
   const { user } = useAuthStore();
 
   const [loading,         setLoading]         = useState(true);
@@ -89,7 +89,7 @@ export default function SellerDashboardScreen() {
           <Feather name="arrow-left" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Seller Dashboard</Text>
-        <TouchableOpacity onPress={() => navigation.navigate('/(tabs)/marketplace/my-listings' as never)}>
+        <TouchableOpacity onPress={() => navigation.navigate('MyListings')}>
           <Feather name="list" size={22} color="#00ff88" />
         </TouchableOpacity>
       </View>
@@ -120,7 +120,7 @@ export default function SellerDashboardScreen() {
           {/* Withdraw button */}
           <TouchableOpacity
             style={[s.withdrawBtn, availableCoins === 0 && { opacity: 0.4 }]}
-            onPress={() => navigation.navigate('/(tabs)/marketplace/withdraw' as never)}
+            onPress={() => navigation.navigate('Withdraw')}
             disabled={availableCoins === 0}
           >
             <Feather name="arrow-up-circle" size={18} color="#000" />
@@ -132,7 +132,7 @@ export default function SellerDashboardScreen() {
           {/* Buy coins shortcut */}
           <TouchableOpacity
             style={s.buyCoinsBtn}
-            onPress={() => navigation.navigate('/(tabs)/marketplace/buy-coins' as never)}
+            onPress={() => navigation.navigate('BuyCoins')}
           >
             <Feather name="plus-circle" size={16} color="#00ff88" />
             <Text style={s.buyCoinsText}>Top Up Marketplace Wallet</Text>
@@ -168,7 +168,7 @@ export default function SellerDashboardScreen() {
           <View style={s.section}>
             <View style={s.sectionHeader}>
               <Text style={s.sectionTitle}>Recent Orders</Text>
-              <TouchableOpacity onPress={() => navigation.navigate('/(tabs)/marketplace/orders' as never)}>
+              <TouchableOpacity onPress={() => navigation.navigate('Orders')}>
                 <Text style={s.sectionLink}>See all →</Text>
               </TouchableOpacity>
             </View>
@@ -176,7 +176,7 @@ export default function SellerDashboardScreen() {
               <TouchableOpacity
                 key={order.id}
                 style={s.orderRow}
-                onPress={() => navigation.navigate(`/(tabs)/marketplace/order/${order.id}` as never)}
+                onPress={() => navigation.navigate('OrderDetail', { orderId: order.id })}
               >
                 <View style={{ flex: 1 }}>
                   <Text style={s.orderTitle} numberOfLines={1}>{order.listing_title}</Text>
@@ -220,7 +220,7 @@ export default function SellerDashboardScreen() {
             <Text style={{ fontSize: 48 }}>💰</Text>
             <Text style={s.emptyTitle}>No earnings yet</Text>
             <Text style={s.emptySubtitle}>Create listings and complete orders to start earning</Text>
-            <TouchableOpacity style={s.createBtn} onPress={() => navigation.navigate('/(tabs)/marketplace/create-listing' as never)}>
+            <TouchableOpacity style={s.createBtn} onPress={() => navigation.navigate('CreateListing')}>
               <Text style={s.createBtnText}>Create a Listing</Text>
             </TouchableOpacity>
           </View>

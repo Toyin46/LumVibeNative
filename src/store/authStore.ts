@@ -33,6 +33,7 @@ export interface UserProfile {
   creator_tier?: string;
   is_premium?: boolean;
   referral_code: boolean;
+  is_verified: boolean;
 }
 
 interface AuthState {

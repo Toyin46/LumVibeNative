@@ -13,6 +13,20 @@ import { useAuthStore } from '@/store/authStore';
 import { supabase } from '@/config/supabase'; 
 import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from '@/locales/LanguageContext';
+import NetInfo from '@react-native-community/netinfo';
+
+// ✅ NEW: when a caught error is network-shaped (or the device is
+// confirmed offline), shows a clear "No internet" message instead of a
+// raw JS error like "TypeError: Network request failed". For any other
+// error (a real, human-readable message), the original message passes
+// through completely unchanged — this never alters any error message
+// that was already working correctly.
+function getFriendlyErrorMessage(e: any, isOffline: boolean, fallback: string): string {
+  const msg = String(e?.message || '');
+  const isNetworkErr = isOffline || /network request failed|failed to fetch|timeout|abort|no internet/i.test(msg);
+  return isNetworkErr ? 'No internet connection. Please check your network and try again.' : (msg || fallback);
+}
+
 
 // ── Strict union type — catches typos at compile time ────────
 type NotificationType =
@@ -81,6 +95,16 @@ export default function NotificationsScreen() {
   const [refreshing,    setRefreshing]    = useState(false);
   const [hasError,      setHasError]      = useState(false);
   const [filter,        setFilter]        = useState<'all' | 'unread'>('all');
+  // ✅ NEW: distinguishes "no internet" from other load failures, so the
+  // error screen below can show a clear, specific message instead of the
+  // same generic "something went wrong" for every failure type.
+  const [isOffline, setIsOffline] = useState(false);
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener(state => {
+      setIsOffline(state.isConnected === false);
+    });
+    return () => unsub();
+  }, []);
 
   // ── Load notifications ──────────────────────────────────────
   const loadNotifications = useCallback(async () => {
@@ -189,6 +213,12 @@ export default function NotificationsScreen() {
   };
 
   // ── Navigation on tap ────────────────────────────────────────
+  // ✅ FIX: every branch here was calling navigation.navigate() with an
+  // Expo-router-style path string ('/(tabs)/profile', '/user/${id}',
+  // etc.) — this app uses React Navigation, which only understands real
+  // registered screen names, not path strings. Every branch below now
+  // targets the actual screen names/params registered in RootNavigator.tsx,
+  // MainTabs, and ChatStackTypes.ts.
   const handleNotificationPress = async (notification: Notification) => {
     if (!notification.read) await markAsRead(notification.id);
 
@@ -196,17 +226,27 @@ export default function NotificationsScreen() {
 
     switch (notification.type) {
       case 'cowatch_invite': {
-        // FIX: use metadata field, not message field
-        if (meta.conversationId && meta.sessionId) {
-          navigation.navigate({
-            pathname: '/chat/cowatch' as never,
+        // Cowatch lives inside the nested Messages (ChatStack) tab, so it
+        // needs the nested navigate form — a plain navigate('Cowatch', ...)
+        // from this root-level screen wouldn't find it.
+        // Note: ChatStackTypes.ts's Cowatch params are
+        // { conversationId, otherName, otherPhoto, isAiMatch? } — there is
+        // no sessionId param registered, so it's dropped here rather than
+        // passing something the screen doesn't declare. If Cowatch actually
+        // needs a sessionId, that has to be added to ChatStackTypes.ts
+        // first — flag it and I'll wire it through properly.
+        if (meta.conversationId) {
+          navigation.navigate('Main', {
+            screen: 'Messages',
             params: {
-              conversationId: meta.conversationId,
-              sessionId:      meta.sessionId,
-              otherName:      notification.from_display_name,
-              otherPhoto:     notification.from_photo_url || '',
+              screen: 'Cowatch',
+              params: {
+                conversationId: meta.conversationId,
+                otherName:      notification.from_display_name,
+                otherPhoto:     notification.from_photo_url || '',
+              },
             },
-          } as any);
+          } as never);
         } else {
           Alert.alert('Watch Party', 'This invite may have expired.');
         }
@@ -214,21 +254,33 @@ export default function NotificationsScreen() {
       }
 
       case 'message': {
-        // FIX: use metadata.conversationId consistently
         const conversationId = meta.conversationId || notification.post_id;
-        if (conversationId) {
-          navigation.navigate(`/chat/${conversationId}` as never);
+        if (conversationId && notification.from_user_id) {
+          navigation.navigate('Main', {
+            screen: 'Messages',
+            params: {
+              screen: 'ChatDM',
+              params: {
+                id:          conversationId,
+                otherUserId: notification.from_user_id,
+                otherName:   notification.from_display_name,
+                otherPhoto:  notification.from_photo_url || '',
+              },
+            },
+          } as never);
         }
         break;
       }
 
       case 'follow':
+        // This is the exact case described: user B taps a "user A followed
+        // you" notification → lands on user A's profile.
         if (notification.from_user_id)
-          navigation.navigate(`/user/${notification.from_user_id}` as never);
+          navigation.navigate('UserProfile', { userId: notification.from_user_id } as never);
         break;
 
       case 'marketplace':
-        navigation.navigate('/(tabs)/marketplace' as never);
+        navigation.navigate('Main', { screen: 'Market' } as never);
         break;
 
       case 'like':
@@ -237,16 +289,16 @@ export default function NotificationsScreen() {
       case 'gift':
       case 'mention':
         if (notification.post_id)
-          navigation.navigate(`/post/${notification.post_id}` as never);
+          navigation.navigate('PostDetail', { postId: notification.post_id } as never);
         break;
 
       case 'referral_commission':
       case 'achievement':
-        navigation.navigate('/(tabs)/profile' as never);
+        navigation.navigate('Main', { screen: 'Profile' } as never);
         break;
 
       default:
-        navigation.navigate('/(tabs)/notification' as never);
+        navigation.navigate('Notification' as never);
         break;
     }
   };
@@ -331,9 +383,14 @@ export default function NotificationsScreen() {
           <Text style={styles.headerTitle}>{t.notifications.title}</Text>
         </LinearGradient>
         <View style={styles.centerContainer}>
-          <Ionicons name="cloud-offline-outline" size={64} color="#333" />
-          <Text style={styles.emptyTitle}>Something went wrong</Text>
-          <Text style={styles.emptySubtitle}>We couldn't load your notifications</Text>
+          {/* ✅ FIX: was always generic ("something went wrong"), even when
+              the real cause was simply no internet connection — now shows
+              a clear, specific message for that case instead. */}
+          <Ionicons name={isOffline ? 'wifi-outline' : 'cloud-offline-outline'} size={64} color="#333" />
+          <Text style={styles.emptyTitle}>{isOffline ? 'No internet connection' : 'Something went wrong'}</Text>
+          <Text style={styles.emptySubtitle}>
+            {isOffline ? 'Please check your network and try again.' : "We couldn't load your notifications"}
+          </Text>
           <TouchableOpacity style={styles.retryButton} onPress={loadNotifications}>
             <Text style={styles.retryButtonText}>Try Again</Text>
           </TouchableOpacity>

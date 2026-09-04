@@ -73,6 +73,10 @@ function ContextStoryViewer({
 
   useEffect(() => {
     if (!story || !currentUserId) return;
+    // ✅ FIX: same bug as messages.tsx's viewer — this ran unconditionally,
+    // so the poster viewing their own story counted as a view of
+    // themselves.
+    if (story.user_id === currentUserId) return;
     (async () => {
       try {
         // Check-then-insert instead of a blind insert, specifically so we
@@ -130,10 +134,14 @@ function ContextStoryViewer({
           <View style={vs.captionWrap}><Text style={vs.captionText}>{story.caption}</Text></View>
         ) : null}
 
-        <View style={vs.viewCountWrap}>
-          <Ionicons name="eye-outline" size={13} color="rgba(255,255,255,0.7)" />
-          <Text style={vs.viewCountText}>{story.view_count || 0}</Text>
-        </View>
+        {/* ✅ FIX: now owner-only, WhatsApp-style — other viewers never see
+            this count at all. */}
+        {story.user_id === currentUserId && (
+          <View style={vs.viewCountWrap}>
+            <Ionicons name="eye-outline" size={13} color="rgba(255,255,255,0.7)" />
+            <Text style={vs.viewCountText}>{story.view_count || 0}</Text>
+          </View>
+        )}
 
         <View style={vs.tapZones}>
           <TouchableWithoutFeedback onPress={goPrev}><View style={{ flex: 1 }} /></TouchableWithoutFeedback>

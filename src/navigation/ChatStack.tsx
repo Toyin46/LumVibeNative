@@ -33,6 +33,7 @@ import NewCircleScreen  from '../chat/new-circle';
 import GroupChatScreen  from '../chat/group/[id]';
 import GroupInfoScreen  from '../chat/group/info';
 import CircleScreen     from '../chat/circle/[id]';
+import CircleSettingsScreen from '../chat/circle/settings';
 
 const Stack = createNativeStackNavigator<ChatStackParamList>();
 
@@ -53,6 +54,7 @@ export function ChatStack() {
       <Stack.Screen name="GroupChat"    component={GroupChatScreen} />
       <Stack.Screen name="GroupInfo"    component={GroupInfoScreen} />
       <Stack.Screen name="Circle"       component={CircleScreen} />
+      <Stack.Screen name="CircleSettings" component={CircleSettingsScreen} />
       <Stack.Screen name="Cowatch"      component={CowatchScreen} />
     </Stack.Navigator>
   );

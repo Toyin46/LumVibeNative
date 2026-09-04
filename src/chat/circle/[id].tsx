@@ -63,8 +63,13 @@ function timeAgo(d: string) {
   if (m < 1) return 'now'; if (m < 60) return `${m}m`; if (h < 24) return `${h}h`; return `${dy}d`;
 }
 
-const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvikzffqe';
-const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'unsigned_preset_name';
+// FIX: this was falling back to 'dvikzffqe'/'unsigned_preset_name' — neither
+// is your real Cloudinary account. create.tsx uses 'dvllxm0wg'/'Kinsta_unsigned'
+// directly (no env lookup) and that's the one proven working after this
+// session's Cloudinary debugging — hardcoding the same real values here
+// instead of depending on an env var that may not be loading in this build.
+const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvllxm0wg';
+const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'Kinsta_unsigned';
 
 export default function CircleScreen() {
   const navigation = useNavigation<NavProp>();
@@ -130,12 +135,21 @@ export default function CircleScreen() {
 
   const loadPosts = async () => {
     try {
-      const { data: circlePosts } = await supabase
+      const { data: circlePosts, error: loadErr } = await supabase
         .from('circle_posts')
         .select('*')
         .eq('circle_id', id)
         .order('created_at', { ascending: false })
         .limit(30);
+
+      // 🔍 DEBUG: added to chase the "text disappears after re-entering"
+      // report — this will show exactly what the database has for this
+      // circle every time the screen loads, so we can see whether the
+      // post genuinely never persisted, or persisted but isn't being
+      // returned here for some other reason.
+      if (loadErr) console.error('🔍 [circle loadPosts] query error:', loadErr);
+      console.log(`🔍 [circle loadPosts] circle_id=${id} → ${circlePosts?.length || 0} posts:`,
+        circlePosts?.map((p: any) => ({ id: p.id, type: p.message_type, content: p.content?.slice(0, 20) })));
 
       if (!circlePosts || circlePosts.length === 0) { setLoading(false); return; }
 
@@ -154,7 +168,12 @@ export default function CircleScreen() {
 
   const subscribeNewPosts = () => {
     if (!id) return;
-    channelRef.current = supabase.channel(`circle:${id}`)
+    // FIX: same remount race as HomeScreen.tsx/messages.tsx — fixed channel
+    // name meant going back into the same circle while the previous mount's
+    // channel was still being torn down could grab the stale, already-
+    // subscribed channel and crash on .on(). Unique suffix per mount fixes it.
+    const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    channelRef.current = supabase.channel(`circle:${id}:${mountId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'circle_posts', filter: `circle_id=eq.${id}` },
         (payload) => {
           setPosts(prev => [{ ...payload.new as any, reactions: [] }, ...prev]);
@@ -184,9 +203,13 @@ export default function CircleScreen() {
     if (!text || !user?.id) return;
     setInputText(''); setPosting(true);
     try {
-      const { error } = await supabase.from('circle_posts').insert({
+      const { data: inserted, error } = await supabase.from('circle_posts').insert({
         circle_id: id, author_id: user.id, message_type: 'text', content: text,
-      });
+      }).select().single();
+      // 🔍 DEBUG: same investigation — confirms the exact row (and its real
+      // id/circle_id) that Supabase says it created, so we can compare
+      // against what loadPosts finds afterward.
+      console.log('🔍 [circle postText] insert result:', { inserted, error });
       if (error) throw error;
       await supabase.from('circles').update({ last_post: text, last_post_at: new Date().toISOString() }).eq('id', id);
     } catch (e: any) {
@@ -201,20 +224,40 @@ export default function CircleScreen() {
     if (!perm.granted) { Alert.alert('Permission needed', 'Allow gallery access.'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({ quality: 0.8 });
     if (result.canceled || !result.assets[0] || !user?.id) return;
+
+    // NEW: instant local preview, like WhatsApp — the picked image shows
+    // immediately while it uploads in the background, instead of a blank
+    // wait. Removed once the real row arrives from the DB (via the
+    // realtime subscription) or on failure.
+    const tempId = `temp-${Date.now()}`;
+    const localUri = result.assets[0].uri;
+    setPosts(prev => [{
+      id: tempId, circle_id: id, author_id: user.id, message_type: 'image',
+      media_url: localUri, created_at: new Date().toISOString(), _uploading: true,
+    } as any, ...prev]);
+
     setPosting(true);
     try {
       const formData = new FormData();
-      formData.append('file', { uri: result.assets[0].uri, type: 'image/jpeg', name: `img_${Date.now()}.jpg` } as any);
+      formData.append('file', { uri: localUri, type: 'image/jpeg', name: `img_${Date.now()}.jpg` } as any);
       formData.append('upload_preset', UPLOAD_PRESET);
       formData.append('folder', 'kinsta_circles');
       const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`, { method: 'POST', body: formData });
-      if (!res.ok) { Alert.alert('Upload failed', 'Try again.'); return; }
+      if (!res.ok) {
+        setPosts(prev => prev.filter(p => p.id !== tempId));
+        Alert.alert('Upload failed', 'Try again.');
+        return;
+      }
       const data = await res.json();
       const { error } = await supabase.from('circle_posts').insert({
         circle_id: id, author_id: user.id, message_type: 'image', media_url: data.secure_url,
       });
       if (error) throw error;
-    } catch (e: any) { Alert.alert('Error', e?.message || 'Failed to post image.'); }
+      setPosts(prev => prev.filter(p => p.id !== tempId));
+    } catch (e: any) {
+      setPosts(prev => prev.filter(p => p.id !== tempId));
+      Alert.alert('Error', e?.message || 'Failed to post image.');
+    }
     finally { setPosting(false); }
   };
 
@@ -305,21 +348,37 @@ export default function CircleScreen() {
         activeOpacity={0.85}
       >
         <View style={ps.cardHeader}>
-          {circle?.owner?.photo_url
-            ? <Image source={{ uri: circle.owner.photo_url }} style={ps.ownerAv} />
+          {/* FIX: was showing circle.owner's personal profile (name/photo) —
+              a circle is a channel/brand, like the Telegram/WhatsApp channel
+              comparison from earlier, so posts should read as coming from
+              the circle itself, not the owner's personal identity. Falls
+              back to the owner's photo only if the circle has no photo of
+              its own yet (circles.photo_url from the optional column added
+              earlier) — with plain initials once neither exists. */}
+          {(circle as any)?.photo_url || circle?.owner?.photo_url
+            ? <Image source={{ uri: (circle as any)?.photo_url || circle?.owner?.photo_url }} style={ps.ownerAv} />
             : <View style={[ps.ownerAv, { backgroundColor: '#1a2e1a', alignItems: 'center', justifyContent: 'center' }]}>
                 <Text style={{ color: C.green, fontSize: 12, fontWeight: '700' }}>
-                  {(circle?.owner?.display_name || 'O')[0].toUpperCase()}
+                  {(circle?.name || 'C')[0].toUpperCase()}
                 </Text>
               </View>}
           <View>
-            <Text style={ps.ownerName}>{circle?.owner?.display_name || 'Creator'}</Text>
+            <Text style={ps.ownerName}>{circle?.name || 'Circle'}</Text>
             <Text style={ps.postTime}>{timeAgo(item.created_at)}</Text>
           </View>
         </View>
 
         {item.message_type === 'image' && item.media_url
-          ? <Image source={{ uri: item.media_url }} style={ps.postImg} resizeMode="cover" />
+          ? (
+            <View>
+              <Image source={{ uri: item.media_url }} style={ps.postImg} resizeMode="cover" />
+              {(item as any)._uploading && (
+                <View style={ps.uploadingOverlay}>
+                  <ActivityIndicator color="#fff" size="small" />
+                </View>
+              )}
+            </View>
+          )
           : item.message_type === 'voice' && item.media_url
           ? <View style={ps.voiceRow}>
               <View style={ps.voiceIconWrap}>
@@ -388,6 +447,14 @@ export default function CircleScreen() {
             })}
           >
             <Ionicons name="add-circle" size={28} color={C.green} />
+          </TouchableOpacity>
+        )}
+        {isOwner && (
+          <TouchableOpacity
+            style={s.addStoryBtn}
+            onPress={() => navigation.navigate('CircleSettings', { id: id! })}
+          >
+            <Ionicons name="settings-outline" size={22} color={C.muted} />
           </TouchableOpacity>
         )}
       </View>
@@ -488,6 +555,11 @@ const ps = StyleSheet.create({
   postTime:   { fontSize: 11, color: C.muted, marginTop: 1 },
   postText:   { fontSize: 14, color: C.white, lineHeight: 22 },
   postImg:    { width: '100%', height: 220, borderRadius: 12, marginVertical: 8 },
+  uploadingOverlay: {
+    position: 'absolute', top: 8, left: 0, right: 0, bottom: 0,
+    borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center', justifyContent: 'center',
+  },
   reactRow:   { flexDirection: 'row', gap: 6, marginTop: 10, flexWrap: 'wrap' },
   reactPill:  { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 20, paddingVertical: 3, paddingHorizontal: 8 },
   reactCount: { fontSize: 11, color: C.white, fontWeight: '600' },

@@ -262,7 +262,13 @@ export async function handleFollowPress(
 
     if (followError) throw followError;
 
-    // Send notification (database trigger will create notification record)
+    // ✅ FIX: this comment used to claim "database trigger will create
+    // notification record" — that was true for likes/comments but NOT for
+    // follows; no such trigger existed, so followers never showed up in
+    // the in-app bell/Notification screen (push-only). Run
+    // add_follow_notification_trigger.sql in Supabase once to add the
+    // missing trigger — after that, this comment is accurate again and no
+    // code change is needed here.
     await notifyNewFollower(
       userToFollowId,
       currentUserId,

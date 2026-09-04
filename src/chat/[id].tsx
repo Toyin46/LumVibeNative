@@ -585,7 +585,9 @@ async function getStreak(userId: string, otherUserId: string): Promise<number> {
 }
 
 function subscribeToMessages(conversationId: string, onMessage: (msg: Message) => void): RealtimeChannel {
-  return supabase.channel(`messages:${conversationId}`)
+  // FIX: same remount race fixed in circle/group/messages.tsx.
+  const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return supabase.channel(`messages:${conversationId}:${mountId}`)
     .on('postgres_changes', {
       event: 'INSERT', schema: 'public', table: 'messages',
       filter: `conversation_id=eq.${conversationId}`,
@@ -596,13 +598,17 @@ function subscribeToMessages(conversationId: string, onMessage: (msg: Message) =
 }
 
 function subscribeToReactions(conversationId: string, onChange: () => void): RealtimeChannel {
-  return supabase.channel(`reactions:${conversationId}`)
+  const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return supabase.channel(`reactions:${conversationId}:${mountId}`)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'message_reactions' },
       () => onChange()).subscribe();
 }
 
-const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvikzffqe';
-const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'unsigned_preset_name';
+// FIX: same wrong-cloud-name bug found and fixed in circle/[id].tsx and
+// group/[id].tsx earlier this session — 'dvikzffqe'/'unsigned_preset_name'
+// aren't your real Cloudinary account, hardcoding the proven values instead.
+const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvllxm0wg';
+const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'Kinsta_unsigned';
 
 async function uploadToCloudinary(fileUri: string, type: 'voice' | 'image' | 'video'): Promise<string | null> {
   try {
@@ -717,21 +723,48 @@ function useMessages(
 
   const sendImage = useCallback(async (fileUri: string): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
+    // NEW: same instant local preview as circle/[id].tsx and group/[id].tsx —
+    // shows the picked image immediately while it uploads, instead of a
+    // blank wait. Removed once the real row lands via the realtime
+    // subscription, or on failure.
+    const tempId = `temp-${Date.now()}`;
+    setMessages(prev => [...prev, {
+      id: tempId, conversation_id: conversationId, sender_id: currentUserId,
+      message_type: 'image', media_url: fileUri, created_at: new Date().toISOString(),
+      is_read: false, is_deleted: false, is_disappearing: false, _uploading: true,
+    } as any]);
     setSending(true);
     try {
       const url = await uploadToCloudinary(fileUri, 'image');
-      if (!url) return false;
-      return !!(await sendMediaMessage(conversationId, currentUserId, url, 'image'));
+      if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
+      const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'image'));
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      return ok;
+    } catch (e) {
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      return false;
     } finally { setSending(false); }
   }, [conversationId, currentUserId]);
 
   const sendVideo = useCallback(async (fileUri: string): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
+    // Same instant preview pattern as sendImage above.
+    const tempId = `temp-${Date.now()}`;
+    setMessages(prev => [...prev, {
+      id: tempId, conversation_id: conversationId, sender_id: currentUserId,
+      message_type: 'video', media_url: fileUri, created_at: new Date().toISOString(),
+      is_read: false, is_deleted: false, is_disappearing: false, _uploading: true,
+    } as any]);
     setSending(true);
     try {
       const url = await uploadToCloudinary(fileUri, 'video');
-      if (!url) return false;
-      return !!(await sendMediaMessage(conversationId, currentUserId, url, 'video'));
+      if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
+      const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'video'));
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      return ok;
+    } catch (e) {
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      return false;
     } finally { setSending(false); }
   }, [conversationId, currentUserId]);
 
@@ -941,9 +974,18 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
                   <Ionicons name="image-outline" size={28} color={C.muted2} />
                   <Text style={styles.imgErrorText}>Image unavailable</Text>
                 </View>
-              : <Image source={{ uri: message.media_url }}
-                  style={styles.msgImage} resizeMode="cover"
-                  onError={() => setImgError(true)} />}
+              : (
+                <View>
+                  <Image source={{ uri: message.media_url }}
+                    style={styles.msgImage} resizeMode="cover"
+                    onError={() => setImgError(true)} />
+                  {(message as any)._uploading && (
+                    <View style={styles.uploadingOverlay}>
+                      <ActivityIndicator color="#fff" size="small" />
+                    </View>
+                  )}
+                </View>
+              )}
           </TouchableOpacity>
         );
 
@@ -981,8 +1023,10 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
           <TouchableOpacity onLongPress={() => onLongPress(message)}
             style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { padding: 3 }]}>
             <View style={styles.videoPreviewBox}>
-              <Ionicons name="videocam" size={32} color={C.green} />
-              <Text style={styles.videoPreviewLabel}>Video</Text>
+              {(message as any)._uploading
+                ? <ActivityIndicator color={C.green} size="small" />
+                : <Ionicons name="videocam" size={32} color={C.green} />}
+              <Text style={styles.videoPreviewLabel}>{(message as any)._uploading ? 'Uploading…' : 'Video'}</Text>
             </View>
           </TouchableOpacity>
         );
@@ -1077,6 +1121,9 @@ export default function ChatScreen() {
   const [vanishOn,       setVanishOn]       = useState(false);
   const [selectedMsg,    setSelectedMsg]    = useState<Message | null>(null);
   const [showReactions,  setShowReactions]  = useState(false);
+  // NEW: chat settings menu (Block/Report), replacing the dead ... button
+  const [showChatSettings, setShowChatSettings] = useState(false);
+  const [showReportReasons, setShowReportReasons] = useState(false);
   const [replyTo,        setReplyTo]        = useState<Message | null>(null);
   const [isRecording,    setIsRecording]    = useState(false);
   const [recordingDur,   setRecordingDur]   = useState(0);
@@ -1135,6 +1182,47 @@ export default function ChatScreen() {
   const handleLongPress = useCallback((msg: Message) => {
     setSelectedMsg(msg); setShowReactions(true);
   }, []);
+
+  // NEW: block and report — the "..." button used to do nothing at all.
+  const REPORT_REASONS = [
+    { icon: 'ban-outline',              label: 'Spam or Misleading' },
+    { icon: 'alert-circle-outline',     label: 'Nudity or Sexual Content' },
+    { icon: 'flame-outline',            label: 'Hate Speech or Discrimination' },
+    { icon: 'warning-outline',          label: 'Violence or Dangerous Acts' },
+    { icon: 'person-remove-outline',    label: 'Harassment or Bullying' },
+    { icon: 'document-text-outline',    label: 'Copyright Violation' },
+    { icon: 'happy-outline',            label: 'Involves a Minor Inappropriately' },
+    { icon: 'skull-outline',            label: 'Illegal Activity' },
+  ];
+
+  const handleBlockUser = () => {
+    setShowChatSettings(false);
+    Alert.alert(
+      `Block ${otherName || 'this user'}?`,
+      "They won't be able to message you, and you won't see each other's content.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block', style: 'destructive', onPress: async () => {
+            if (!user?.id || !otherUserId) return;
+            const { error } = await supabase.from('blocked_users')
+              .insert({ blocker_id: user.id, blocked_id: otherUserId });
+            if (error) { Alert.alert('Error', error.message); return; }
+            navigation.goBack();
+          },
+        },
+      ]
+    );
+  };
+
+  const handleSubmitReport = async (reason: string) => {
+    setShowReportReasons(false);
+    if (!user?.id || !otherUserId) return;
+    const { error } = await supabase.from('user_reports')
+      .insert({ reporter_id: user.id, reported_user_id: otherUserId, reason });
+    if (error) { Alert.alert('Error', error.message); return; }
+    Alert.alert('Report Submitted', "Thanks — we'll review this.");
+  };
 
   const handleReaction = useCallback(async (emoji: string) => {
     if (!selectedMsg) return;
@@ -1285,7 +1373,7 @@ export default function ChatScreen() {
           <TouchableOpacity style={styles.chatActBtn} onPress={() => startCall(id, 'video')}>
             <Ionicons name="videocam-outline" size={17} color={C.white} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.chatActBtn}>
+          <TouchableOpacity style={styles.chatActBtn} onPress={() => setShowChatSettings(true)}>
             <Ionicons name="ellipsis-horizontal" size={17} color={C.white} />
           </TouchableOpacity>
         </View>
@@ -1479,6 +1567,57 @@ export default function ChatScreen() {
         </TouchableOpacity>
       </Modal>
 
+      {/* NEW: chat settings sheet — Block / Report, replacing the dead ... button */}
+      <Modal visible={showChatSettings} transparent animationType="slide"
+        onRequestClose={() => setShowChatSettings(false)}>
+        <TouchableOpacity style={styles.sheetOverlay} activeOpacity={1} onPress={() => setShowChatSettings(false)}>
+          <View style={styles.sheetContent}>
+            <View style={styles.sheetHandle} />
+            <TouchableOpacity style={styles.sheetRow} onPress={() => {
+              setShowChatSettings(false);
+              setTimeout(() => setShowReportReasons(true), 300);
+            }}>
+              <Ionicons name="flag-outline" size={20} color={C.white} />
+              <Text style={styles.sheetRowText}>Report {otherName || 'User'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.sheetRow} onPress={handleBlockUser}>
+              <Ionicons name="hand-left-outline" size={20} color={C.red} />
+              <Text style={[styles.sheetRowText, { color: C.red }]}>Block {otherName || 'User'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.sheetCancel} onPress={() => setShowChatSettings(false)}>
+              <Text style={styles.sheetCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* NEW: report reason picker — same categories as the existing video report flow */}
+      <Modal visible={showReportReasons} transparent animationType="slide"
+        onRequestClose={() => setShowReportReasons(false)}>
+        <TouchableOpacity style={styles.sheetOverlay} activeOpacity={1} onPress={() => setShowReportReasons(false)}>
+          <View style={styles.sheetContent}>
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetHeaderRow}>
+              <Text style={styles.sheetTitle}>Report {otherName || 'User'}</Text>
+              <TouchableOpacity onPress={() => setShowReportReasons(false)}>
+                <Ionicons name="close" size={22} color={C.white} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.sheetSubtitle}>Why are you reporting @{otherName}?</Text>
+            {REPORT_REASONS.map(r => (
+              <TouchableOpacity key={r.label} style={styles.sheetRow} onPress={() => handleSubmitReport(r.label)}>
+                <Ionicons name={r.icon as any} size={20} color={C.white} />
+                <Text style={styles.sheetRowText}>{r.label}</Text>
+                <Ionicons name="chevron-forward" size={16} color={C.muted} style={{ marginLeft: 'auto' }} />
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity style={styles.sheetCancel} onPress={() => setShowReportReasons(false)}>
+              <Text style={styles.sheetCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
       {/* Call Modal */}
       <CallModal
         visible={callState.isInCall}
@@ -1570,6 +1709,11 @@ const styles = StyleSheet.create({
   wbar:     { flex: 1, borderRadius: 2, minHeight: 3 },
   voiceDur: { fontSize: 10.5, color: C.muted, flexShrink: 0 },
   msgImage: { width: 180, height: 200, borderRadius: 14 },
+  uploadingOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center', justifyContent: 'center',
+  },
   imgErrorBox: { width: 180, height: 120, borderRadius: 14, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center', gap: 8 },
   imgErrorText: { fontSize: 12, color: C.muted2 },
   videoCard:     { padding: 0, overflow: 'hidden', borderRadius: 14, width: 210 },
@@ -1613,6 +1757,16 @@ const styles = StyleSheet.create({
   reactionPicker: { flexDirection: 'row', backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 28, paddingVertical: 10, paddingHorizontal: 14, gap: 12 },
   msgOptions: { flexDirection: 'row', gap: 12, marginTop: 12 },
   msgOption:  { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 20, paddingVertical: 10, paddingHorizontal: 20 },
+  sheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  sheetContent: { backgroundColor: C.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 20, paddingTop: 10, paddingBottom: 30 },
+  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: C.border, alignSelf: 'center', marginBottom: 14 },
+  sheetHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  sheetTitle: { fontSize: 18, fontWeight: '700', color: C.white },
+  sheetSubtitle: { fontSize: 13, color: C.muted, marginBottom: 12 },
+  sheetRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.06)' },
+  sheetRowText: { fontSize: 15, fontWeight: '600', color: C.white },
+  sheetCancel: { marginTop: 14, backgroundColor: C.card2, borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  sheetCancelText: { fontSize: 15, fontWeight: '700', color: C.white },
   callModal: { flex: 1, backgroundColor: '#050505', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24 },
   callPulse1: { position: 'absolute', top: 110, alignSelf: 'center', width: 180, height: 180, borderRadius: 90, borderWidth: 1, borderColor: 'rgba(0,230,118,0.25)' },
   callPulse2: { position: 'absolute', top: 85,  alignSelf: 'center', width: 230, height: 230, borderRadius: 115, borderWidth: 1, borderColor: 'rgba(0,230,118,0.15)' },

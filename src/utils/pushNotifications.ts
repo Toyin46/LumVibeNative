@@ -139,27 +139,37 @@ export async function sendPushNotification(
       return;
     }
 
-    // Check notification preferences
+    // ✅ FIX: .single() throws when zero rows come back, not just when
+    // there's more than one — and a brand-new user who's never opened
+    // notification settings has NO row here at all. That throw was being
+    // silently swallowed by the outer catch, so push notifications quietly
+    // never sent for any such user, forever, with zero visible error.
+    // .maybeSingle() returns null instead of throwing, and we default to
+    // "notifications on" when no row exists yet — the sensible default,
+    // since nobody should have to visit settings just to receive their
+    // first notification.
     const { data: prefs, error: prefsError } = await supabase
       .from('notification_preferences')
       .select('push_enabled, likes_enabled, comments_enabled, follows_enabled, coins_enabled')
       .eq('user_id', recipientUserId)
-      .single();
+      .maybeSingle();
 
     if (prefsError) throw prefsError;
 
-    if (!prefs?.push_enabled) {
+    const pushEnabled = prefs ? prefs.push_enabled : true;
+    if (!pushEnabled) {
       console.log('Push notifications disabled for user');
       return;
     }
 
     // Check if this type of notification is enabled
-    const typeEnabled =
-      (data.type === 'like' && prefs.likes_enabled) ||
-      (data.type === 'comment' && prefs.comments_enabled) ||
-      (data.type === 'follow' && prefs.follows_enabled) ||
-      (data.type === 'coin' && prefs.coins_enabled) ||
-      (data.type === 'mention' && prefs.comments_enabled);
+    const typeEnabled = prefs
+      ? (data.type === 'like' && prefs.likes_enabled) ||
+        (data.type === 'comment' && prefs.comments_enabled) ||
+        (data.type === 'follow' && prefs.follows_enabled) ||
+        (data.type === 'coin' && prefs.coins_enabled) ||
+        (data.type === 'mention' && prefs.comments_enabled)
+      : true; // no row yet — default every type to enabled
 
     if (!typeEnabled) {
       console.log(`${data.type} notifications disabled for user`);

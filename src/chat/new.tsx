@@ -41,6 +41,46 @@ interface SearchUser {
   photo_url?: string;
 }
 
+// ✅ NEW: this is the actual gap that left Requests/Friends permanently
+// empty — nothing anywhere in the app could create a friend_requests row.
+// messages.tsx already has a complete, working accept/decline system
+// (fetchFriendRequests, respondToFriendRequest, the Requests/Friends tab
+// UI) — it just had nothing feeding it. This checks for an existing
+// friendship/pending request first (skips duplicates both directions),
+// then inserts a real pending request feeding straight into that
+// already-built system.
+async function sendFriendRequest(
+  currentUserId: string,
+  otherUserId: string
+): Promise<{ status: 'sent' | 'already_friends' | 'already_pending'; error?: string }> {
+  try {
+    const { data: existing } = await supabase
+      .from('friend_requests')
+      .select('id, status, from_user_id')
+      .or(
+        `and(from_user_id.eq.${currentUserId},to_user_id.eq.${otherUserId}),` +
+        `and(from_user_id.eq.${otherUserId},to_user_id.eq.${currentUserId})`
+      )
+      .maybeSingle();
+
+    if (existing) {
+      if (existing.status === 'accepted') return { status: 'already_friends' };
+      if (existing.status === 'pending')  return { status: 'already_pending' };
+      // status === 'declined' — allow a fresh request by deleting the old
+      // row first, so a past decline doesn't permanently block re-adding.
+      await supabase.from('friend_requests').delete().eq('id', existing.id);
+    }
+
+    const { error } = await supabase
+      .from('friend_requests')
+      .insert({ from_user_id: currentUserId, to_user_id: otherUserId, status: 'pending' });
+    if (error) return { status: 'sent', error: error.message };
+    return { status: 'sent' };
+  } catch (e: any) {
+    return { status: 'sent', error: e?.message || 'Failed to send friend request.' };
+  }
+}
+
 async function getOrCreateConversation(
   currentUserId: string,
   otherUserId: string
@@ -101,6 +141,10 @@ export default function NewChatScreen() {
   const [results, setResults]   = useState<SearchUser[]>([]);
   const [loading, setLoading]   = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
+  // ✅ NEW: per-user request state so each row's "Add Friend" button can
+  // independently show sending → Requested / Already friends, without a
+  // full-screen loading state blocking the rest of the search results.
+  const [requestState, setRequestState] = useState<Record<string, 'sending' | 'sent' | 'friends' | 'pending'>>({});
 
   const searchUsers = useCallback(async (query: string) => {
     if (query.length < 2) { setResults([]); return; }
@@ -125,6 +169,14 @@ export default function NewChatScreen() {
     if (!user?.id) return;
     setStarting(otherUser.id);
     try {
+      // ✅ NEW: sending a message to someone you're not friends with yet
+      // also raises a friend request, so they see "wants to connect" under
+      // Requests even though the message itself goes through right away —
+      // this is what lets the recipient "decide to accept or decline"
+      // either way, per how this was asked for. Fire-and-forget: never
+      // blocks or fails the actual chat-opening flow below.
+      sendFriendRequest(user.id, otherUser.id).catch(() => {});
+
       const conv = await getOrCreateConversation(user.id, otherUser.id);
       if (conv?.id) {
         // FIX: same stack issue as group/circle creation — replace() so
@@ -144,6 +196,22 @@ export default function NewChatScreen() {
       setStarting(null);
     }
   }, [user?.id, navigation]);
+
+  // ✅ NEW: explicit "Add Friend" action — separate from messaging, per
+  // how this was described (message and friend request as two distinct
+  // options). Feeds the exact same friend_requests table and accept/
+  // decline UI that messages.tsx already has fully built.
+  const addFriend = useCallback(async (otherUser: SearchUser) => {
+    if (!user?.id) return;
+    setRequestState(prev => ({ ...prev, [otherUser.id]: 'sending' }));
+    const result = await sendFriendRequest(user.id, otherUser.id);
+    setRequestState(prev => ({
+      ...prev,
+      [otherUser.id]:
+        result.status === 'already_friends' ? 'friends' :
+        result.status === 'already_pending' ? 'pending' : 'sent',
+    }));
+  }, [user?.id]);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -172,35 +240,67 @@ export default function NewChatScreen() {
       <FlatList
         data={results}
         keyExtractor={item => item.id}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.userItem}
-            onPress={() => startChat(item)}
-            activeOpacity={0.7}
-            disabled={!!starting}
-          >
-            {item.photo_url ? (
-              <Image source={{ uri: item.photo_url }} style={styles.userAv} />
-            ) : (
-              <View style={styles.userAvPlaceholder}>
-                <Text style={{ color: C.green, fontSize: 18, fontWeight: '700' }}>
-                  {(item.display_name || item.username || 'U')[0].toUpperCase()}
-                </Text>
-              </View>
-            )}
-            <View style={{ flex: 1 }}>
-              <Text style={styles.userName}>{item.display_name}</Text>
-              <Text style={styles.userHandle}>@{item.username}</Text>
+        renderItem={({ item }) => {
+          const reqState = requestState[item.id];
+          return (
+            <View style={styles.userItem}>
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}
+                onPress={() => startChat(item)}
+                activeOpacity={0.7}
+                disabled={!!starting}
+              >
+                {item.photo_url ? (
+                  <Image source={{ uri: item.photo_url }} style={styles.userAv} />
+                ) : (
+                  <View style={styles.userAvPlaceholder}>
+                    <Text style={{ color: C.green, fontSize: 18, fontWeight: '700' }}>
+                      {(item.display_name || item.username || 'U')[0].toUpperCase()}
+                    </Text>
+                  </View>
+                )}
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.userName}>{item.display_name}</Text>
+                  <Text style={styles.userHandle}>@{item.username}</Text>
+                </View>
+              </TouchableOpacity>
+
+              {/* ✅ NEW: separate, independent "Add Friend" action —
+                  tapping it never opens a chat, and tapping Message never
+                  sends an explicit request (it does so silently in the
+                  background — see startChat). Each button has its own
+                  loading/disabled state so they don't block each other. */}
+              <TouchableOpacity
+                style={[
+                  styles.addFriendBtn,
+                  (reqState === 'sent' || reqState === 'pending') && styles.addFriendBtnSent,
+                  reqState === 'friends' && styles.addFriendBtnFriends,
+                ]}
+                onPress={() => addFriend(item)}
+                activeOpacity={0.7}
+                disabled={reqState === 'sending' || reqState === 'sent' || reqState === 'pending' || reqState === 'friends'}
+              >
+                {reqState === 'sending' ? (
+                  <ActivityIndicator color={C.green} size="small" />
+                ) : (
+                  <Text style={styles.addFriendBtnText}>
+                    {reqState === 'friends' ? 'Friends'
+                      : (reqState === 'sent' || reqState === 'pending') ? 'Requested'
+                      : 'Add Friend'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+
+              {starting === item.id ? (
+                <ActivityIndicator color={C.green} size="small" style={{ marginLeft: 8 }} />
+              ) : (
+                <TouchableOpacity style={styles.msgBtn} onPress={() => startChat(item)} disabled={!!starting}>
+                  <Text style={styles.msgBtnText}>Message</Text>
+                </TouchableOpacity>
+              )}
             </View>
-            {starting === item.id ? (
-              <ActivityIndicator color={C.green} size="small" />
-            ) : (
-              <View style={styles.msgBtn}>
-                <Text style={styles.msgBtnText}>Message</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-        )}
+          );
+        }}
         ListEmptyComponent={
           search.length >= 2 && !loading ? (
             <View style={styles.emptyWrap}>
@@ -214,6 +314,13 @@ export default function NewChatScreen() {
 }
 
 const styles = StyleSheet.create({
+  addFriendBtn: {
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14,
+    borderWidth: 1, borderColor: C.green, marginRight: 8,
+  },
+  addFriendBtnSent:    { borderColor: '#555' },
+  addFriendBtnFriends: { borderColor: '#555', backgroundColor: '#1a1a1a' },
+  addFriendBtnText:    { color: C.green, fontSize: 12, fontWeight: '700' },
   safe: { flex: 1, backgroundColor: C.black },
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 12,

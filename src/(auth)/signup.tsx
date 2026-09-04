@@ -475,6 +475,16 @@ export default function SignupScreen() {
             username: username.toLowerCase(),
             display_name: displayName.trim(),
           },
+          // ✅ FIX (real root cause of the verification link freezing/
+          // crashing): this was missing entirely, so Supabase fell back to
+          // whatever generic "Site URL" is set in the dashboard — not this
+          // app. Clicking the email link opened a browser to a URL with
+          // nowhere real to go, which is exactly the frozen blank page.
+          // This points it at the app's own registered scheme
+          // ("lumvibenative://", from app_config.js) instead — App.tsx's
+          // new deep-link listener catches this and exchanges it for a
+          // real session automatically.
+          emailRedirectTo: 'lumvibenative://auth-callback',
         },
       });
 

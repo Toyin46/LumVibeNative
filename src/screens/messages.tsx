@@ -51,6 +51,20 @@ import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+import NetInfo from '@react-native-community/netinfo';
+
+// ✅ NEW: when a caught error is network-shaped (or the device is
+// confirmed offline), shows a clear "No internet" message instead of a
+// raw JS error like "TypeError: Network request failed". For any other
+// error (a real, human-readable message), the original message passes
+// through completely unchanged — this never alters any error message
+// that was already working correctly.
+function getFriendlyErrorMessage(e: any, isOffline: boolean, fallback: string): string {
+  const msg = String(e?.message || '');
+  const isNetworkErr = isOffline || /network request failed|failed to fetch|timeout|abort|no internet/i.test(msg);
+  return isNetworkErr ? 'No internet connection. Please check your network and try again.' : (msg || fallback);
+}
+
 
 const { width: SW, height: SH } = Dimensions.get('window');
 
@@ -93,6 +107,12 @@ interface FriendRequest {
   id: string; from_user_id: string; to_user_id: string;
   status: 'pending' | 'accepted' | 'declined';
   created_at: string; from_user?: ChatUser;
+}
+// NEW: join requests for public groups, visible only to that group's admin.
+interface GroupJoinRequest {
+  id: string; group_id: string; user_id: string;
+  status: 'pending' | 'accepted' | 'declined';
+  created_at: string; requester?: ChatUser; group_name?: string;
 }
 interface Group {
   id: string; name: string; description?: string;
@@ -262,6 +282,77 @@ async function toggleCircleSubscription(
   } catch (e: any) { return { error: e?.message || 'Failed to update subscription.' }; }
 }
 
+// NEW: group join requests — only for public groups (enforced by RLS, not
+// just hidden client-side), visible only to that group's admin.
+async function fetchGroupJoinRequests(userId: string): Promise<GroupJoinRequest[]> {
+  try {
+    // Only groups where I'm admin even have requests I'm allowed to see —
+    // RLS enforces this too, this just avoids an empty round trip otherwise.
+    const { data: adminGroups } = await supabase
+      .from('group_members').select('group_id').eq('user_id', userId).eq('role', 'admin');
+    if (!adminGroups || adminGroups.length === 0) return [];
+    const groupIds = adminGroups.map(g => g.group_id);
+
+    const { data: reqs } = await supabase
+      .from('group_join_requests').select('id, group_id, user_id, status, created_at')
+      .in('group_id', groupIds).eq('status', 'pending')
+      .order('created_at', { ascending: false });
+    if (!reqs || reqs.length === 0) return [];
+
+    const userIds = [...new Set(reqs.map(r => r.user_id))];
+    const { data: profiles } = await supabase.from('users').select('id, username, display_name, photo_url').in('id', userIds);
+    const profileById: Record<string, any> = {};
+    (profiles || []).forEach(p => { profileById[p.id] = p; });
+
+    const { data: groupsData } = await supabase.from('groups').select('id, name').in('id', groupIds);
+    const groupNameById: Record<string, string> = {};
+    (groupsData || []).forEach(g => { groupNameById[g.id] = g.name; });
+
+    return reqs.map(r => ({
+      ...r, requester: profileById[r.user_id], group_name: groupNameById[r.group_id],
+    }));
+  } catch (e) { console.error('fetchGroupJoinRequests error:', e); return []; }
+}
+
+async function respondToGroupJoinRequest(
+  request: GroupJoinRequest, action: 'accepted' | 'declined'
+): Promise<{ error: string | null }> {
+  try {
+    const { error } = await supabase.from('group_join_requests').update({ status: action }).eq('id', request.id);
+    if (error) return { error: error.message };
+    if (action === 'accepted') {
+      const { error: memberErr } = await supabase.from('group_members')
+        .insert({ group_id: request.group_id, user_id: request.user_id, role: 'member' });
+      if (memberErr) return { error: memberErr.message };
+      await supabase.from('groups').select('member_count').eq('id', request.group_id).single()
+        .then(({ data }) => {
+          if (data) supabase.from('groups').update({ member_count: (data.member_count || 0) + 1 }).eq('id', request.group_id);
+        });
+    }
+    return { error: null };
+  } catch (e: any) { return { error: e?.message || 'Failed to respond to request.' }; }
+}
+
+async function requestToJoinGroup(groupId: string, userId: string): Promise<{ error: string | null }> {
+  try {
+    const { error } = await supabase.from('group_join_requests').insert({ group_id: groupId, user_id: userId });
+    if (error) return { error: error.message };
+    return { error: null };
+  } catch (e: any) { return { error: e?.message || 'Failed to send request.' }; }
+}
+
+async function discoverPublicGroups(userId: string, query: string): Promise<Group[]> {
+  try {
+    const { data: myGroups } = await supabase.from('group_members').select('group_id').eq('user_id', userId);
+    const myGroupIds = (myGroups || []).map(g => g.group_id);
+
+    let q = supabase.from('groups').select('*').eq('is_public', true).ilike('name', `%${query}%`).limit(20);
+    if (myGroupIds.length > 0) q = q.not('id', 'in', `(${myGroupIds.join(',')})`);
+    const { data } = await q;
+    return data || [];
+  } catch (e) { console.error('discoverPublicGroups error:', e); return []; }
+}
+
 async function fetchStories(currentUserId: string): Promise<Story[]> {
   try {
     const { data, error } = await supabase.from('stories').select('*')
@@ -327,7 +418,15 @@ async function startConversationWith(
 // ✅ FIX: Now listens for INSERT (new conversations) AND UPDATE (existing ones)
 // Original only caught UPDATE — brand new conversations never appeared without refresh
 function subscribeConversations(userId: string, onUpdate: () => void): RealtimeChannel {
-  return supabase.channel(`conversations:${userId}`)
+  // FIX: same remount race as HomeScreen.tsx's posts-changes channel — this
+  // used a fixed name (conversations:${userId}), so going back into this
+  // screen while the previous mount's channel was still being torn down
+  // (removeChannel() is async) could grab that stale, already-subscribed
+  // channel and crash on .on(). Unique suffix per mount fixes it the same
+  // way, matching exactly what the user reported (crashes on navigating
+  // back into Messages from a group/chat/circle).
+  const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return supabase.channel(`conversations:${userId}:${mountId}`)
     .on('postgres_changes', {
       event: 'INSERT', schema: 'public',
       table: 'conversation_participants',
@@ -394,10 +493,51 @@ function StoryViewer({
 }) {
   const [index, setIndex] = useState(startIndex);
   const story = stories[index];
+  // ✅ NEW: owner-only viewers list, WhatsApp-style — who actually viewed
+  // this story, only visible to the person who posted it.
+  const [viewersVisible, setViewersVisible] = useState(false);
+  const [viewersList, setViewersList]       = useState<{ viewer_id: string; created_at: string; user: any }[]>([]);
+  const [loadingViewers, setLoadingViewers] = useState(false);
+
+  const isOwner = story?.user_id === currentUserId;
+
+  const openViewersList = async () => {
+    if (!isOwner || !story) return;
+    setViewersVisible(true);
+    setLoadingViewers(true);
+    try {
+      const { data: views } = await supabase
+        .from('story_views')
+        .select('viewer_id, created_at')
+        .eq('story_id', story.id)
+        .order('created_at', { ascending: false });
+      const viewerIds = (views || []).map((v: any) => v.viewer_id);
+      if (viewerIds.length === 0) { setViewersList([]); return; }
+      const { data: users } = await supabase
+        .from('users')
+        .select('id, username, display_name, photo_url')
+        .in('id', viewerIds);
+      const userMap = new Map((users || []).map((u: any) => [u.id, u]));
+      setViewersList(
+        (views || [])
+          .map((v: any) => ({ ...v, user: userMap.get(v.viewer_id) }))
+          .filter((v: any) => v.user)
+      );
+    } catch (e) {
+      console.error('loadViewers error:', e);
+      setViewersList([]);
+    } finally {
+      setLoadingViewers(false);
+    }
+  };
 
   // Mark as viewed when opened
   useEffect(() => {
   if (!story) return;
+  // ✅ FIX: this ran unconditionally, so a user opening their OWN story
+  // counted as a view of themselves — inflating their own view count
+  // every time they checked their story, exactly like the bug described.
+  if (story.user_id === currentUserId) return;
   const markViewed = async () => {
     try {
       // FIX: this used to blindly insert into story_views every time and
@@ -474,11 +614,16 @@ function StoryViewer({
           </View>
         ) : null}
 
-        {/* View count — was tracked in the DB but never actually shown */}
-        <View style={viewerStyles.viewCountWrap}>
-          <Ionicons name="eye-outline" size={13} color="rgba(255,255,255,0.7)" />
-          <Text style={viewerStyles.viewCountText}>{story.view_count || 0}</Text>
-        </View>
+        {/* View count — was tracked in the DB but never actually shown.
+            ✅ FIX: now only visible to the story's own poster, WhatsApp-
+            style — other viewers never see this at all, and tapping it (as
+            the owner) opens the actual list of who viewed. */}
+        {isOwner && (
+          <TouchableOpacity style={viewerStyles.viewCountWrap} onPress={openViewersList} activeOpacity={0.7}>
+            <Ionicons name="eye-outline" size={13} color="rgba(255,255,255,0.7)" />
+            <Text style={viewerStyles.viewCountText}>{story.view_count || 0}</Text>
+          </TouchableOpacity>
+        )}
 
         {/* Tap zones — left goes back, right goes forward */}
         <View style={viewerStyles.tapZones}>
@@ -490,6 +635,38 @@ function StoryViewer({
           </TouchableWithoutFeedback>
         </View>
       </View>
+
+      {/* ✅ NEW: owner-only viewers list */}
+      <Modal visible={viewersVisible} transparent animationType="slide" onRequestClose={() => setViewersVisible(false)}>
+        <TouchableOpacity style={viewerStyles.viewersBackdrop} activeOpacity={1} onPress={() => setViewersVisible(false)}>
+          <TouchableOpacity activeOpacity={1} style={viewerStyles.viewersSheet}>
+            <View style={viewerStyles.viewersHandle} />
+            <Text style={viewerStyles.viewersTitle}>
+              {(story?.view_count || 0)} {(story?.view_count || 0) === 1 ? 'view' : 'views'}
+            </Text>
+            {loadingViewers ? (
+              <ActivityIndicator color={C.green} style={{ marginTop: 20 }} />
+            ) : viewersList.length === 0 ? (
+              <Text style={viewerStyles.viewersEmpty}>No views yet</Text>
+            ) : (
+              <FlatList
+                data={viewersList}
+                keyExtractor={v => v.viewer_id}
+                style={{ maxHeight: 360 }}
+                renderItem={({ item }) => (
+                  <View style={viewerStyles.viewerRow}>
+                    <Avatar user={item.user} size={40} />
+                    <View style={{ marginLeft: 10, flex: 1 }}>
+                      <Text style={viewerStyles.viewerName}>{item.user.display_name}</Text>
+                      <Text style={viewerStyles.viewerHandle}>@{item.user.username}</Text>
+                    </View>
+                  </View>
+                )}
+              />
+            )}
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </Modal>
   );
 }
@@ -559,6 +736,32 @@ function FriendRequestCard({
   );
 }
 
+// NEW: same layout as FriendRequestCard, for group join requests instead.
+function GroupJoinRequestCard({
+  request, onAccept, onDecline,
+}: { request: GroupJoinRequest; onAccept: () => void; onDecline: () => void }) {
+  return (
+    <View style={styles.requestCard}>
+      {request.requester
+        ? <Avatar user={request.requester} size={48} />
+        : <View style={[styles.avatarBase, { width: 48, height: 48, borderRadius: 24, backgroundColor: C.card2, borderColor: C.border }]} />}
+      <View style={{ flex: 1, marginLeft: 12 }}>
+        <Text style={styles.requestName}>{request.requester?.display_name || 'User'}</Text>
+        <Text style={styles.requestHandle}>wants to join {request.group_name || 'your group'}</Text>
+      </View>
+      <View style={styles.requestBtns}>
+        <TouchableOpacity style={styles.acceptBtn} onPress={onAccept}>
+          <Ionicons name="checkmark" size={15} color="#000" />
+          <Text style={styles.acceptBtnText}>Accept</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.declineBtn} onPress={onDecline}>
+          <Ionicons name="close" size={15} color={C.muted} />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
 // ── FRIEND CARD ───────────────────────────────────────────────
 // (identical to original)
 function FriendCard({ user, onMessage }: { user: ChatUser; onMessage: () => void }) {
@@ -578,6 +781,7 @@ function FriendCard({ user, onMessage }: { user: ChatUser; onMessage: () => void
 
 // ── GROUP CARD ────────────────────────────────────────────────
 // (identical to original)
+
 function GroupCard({ group, onPress }: { group: Group; onPress: () => void }) {
   return (
     <TouchableOpacity style={styles.convoItem} onPress={onPress} activeOpacity={0.7}>
@@ -597,6 +801,37 @@ function GroupCard({ group, onPress }: { group: Group; onPress: () => void }) {
       </View>
       <Ionicons name="chevron-forward" size={16} color={C.muted2} />
     </TouchableOpacity>
+  );
+}
+
+// NEW: for a public group found via search that you're not a member of —
+// same shape as GroupCard but with a Request-to-Join button instead of
+// navigating straight into the chat.
+function DiscoverGroupCard({
+  group, requested, onRequest,
+}: { group: Group; requested: boolean; onRequest: () => void }) {
+  return (
+    <View style={styles.convoItem}>
+      {group.avatar_url
+        ? <Image source={{ uri: group.avatar_url }} style={{ width: 52, height: 52, borderRadius: 26 }} />
+        : <View style={styles.groupAvatarFallback}>
+            <Ionicons name="people-outline" size={22} color={C.green} />
+          </View>}
+      <View style={styles.convoInfo}>
+        <Text style={styles.convoName} numberOfLines={1}>{group.name}</Text>
+        <Text style={styles.convoPreview} numberOfLines={1}>
+          {group.member_count} members{group.description ? ` · ${group.description}` : ''}
+        </Text>
+      </View>
+      <TouchableOpacity
+        style={[styles.subBtn, requested && styles.subBtnActive]}
+        onPress={onRequest} disabled={requested}
+      >
+        <Text style={[styles.subBtnText, requested && { color: C.green }]}>
+          {requested ? 'Requested' : 'Request'}
+        </Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -691,11 +926,27 @@ export default function MessagesScreen() {
   const [friends,       setFriends]       = useState<ChatUser[]>([]);
   const [groups,        setGroups]        = useState<Group[]>([]);
   const [requests,      setRequests]      = useState<FriendRequest[]>([]);
+  // NEW: group join requests (admin-only) and public-group discovery
+  const [groupRequests,   setGroupRequests]   = useState<GroupJoinRequest[]>([]);
+  const [discoveredGroups, setDiscoveredGroups] = useState<Group[]>([]);
+  const [requestedGroupIds, setRequestedGroupIds] = useState<Set<string>>(new Set());
   const [circles,       setCircles]       = useState<Circle[]>([]);
   const [stories,       setStories]       = useState<Story[]>([]);
   const [loading,       setLoading]       = useState(true);
   const [refreshing,    setRefreshing]    = useState(false);
   const [startingChat,  setStartingChat]  = useState<string | null>(null);
+  // ✅ NEW: loadAll previously failed completely silently on error (just a
+  // console.error, nothing shown to the user at all) — a failed load just
+  // looked like an empty inbox forever with zero explanation. These two
+  // track connectivity and surface a real, specific message instead.
+  const [isOffline, setIsOffline]   = useState(false);
+  const [loadError, setLoadError]   = useState<string | null>(null);
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener(state => {
+      setIsOffline(state.isConnected === false);
+    });
+    return () => unsub();
+  }, []);
 
   // ✅ NEW: Story viewer state
   const [viewingStoryIndex, setViewingStoryIndex] = useState<number | null>(null);
@@ -707,13 +958,15 @@ export default function MessagesScreen() {
   const loadAll = useCallback(async () => {
     if (!user?.id) { setLoading(false); return; }
     try {
-      const [convs, frds, grps, reqs, circs, strs] = await Promise.all([
+      setLoadError(null);
+      const [convs, frds, grps, reqs, circs, strs, grpReqs] = await Promise.all([
         fetchConversations(user.id),
         fetchFriends(user.id),
         fetchGroups(user.id),
         fetchFriendRequests(user.id),
         fetchCircles(user.id),
         fetchStories(user.id),
+        fetchGroupJoinRequests(user.id),
       ]);
       setConversations(convs);
       setFriends(frds);
@@ -721,9 +974,16 @@ export default function MessagesScreen() {
       setRequests(reqs);
       setCircles(circs);
       setStories(strs);
-    } catch (e) { console.error('loadAll error:', e); }
+      setGroupRequests(grpReqs);
+    } catch (e) {
+      console.error('loadAll error:', e);
+      // ✅ FIX: this used to be silent — a failed load just looked like an
+      // empty inbox forever, with no indication anything went wrong. Now
+      // surfaces a real, network-aware message via the banner below.
+      setLoadError(getFriendlyErrorMessage(e, isOffline, "Couldn't load your messages."));
+    }
     finally { setLoading(false); setRefreshing(false); }
-  }, [user?.id]);
+  }, [user?.id, isOffline]);
 
   useEffect(() => {
     loadAll();
@@ -759,14 +1019,49 @@ export default function MessagesScreen() {
     // becoming friends, and no error shown. Same silent-failure pattern
     // fixed in cowatch.tsx/group/[id].tsx/circle/[id].tsx earlier.
     const { error } = await respondToFriendRequest(request.id, 'accepted');
-    if (error) { Alert.alert('Error', error); return; }
+    if (error) { Alert.alert('Error', getFriendlyErrorMessage({ message: error }, isOffline, 'Failed to accept request.')); return; }
     setRequests(prev => prev.filter(r => r.id !== request.id));
   };
 
   const handleDeclineRequest = async (request: FriendRequest) => {
     const { error } = await respondToFriendRequest(request.id, 'declined');
-    if (error) { Alert.alert('Error', error); return; }
+    if (error) { Alert.alert('Error', getFriendlyErrorMessage({ message: error }, isOffline, 'Failed to decline request.')); return; }
     setRequests(prev => prev.filter(r => r.id !== request.id));
+  };
+
+  // NEW: when searching the Groups tab, also look for public groups you're
+  // not in yet — same "search everyone, not just your own list" fallback
+  // pattern already used for adding members in new-group.tsx.
+  useEffect(() => {
+    if (!user?.id || !search.trim() || activeTab !== 'Groups') { setDiscoveredGroups([]); return; }
+    const t = setTimeout(async () => {
+      const found = await discoverPublicGroups(user.id, search.trim());
+      setDiscoveredGroups(found);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [search, user?.id, activeTab]);
+
+  const handleRequestToJoinGroup = async (group: Group) => {
+    if (!user?.id) return;
+    setRequestedGroupIds(prev => new Set(prev).add(group.id));
+    const { error } = await requestToJoinGroup(group.id, user.id);
+    if (error) {
+      setRequestedGroupIds(prev => { const next = new Set(prev); next.delete(group.id); return next; });
+      Alert.alert('Error', getFriendlyErrorMessage({ message: error }, isOffline, 'Failed to send join request.'));
+    }
+  };
+
+  const handleAcceptGroupRequest = async (request: GroupJoinRequest) => {
+    const { error } = await respondToGroupJoinRequest(request, 'accepted');
+    if (error) { Alert.alert('Error', getFriendlyErrorMessage({ message: error }, isOffline, 'Failed to accept request.')); return; }
+    setGroupRequests(prev => prev.filter(r => r.id !== request.id));
+    loadAll();
+  };
+
+  const handleDeclineGroupRequest = async (request: GroupJoinRequest) => {
+    const { error } = await respondToGroupJoinRequest(request, 'declined');
+    if (error) { Alert.alert('Error', getFriendlyErrorMessage({ message: error }, isOffline, 'Failed to decline request.')); return; }
+    setGroupRequests(prev => prev.filter(r => r.id !== request.id));
   };
 
   const handleToggleCircle = async (circle: Circle) => {
@@ -838,6 +1133,30 @@ export default function MessagesScreen() {
   const filteredFriends = friends.filter(f =>
     !search || f.display_name?.toLowerCase().includes(search.toLowerCase())
   );
+  // FIX: search previously did nothing on the Groups/Circles tabs — those
+  // FlatLists read straight from `groups`/`circles` state, never through a
+  // filtered version. Same pattern as the two above, now applied here too.
+  const filteredGroups = groups.filter(g =>
+    !search || g.name?.toLowerCase().includes(search.toLowerCase())
+  );
+  const filteredCircles = circles.filter(c =>
+    !search || c.name?.toLowerCase().includes(search.toLowerCase())
+  );
+
+  // FIX: "All" used to only ever show `filteredConvos` — DMs only, with
+  // groups and circles completely invisible there even though they exist
+  // and show up fine on their own tabs. This merges all three into one
+  // real feed, sorted by whichever had the most recent activity, the way
+  // "All" is supposed to read.
+  type AllItem =
+    | { kind: 'convo';  key: string; ts: string; data: Conversation }
+    | { kind: 'group';  key: string; ts: string; data: Group }
+    | { kind: 'circle'; key: string; ts: string; data: Circle };
+  const allItems: AllItem[] = [
+    ...filteredConvos.map(c => ({ kind: 'convo' as const,  key: `convo-${c.id}`,  ts: c.last_message_at || c.created_at, data: c })),
+    ...filteredGroups.map(g => ({ kind: 'group' as const,  key: `group-${g.id}`,  ts: g.last_message_at || g.created_at, data: g })),
+    ...filteredCircles.map(c => ({ kind: 'circle' as const, key: `circle-${c.id}`, ts: c.last_post_at || c.created_at,    data: c })),
+  ].sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
 
   // ── Tab content ────────────────────────────────────────────
   const renderTabContent = () => {
@@ -853,9 +1172,21 @@ export default function MessagesScreen() {
       case 'All':
         return (
           <FlatList
-            data={filteredConvos}
-            keyExtractor={item => item.id}
-            renderItem={({ item }) => <ConvoItem convo={item} onPress={() => openChat(item)} />}
+            data={allItems}
+            keyExtractor={item => item.key}
+            renderItem={({ item }) => {
+              if (item.kind === 'convo') return <ConvoItem convo={item.data} onPress={() => openChat(item.data)} />;
+              if (item.kind === 'group') return (
+                <GroupCard group={item.data} onPress={() => navigation.navigate('GroupChat', { id: item.data.id })} />
+              );
+              return (
+                <CircleCard
+                  circle={item.data}
+                  onPress={() => navigation.navigate('Circle', { id: item.data.id })}
+                  onToggle={() => handleToggleCircle(item.data)}
+                />
+              );
+            }}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={C.green} />}
             ListEmptyComponent={
               <View style={styles.emptyWrap}>
@@ -909,7 +1240,7 @@ export default function MessagesScreen() {
       case 'Groups':
         return (
           <FlatList
-            data={groups}
+            data={filteredGroups}
             keyExtractor={item => item.id}
             renderItem={({ item }) => (
               <GroupCard group={item} onPress={() => {
@@ -925,6 +1256,25 @@ export default function MessagesScreen() {
                 <Text style={styles.createGroupBtnText}>Create a Group</Text>
               </TouchableOpacity>
             }
+            ListFooterComponent={
+              // NEW: public groups found via search that you're not in yet —
+              // same "search everyone, not just your own list" idea already
+              // used for adding members during group creation.
+              discoveredGroups.length > 0 ? (
+                <View>
+                  <Text style={[styles.discoverLabel, { paddingHorizontal: 20, marginTop: 8, marginBottom: 4 }]}>
+                    DISCOVER
+                  </Text>
+                  {discoveredGroups.map(g => (
+                    <DiscoverGroupCard
+                      key={g.id} group={g}
+                      requested={requestedGroupIds.has(g.id)}
+                      onRequest={() => handleRequestToJoinGroup(g)}
+                    />
+                  ))}
+                </View>
+              ) : null
+            }
             ListEmptyComponent={
               <View style={styles.emptyWrap}>
                 <Ionicons name="people-outline" size={56} color={C.border} />
@@ -937,16 +1287,31 @@ export default function MessagesScreen() {
           />
         );
 
-      case 'Requests':
+      case 'Requests': {
+        // NEW: merges friend requests with group join requests (admin-only,
+        // already filtered server-side by RLS and fetchGroupJoinRequests).
+        type ReqItem =
+          | { kind: 'friend'; key: string; data: FriendRequest }
+          | { kind: 'group';  key: string; data: GroupJoinRequest };
+        const allRequests: ReqItem[] = [
+          ...requests.map(r => ({ kind: 'friend' as const, key: `f-${r.id}`, data: r })),
+          ...groupRequests.map(r => ({ kind: 'group' as const, key: `g-${r.id}`, data: r })),
+        ];
         return (
           <FlatList
-            data={requests}
-            keyExtractor={item => item.id}
-            renderItem={({ item }) => (
+            data={allRequests}
+            keyExtractor={item => item.key}
+            renderItem={({ item }) => item.kind === 'friend' ? (
               <FriendRequestCard
-                request={item}
-                onAccept={() => handleAcceptRequest(item)}
-                onDecline={() => handleDeclineRequest(item)}
+                request={item.data}
+                onAccept={() => handleAcceptRequest(item.data)}
+                onDecline={() => handleDeclineRequest(item.data)}
+              />
+            ) : (
+              <GroupJoinRequestCard
+                request={item.data}
+                onAccept={() => handleAcceptGroupRequest(item.data)}
+                onDecline={() => handleDeclineGroupRequest(item.data)}
               />
             )}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={C.green} />}
@@ -954,18 +1319,19 @@ export default function MessagesScreen() {
               <View style={styles.emptyWrap}>
                 <Ionicons name="person-add-outline" size={56} color={C.border} />
                 <Text style={styles.emptyTitle}>No requests</Text>
-                <Text style={styles.emptySubtitle}>Friend requests from other users will appear here</Text>
+                <Text style={styles.emptySubtitle}>Friend requests and group join requests will appear here</Text>
               </View>
             }
             contentContainerStyle={{ paddingBottom: 100 }}
             showsVerticalScrollIndicator={false}
           />
         );
+      }
 
       case 'Circles':
         return (
           <FlatList
-            data={circles}
+            data={filteredCircles}
             keyExtractor={item => item.id}
             renderItem={({ item }) => (
               <CircleCard
@@ -1009,6 +1375,19 @@ export default function MessagesScreen() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.black} />
+
+      {/* ✅ NEW: loadAll failing used to be completely invisible — this
+          makes it visible with a clear, specific message, and a retry. */}
+      {loadError && (
+        <TouchableOpacity
+          style={{ backgroundColor: '#ff4444', paddingVertical: 8, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 8 }}
+          onPress={loadAll}
+        >
+          <Ionicons name={isOffline ? 'wifi-outline' : 'alert-circle-outline'} size={14} color="#fff" />
+          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700', flex: 1 }}>{loadError}</Text>
+          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800', textDecorationLine: 'underline' }}>Retry</Text>
+        </TouchableOpacity>
+      )}
 
       {/* ── Header ── */}
       <View style={styles.header}>
@@ -1068,7 +1447,7 @@ export default function MessagesScreen() {
           contentContainerStyle={styles.tabs}>
           {TABS.map(tab => {
             const isActive = activeTab === tab.id;
-            const badge = tab.id === 'Requests' && requests.length > 0 ? requests.length : 0;
+            const badge = tab.id === 'Requests' && (requests.length + groupRequests.length) > 0 ? requests.length + groupRequests.length : 0;
             return (
               <TouchableOpacity
                 key={tab.id}
@@ -1145,6 +1524,21 @@ const viewerStyles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     alignItems: 'center', justifyContent: 'center',
   },
+  // ✅ NEW: owner-only viewers list sheet
+  viewersBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  viewersSheet: {
+    backgroundColor: '#111', borderTopLeftRadius: 18, borderTopRightRadius: 18,
+    paddingTop: 10, paddingHorizontal: 16, paddingBottom: 24, maxHeight: '60%',
+  },
+  viewersHandle: {
+    width: 36, height: 4, borderRadius: 2, backgroundColor: '#444',
+    alignSelf: 'center', marginBottom: 12,
+  },
+  viewersTitle: { fontSize: 15, fontWeight: '700', color: C.white, marginBottom: 12 },
+  viewersEmpty: { color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', paddingVertical: 20 },
+  viewerRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
+  viewerName: { fontSize: 14, fontWeight: '600', color: C.white },
+  viewerHandle: { fontSize: 12, color: 'rgba(255,255,255,0.6)' },
   captionWrap: {
     position: 'absolute', bottom: 60, left: 16, right: 16,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -1282,6 +1676,10 @@ const styles = StyleSheet.create({
     paddingVertical: 12, borderRadius: 14, justifyContent: 'center',
   },
   createGroupBtnText: { fontSize: 14, fontWeight: '800', color: '#000' },
+  // FIX: this was referencing styles.label, which never existed in this
+  // stylesheet — a plain section-header style, same weight/spacing
+  // convention as the rest of the file's labels.
+  discoverLabel: { fontSize: 12, fontWeight: '700', color: C.muted, letterSpacing: 0.5 },
 
   // ✅ FIX: circleCard split into circleCardRow + circleCardLeft
   // so the subscribe button is a fully independent touch target

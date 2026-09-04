@@ -15,10 +15,25 @@ registerGlobals();
 
 import { RootNavigator } from './src/navigation';
 import { colors } from './src/constants';
+// ✅ NEW: without this Provider, every screen's useTranslation()/useLanguage()
+// call falls back to LanguageContext's default value — whose setLanguage is a
+// no-op stub — so picking a language silently did nothing.
+import { LanguageProvider } from './src/locales/LanguageContext';
 // ✅ NEW: makes tapping an incoming-call push (cold-start or warm) land
 // straight in the right chat with the call auto-joined — see the file
 // for why this has to live here, at the app root, and not in chat/[id].tsx.
 import { useCallPushNavigation } from './src/lib/callPushNavigation';
+// ✅ NEW: same idea, for the general notification types (follow/like/
+// comment/coin/mention) — tapping one of these, from inside the app,
+// backgrounded, or fully closed, now actually navigates to the relevant
+// screen instead of doing nothing. Deliberately separate from
+// useCallPushNavigation above — see notificationPushNavigation.ts for why
+// they can't be merged into one hook.
+import { useNotificationPushNavigation } from './src/lib/notificationPushNavigation';
+// ✅ NEW: completes email verification (and any other Supabase auth email
+// link) when it opens the app — see authDeepLink.ts for the full picture
+// of what was missing and why the verification link used to freeze/crash.
+import { useAuthDeepLink } from './src/lib/authDeepLink';
 
 const navigationTheme = {
   ...DarkTheme,
@@ -43,14 +58,18 @@ export default function App() {
   // ChatDM with autoAnswerCall — see src/lib/callPushNavigation.ts
   const navigationRef = useRef<NavigationContainerRef<any>>(null);
   useCallPushNavigation(navigationRef);
+  useNotificationPushNavigation(navigationRef);
+  useAuthDeepLink();
 
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-        <NavigationContainer ref={navigationRef} theme={navigationTheme}>
-          <StatusBar style="light" />
-          <RootNavigator />
-        </NavigationContainer>
+        <LanguageProvider>
+          <NavigationContainer ref={navigationRef} theme={navigationTheme}>
+            <StatusBar style="light" />
+            <RootNavigator />
+          </NavigationContainer>
+        </LanguageProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

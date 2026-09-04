@@ -23,6 +23,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Video from 'react-native-video';
+import { createAudioPlayer, type AudioPlayer, type AudioStatus } from 'expo-audio';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -51,6 +52,71 @@ function cdnVideoUrl(url: string | null | undefined): string {
     return url.slice(0, idx + 8) + 'q_auto,vc_auto/' + url.slice(idx + 8);
   }
   return url;
+}
+
+// ── Video disk cache ────────────────────────────────────────────────────
+// ✅ NEW: once a video has actually finished loading over the network, it
+// gets saved to disk so re-opening it later — even fully offline — plays
+// instantly from the local copy instead of needing network again. This is
+// module-level (not component state), so it survives every VideoPost
+// mount/unmount as items scroll on/off screen in the FlatList, for as long
+// as the app process stays alive — exactly "watch it as many times as they
+// want, as long as they're still in the app" per how this was asked for.
+// Pull-to-refresh (loadVideos(true)) never touches this cache — it only
+// replaces which POSTS are shown, not any already-downloaded video files.
+const videoDiskCache: Map<string, string> = new Map();          // remoteUrl -> local file uri
+const videoDownloadsInFlight: Map<string, Promise<void>> = new Map(); // de-dupes concurrent downloads of the same url
+
+function cacheFilenameForUrl(url: string): string {
+  // Simple stable hash for a filesystem-safe filename — doesn't need to be
+  // cryptographically strong, just consistent for the same URL.
+  let hash = 0;
+  for (let i = 0; i < url.length; i++) hash = (hash * 31 + url.charCodeAt(i)) | 0;
+  return `vid_${Math.abs(hash)}.mp4`;
+}
+
+const VIDEO_CACHE_DIR = FileSystem.cacheDirectory + 'video-cache/';
+
+// Returns the best URI to play RIGHT NOW (local if already cached, remote
+// otherwise) and kicks off a background download to populate the cache for
+// next time if it isn't cached yet. Never blocks or delays the caller —
+// playback always starts immediately from whichever URI is returned.
+function getInitialPlayableUri(remoteUrl: string): string {
+  const cached = videoDiskCache.get(remoteUrl);
+  return cached || remoteUrl;
+}
+
+async function ensureVideoCached(remoteUrl: string): Promise<string | null> {
+  if (!remoteUrl) return null;
+  const existing = videoDiskCache.get(remoteUrl);
+  if (existing) {
+    try {
+      const info = await FileSystem.getInfoAsync(existing);
+      if (info.exists) return existing;
+      videoDiskCache.delete(remoteUrl); // file vanished (OS cache pressure) — re-download below
+    } catch { videoDiskCache.delete(remoteUrl); }
+  }
+
+  if (videoDownloadsInFlight.has(remoteUrl)) {
+    await videoDownloadsInFlight.get(remoteUrl);
+    return videoDiskCache.get(remoteUrl) || null;
+  }
+
+  const localPath = VIDEO_CACHE_DIR + cacheFilenameForUrl(remoteUrl);
+  const download = (async () => {
+    try {
+      await FileSystem.makeDirectoryAsync(VIDEO_CACHE_DIR, { intermediates: true }).catch(() => {});
+      const result = await FileSystem.downloadAsync(remoteUrl, localPath);
+      if (result.status === 200) videoDiskCache.set(remoteUrl, localPath);
+    } catch (e) {
+      console.warn('[LumVibe] background video cache failed for', remoteUrl, e);
+    } finally {
+      videoDownloadsInFlight.delete(remoteUrl);
+    }
+  })();
+  videoDownloadsInFlight.set(remoteUrl, download);
+  await download;
+  return videoDiskCache.get(remoteUrl) || null;
 }
 
 export const PAYSTACK_PUBLIC_KEY = 'pk_test_e621a586c2029ce1345fd07fcb8d454882a4098c';
@@ -197,6 +263,9 @@ interface Post {
   coins_received: number; liked_by: string[]; location?: string;
   music_name?: string; music_artist?: string;
   music_url?: string | null; voice_duration?: number | null;
+  music_volume?: number | null; original_volume?: number | null;
+  music_start_offset_ms?: number | null;
+  music_end_offset_ms?: number | null;
   applied_filter?: string;
   created_at: string; has_watermark?: boolean; watermarked_url?: string | null; _score?: number;
   video_effect?: string; video_filter_tint?: string; playback_rate?: number;
@@ -548,14 +617,14 @@ const nativeAdStyles = StyleSheet.create({
 // ─── VIDEO POST ───────────────────────────────────────────────────────────────
 const VideoPost = memo(function VideoPost({
   item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onSaveMedia, onDelete, onReport, user, onView, followStatusMap,
-  vibeRoomMap, topOffset,
+  vibeRoomMap, topOffset, isOffline,
 }: {
   item: Post; activePostId: string | null; onLike: (post: Post) => void; onComment: (post: Post) => void;
   onGift: (post: Post) => void; onFollow: (userId: string, isFollowing: boolean) => Promise<void>;
   onUserPress: (userId: string) => void; onShare: (post: Post) => void; onSaveMedia: (post: Post) => void;
   onDelete: (post: Post) => void; onReport: (post: Post) => void;
   user: any; onView: (postId: string) => void; followStatusMap: Map<string, boolean>;
-  vibeRoomMap: Map<string, VibeRoomPreview>; topOffset: number;
+  vibeRoomMap: Map<string, VibeRoomPreview>; topOffset: number; isOffline: boolean;
 }) {
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
@@ -567,6 +636,11 @@ const VideoPost = memo(function VideoPost({
   const [durationMs,       setDurationMs]       = useState(0);
   const [shouldLoad,       setShouldLoad]       = useState(false);
   const [showEndScreen,    setShowEndScreen]    = useState(false);
+  // ✅ NEW: local-vs-remote playable URI (disk cache) + per-video error
+  // state, so a failed/offline video shows a clear message instead of a
+  // silent black screen or a raw console-only error.
+  const [playableUri, setPlayableUri] = useState<string>(item.media_url || '');
+  const [videoError,  setVideoError]  = useState(false);
   // ✅ NEW: three-dot menu state
   const [menuVisible,      setMenuVisible]      = useState(false);
   // ✅ NEW: Co-Watch / Watch Together bottom-sheet state
@@ -575,6 +649,14 @@ const VideoPost = memo(function VideoPost({
   const isFollowing  = followStatusMap.get(item.user_id) || false;
   const videoRef     = useRef<any>(null);
   const viewedRef    = useRef(false);
+  // 🆕 Separate audio player for item.music_url (background music added in
+  // create.tsx). This was fetched from the DB but never actually played
+  // anywhere — the video posted fine, the music just never started. There's
+  // no native muxing step baking music into the video file itself (see
+  // create.tsx's postData.music_url — it's saved as its own field, not
+  // merged into media_url), so this plays it as a second, synced track
+  // client-side instead.
+  const musicPlayerRef = useRef<AudioPlayer | null>(null);
   const userId       = user?.id || (user as any)?.id;
   const isLiked      = userId ? item.liked_by?.includes(userId) : false;
   const isOwnPost    = userId === item.user_id;
@@ -640,6 +722,99 @@ const VideoPost = memo(function VideoPost({
     }
   }, [isActive]);
 
+  // ✅ NEW: resolve the actual playable URI — local cached file if this
+  // video's already been downloaded this session, remote URL otherwise
+  // (with a background download kicked off so NEXT time it's cached).
+  // getInitialPlayableUri() is synchronous and returns immediately, so the
+  // very first render already uses the cache if one exists — no flash of
+  // the remote URL first. ensureVideoCached() then confirms the cached
+  // file genuinely still exists on disk (OS cache pressure can evict
+  // files), and starts the download if it wasn't cached yet.
+  useEffect(() => {
+    if (!shouldLoad || !item.media_url) return;
+    let cancelled = false;
+    setVideoError(false);
+    setPlayableUri(getInitialPlayableUri(item.media_url));
+    ensureVideoCached(item.media_url).then(localUri => {
+      if (cancelled) return;
+      if (localUri) setPlayableUri(localUri);
+      else if (isOffline) {
+        // No local copy, and no network to fetch one — this is the exact
+        // "no internet" case rather than some other failure, so surface
+        // that distinction immediately instead of waiting for <Video>'s
+        // own onError to eventually fire.
+        setVideoError(true);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [shouldLoad, item.media_url, isOffline]);
+
+  // 🆕 Load the background-music track for this post (if any) once it's
+  // actually going to be shown, and unload it when this item is done being
+  // relevant (unmounted, or the post scrolls fully out and music_url
+  // changes on remount) — AudioPlayer instances hold real native resources,
+  // so leaving them loaded for every post in a long feed would leak memory.
+  // ✅ Uses expo-audio (createAudioPlayer), NOT expo-av — expo-av isn't
+  // installed in this project and Audio.Sound.createAsync doesn't exist
+  // here. createAudioPlayer is synchronous (returns the player immediately,
+  // no await), unlike expo-av's async createAsync.
+  useEffect(() => {
+    if (!shouldLoad || !item.music_url) return;
+    let cancelled = false;
+    const startMs = item.music_start_offset_ms ?? 0;
+    const endMs = item.music_end_offset_ms ?? 0;
+    let player: AudioPlayer | null = null;
+    let sub: { remove: () => void } | null = null;
+    try {
+      player = createAudioPlayer({ uri: item.music_url });
+      player.volume = Math.min(Math.max(item.music_volume ?? 0.85, 0), 1);
+      if (startMs > 0) player.seekTo(startMs / 1000);
+      musicPlayerRef.current = player;
+      // ✅ FIX: looping the whole track back to position 0 would undo the
+      // trim on every repeat (the user picked a specific point in the song,
+      // not "the beginning"). Looping is handled manually here instead — on
+      // finish, seek back to the SAME trim point and keep playing, so the
+      // chosen segment is what actually repeats.
+      // 🆕 Also loops back once playback crosses music_end_offset_ms
+      // (checked on the same status updates, which already fire
+      // periodically during playback — no separate poll needed), so a
+      // trimmed segment mid-song actually loops at its own end instead of
+      // playing on into the rest of the track.
+      sub = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        if (!player || cancelled) return;
+        const currentMs = ((status as any).currentTime || 0) * 1000;
+        const hitEnd = endMs > startMs && currentMs >= endMs;
+        if ((status as any).didJustFinish || hitEnd) {
+          try { player.seekTo(startMs / 1000); player.play(); } catch (e) { /* player may have just been removed */ }
+        }
+      });
+    } catch (e) {
+      console.warn('Background music failed to load:', e);
+    }
+    return () => {
+      cancelled = true;
+      try { sub?.remove(); } catch {}
+      try { player?.remove(); } catch (e) { console.warn('Background music unload failed:', e); }
+      musicPlayerRef.current = null;
+    };
+  }, [shouldLoad, item.music_url]);
+
+  // 🆕 Keep the music track in sync with the video's own play/pause/mute
+  // state. This is client-side dual-track sync, not frame-perfect muxed
+  // audio — good enough to make the music actually play in time with the
+  // video, which is the actual bug (it wasn't playing AT ALL before this).
+  useEffect(() => {
+    const player = musicPlayerRef.current;
+    if (!player) return;
+    try {
+      if (isPlaying && !isMuted) {
+        player.play();
+      } else {
+        player.pause();
+      }
+    } catch (e) { /* player may have just been removed mid-toggle — safe to ignore */ }
+  }, [isPlaying, isMuted, musicPlayerRef.current]);
+
   // ✅ react-native-video callbacks
   const handleLoad = useCallback((data: any) => {
     if (data?.duration) setDurationMs(data.duration * 1000);
@@ -701,24 +876,58 @@ const VideoPost = memo(function VideoPost({
       <View style={styles.videoBackground} />
 
       <TouchableOpacity style={styles.videoTouchable} onPress={togglePlay} onLongPress={() => onSaveMedia(item)} delayLongPress={500} activeOpacity={0.9}>
-        {shouldLoad ? (
+        {shouldLoad && !videoError ? (
           <Video
             ref={videoRef}
-            source={{ uri: item.media_url || '' }}
+            source={{ uri: playableUri || item.media_url || '' }}
             style={videoStyle}
             resizeMode="contain"
             repeat
             muted={isMuted}
             paused={!isPlaying}
             rate={playbackRate}
+            volume={item.original_volume ?? 1}
             onLoad={handleLoad}
             onProgress={handleProgress}
             onEnd={handleEnd}
-            onError={(err) => console.log('Video error:', err)}
+            onError={(err) => {
+              console.log('Video error:', err);
+              // ✅ FIX: this only logged before — a failed video (no
+              // internet, bad cache, expired URL, etc.) just showed a
+              // silent black screen forever with zero indication of what
+              // went wrong. Now shows a clear, dedicated overlay below.
+              setVideoError(true);
+            }}
             ignoreSilentSwitch="ignore"
             playInBackground={false}
             playWhenInactive={false}
           />
+        ) : videoError ? (
+          // ✅ NEW: clear, specific message instead of a black screen or a
+          // raw error — distinguishes "no internet" from any other failure,
+          // and offers a retry that re-checks the cache/re-downloads.
+          <View style={[videoStyle, { backgroundColor: '#111', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40 }]}>
+            <Feather name={isOffline ? 'wifi-off' : 'alert-circle'} size={40} color="#666" />
+            <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700', marginTop: 14, textAlign: 'center' }}>
+              {isOffline ? 'No internet connection' : "Couldn't load this video"}
+            </Text>
+            <Text style={{ color: '#888', fontSize: 13, marginTop: 6, textAlign: 'center' }}>
+              {isOffline ? 'Please connect to Wi-Fi or mobile data.' : 'Check your connection and try again.'}
+            </Text>
+            <TouchableOpacity
+              style={{ marginTop: 16, backgroundColor: '#00ff88', paddingHorizontal: 20, paddingVertical: 8, borderRadius: 20 }}
+              onPress={() => {
+                setVideoError(false);
+                setPlayableUri(getInitialPlayableUri(item.media_url || ''));
+                ensureVideoCached(item.media_url || '').then(localUri => {
+                  if (localUri) setPlayableUri(localUri);
+                  else if (isOffline) setVideoError(true);
+                });
+              }}
+            >
+              <Text style={{ color: '#000', fontWeight: '700', fontSize: 13 }}>Retry</Text>
+            </TouchableOpacity>
+          </View>
         ) : (
           <View style={[videoStyle, { backgroundColor: '#111', justifyContent: 'center', alignItems: 'center' }]}>
             <ActivityIndicator size="large" color="#00ff88" />
@@ -1122,6 +1331,7 @@ const VideoPost = memo(function VideoPost({
               setShowEndScreen(false);
               setPositionMs(0);
               videoRef.current?.seek(0);
+              try { musicPlayerRef.current?.seekTo((item.music_start_offset_ms ?? 0) / 1000); } catch {}
               setIsPlaying(true);
             }}
           >
@@ -1298,7 +1508,7 @@ export default function VideosScreen() {
     try {
       const { data: postsData, error: postsError } = await supabase
         .from('posts')
-        .select('id,user_id,caption,media_url,watermarked_url,media_type,views_count,coins_received,comments_count,saved_by,liked_by,location,music_name,music_artist,music_url,voice_duration,created_at,has_watermark,applied_filter,video_effect,video_filter_tint,playback_rate,vibe_type,cloudinary_public_id,is_published,marketplace_listing_id,marketplace_price,marketplace_title')
+        .select('id,user_id,caption,media_url,watermarked_url,media_type,views_count,coins_received,comments_count,saved_by,liked_by,location,music_name,music_artist,music_url,music_volume,original_volume,music_start_offset_ms,music_end_offset_ms,voice_duration,created_at,has_watermark,applied_filter,video_effect,video_filter_tint,playback_rate,vibe_type,cloudinary_public_id,is_published,marketplace_listing_id,marketplace_price,marketplace_title')
         .eq('media_type', 'video')
         .or('is_published.is.null,is_published.eq.true')
         .order('created_at', { ascending: false })
@@ -1337,6 +1547,10 @@ export default function VideosScreen() {
           liked_by: likes.users, location: p.location,
           music_name: p.music_name, music_artist: p.music_artist,
           music_url: p.music_url || null,
+          music_volume: p.music_volume ?? null,
+          original_volume: p.original_volume ?? null,
+          music_start_offset_ms: p.music_start_offset_ms ?? null,
+          music_end_offset_ms: p.music_end_offset_ms ?? null,
           voice_duration: p.voice_duration || null,
           applied_filter: p.applied_filter || 'original',
           created_at: p.created_at, has_watermark: p.has_watermark || false,
@@ -1389,7 +1603,22 @@ export default function VideosScreen() {
       videoCacheRef.current = { data: itemsWithAds, timestamp: Date.now() };
       setFeedItems(itemsWithAds);
       await loadFollowStatus(userIds);
-    } catch (e: any) { Alert.alert('Error', e.message || 'Failed to load videos'); }
+    } catch (e: any) {
+      // ✅ FIX: this used to Alert.alert the raw error object — for a
+      // network failure that's literally "TypeError: Network request
+      // failed" shown straight to the user. Now detects network-shaped
+      // errors specifically and shows the same friendly banner UI already
+      // built for the timeout case above, instead of a jargon-filled modal.
+      const msg = String(e?.message || '');
+      const isNetworkError =
+        isOffline ||
+        /network request failed|failed to fetch|timeout|abort/i.test(msg);
+      setError(
+        isNetworkError
+          ? 'No internet connection. Please check your network and try again.'
+          : 'Something went wrong loading videos. Pull down to retry.'
+      );
+    }
     finally { clearTimeout(loadTimeout); setLoading(false); isLoadingRef.current = false; }
   };
 
@@ -1767,10 +1996,10 @@ export default function VideosScreen() {
         onFollow={handleFollow} onUserPress={handleUserPress} onShare={handleShare}
         onSaveMedia={handleSaveMedia} onDelete={handleDeletePost} onReport={handleReport}
         user={user} onView={handleView} followStatusMap={followStatusMap}
-        vibeRoomMap={vibeRoomMap} topOffset={HEADER_HEIGHT}
+        vibeRoomMap={vibeRoomMap} topOffset={HEADER_HEIGHT} isOffline={isOffline}
       />
     );
-  }, [activePostId, weeklyWinners, followStatusMap, vibeRoomMap, handleLike, handleComment, handleGift, handleFollow, handleUserPress, handleShare, handleSaveMedia, handleDeletePost, handleReport, handleView, user, HEADER_HEIGHT]);
+  }, [activePostId, weeklyWinners, followStatusMap, vibeRoomMap, handleLike, handleComment, handleGift, handleFollow, handleUserPress, handleShare, handleSaveMedia, handleDeletePost, handleReport, handleView, user, HEADER_HEIGHT, isOffline]);
 
   // ✅ NEW: "Following" tab shows only posts from creators the viewer already follows,
   // filtered client-side from the same feed data (no extra network round-trip).

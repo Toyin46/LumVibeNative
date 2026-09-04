@@ -36,7 +36,7 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -44,11 +44,12 @@ import { captureRef } from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/marketplacePostBridge';
 import NetInfo from '@react-native-community/netinfo';
+
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
 import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
-import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache';
+import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -87,10 +88,15 @@ class CompatSound {
   private player: AudioPlayer;
   private sub: { remove: () => void } | null = null;
   private cb: ((status: { isLoaded: boolean; didJustFinish?: boolean; isPlaying?: boolean; error?: string }) => void) | null = null;
+  // 🆕 Latest known status from the playbackStatusUpdate listener below —
+  // needed so getStatusAsync() (added for the music trim feature) has
+  // something to read without inventing a second listener.
+  private lastStatus: AudioStatus | null = null;
 
   constructor(player: AudioPlayer) {
     this.player = player;
     this.sub = this.player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+      this.lastStatus = status;
       this.cb?.({
         isLoaded: !!status.isLoaded,
         didJustFinish: !!(status as any).didJustFinish,
@@ -112,6 +118,47 @@ class CompatSound {
   async stopAsync() { try { this.player.pause(); this.player.seekTo(0); } catch (e) { console.warn('CompatSound.stopAsync:', e); } }
   async setVolumeAsync(v: number) { try { this.player.volume = Math.min(Math.max(v, 0), 1); } catch (e) { console.warn('CompatSound.setVolumeAsync:', e); } }
   async setIsLoopingAsync(loop: boolean) { try { this.player.loop = loop; } catch (e) { console.warn('CompatSound.setIsLoopingAsync:', e); } }
+  // 🆕 Added for the music trim feature — was being called by create.tsx's
+  // preview-player code without actually existing on this class (would
+  // have thrown "setPositionAsync is not a function" at runtime). expo-audio's
+  // seekTo() takes SECONDS, not milliseconds — that's the actual bug this
+  // fixes, not just a missing method.
+  async setPositionAsync(ms: number) {
+    try { await this.player.seekTo(Math.max(0, ms) / 1000); }
+    catch (e) { console.warn('CompatSound.setPositionAsync:', e); }
+  }
+  // 🆕 Also added for the music trim feature (reading a picked song's real
+  // duration, and — extended — its current playback position for the
+  // preview player's end-boundary looping). Right after createAudioPlayer()
+  // returns, metadata (duration) hasn't necessarily loaded yet — waits for
+  // the first "isLoaded" status from the listener already wired up above,
+  // with a timeout so a corrupt/unreadable file can't hang the trim UI
+  // forever.
+  async getStatusAsync(): Promise<{ isLoaded: boolean; durationMillis?: number; positionMillis?: number }> {
+    if (this.lastStatus?.isLoaded) {
+      return {
+        isLoaded: true,
+        durationMillis: ((this.lastStatus as any).duration || 0) * 1000,
+        positionMillis: ((this.lastStatus as any).currentTime || 0) * 1000,
+      };
+    }
+    return new Promise(resolve => {
+      const timeout = setTimeout(() => resolve({ isLoaded: false }), 5000);
+      const prevCb = this.cb;
+      this.cb = (status: any) => {
+        prevCb?.(status);
+        if (this.lastStatus?.isLoaded) {
+          clearTimeout(timeout);
+          this.cb = prevCb;
+          resolve({
+            isLoaded: true,
+            durationMillis: ((this.lastStatus as any).duration || 0) * 1000,
+            positionMillis: ((this.lastStatus as any).currentTime || 0) * 1000,
+          });
+        }
+      };
+    });
+  }
   async unloadAsync() {
     try { this.sub?.remove(); } catch {}
     this.sub = null; this.cb = null;
@@ -299,11 +346,11 @@ interface PostInsertData {
   created_at: string; is_published: boolean; scheduled_for: string | null;
   has_watermark: boolean; auto_optimized: boolean; applied_filter: string;
   video_effect: string; video_filter_tint: string | null; playback_rate: number | null;
-  vibe_type: string | null; voice_auto_tune: boolean; blur_enabled: boolean;
+  vibe_type: string | null; voice_auto_tune: boolean;
   media_url?: string; media_type?: string; cloudinary_public_id?: string;
   status_background?: string; voice_duration?: number; location?: string;
   latitude?: number; longitude?: number; music_name?: string; music_artist?: string;
-  music_volume?: number; original_volume?: number; music_url?: string;
+  music_volume?: number; original_volume?: number; music_url?: string; music_start_offset_ms?: number; music_end_offset_ms?: number;
   marketplace_listing_id?: string; marketplace_price?: string | null; marketplace_title?: string | null;
   watermarked_url?: string | null;
 }
@@ -323,52 +370,6 @@ interface StyleEffect {
   id: string; name: string; emoji: string; desc: string;
   ffmpegFilter: string; // FFmpeg vf filter for baking
 }
-const STYLE_EFFECTS: StyleEffect[] = [
-  {
-    id: 'style_none',
-    name: 'None', emoji: '✖️', desc: 'No style effect',
-    ffmpegFilter: '',
-  },
-  {
-    id: 'style_anime',
-    name: 'Anime', emoji: '🎌', desc: 'Edge detection, flat colors, bold outlines',
-    ffmpegFilter: 'edgedetect=low=0.1:high=0.4:mode=colormix,eq=saturation=2.5:contrast=1.6',
-  },
-  {
-    id: 'style_comic',
-    name: 'Comic Book', emoji: '💥', desc: 'Posterization and halftone',
-    ffmpegFilter: 'curves=preset=strong_contrast,eq=saturation=2.2,erosion',
-  },
-  {
-    id: 'style_pixar',
-    name: 'Pixar 3D', emoji: '✨', desc: 'Skin smoothing, warm highlights, pastel grade',
-    ffmpegFilter: 'unsharp=5:5:1.2:5:5:0,eq=brightness=0.04:saturation=1.3:contrast=1.05,colorchannelmixer=1.02:0:0:0:0:0.98:0:0:0:0:0.95',
-  },
-  {
-    id: 'style_sketch',
-    name: 'Pencil Sketch', emoji: '✏️', desc: 'Grayscale Gaussian blur color dodge',
-    ffmpegFilter: 'format=gray,unsharp=5:5:3:5:5:0,eq=contrast=2.5:brightness=0.1',
-  },
-  {
-    id: 'style_neon',
-    name: 'Neon Cyberpunk', emoji: '🌆', desc: 'Edge neon, scanlines, chromatic aberration',
-    ffmpegFilter: 'edgedetect=low=0.05:high=0.2:mode=colormix,eq=saturation=3.0:contrast=1.8,rgbashift=rh=2:bh=-2',
-  },
-];
-
-// TASK 5: Bake style effect into video via FFmpeg
-async function bakeStyleEffect(inputUri: string, styleId: string): Promise<string> {
-  try {
-    // ⚠️ DISABLED — these style filters (edgedetect, curves, rgbashift, etc.)
-    // are FFmpeg-specific filter graphs with no native equivalent yet.
-    // video-baker's FrameRenderer shader currently only does brightness/
-    // contrast/saturation. Porting these styles to GLSL shaders is real work —
-    // do this as part of the "filters phase 2" pass, not here.
-    console.warn(`bakeStyleEffect: disabled, style "${styleId}" not yet portable to GL shader`);
-    return inputUri;
-  } catch (e) { return inputUri; }
-}
-
 
 // These are DeepAR's built-in bundled effects — no download needed.
 // When DeepAR is unavailable, the app falls back to emoji AR_EFFECTS.
@@ -405,6 +406,14 @@ async function fetchWithTimeout(input: RequestInfo, init?: RequestInit, timeoutM
   }
 }
 
+
+// 🆕 Formats milliseconds as M:SS for the music trim slider's time labels.
+function formatMs(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 function getFriendlyError(e: any): string {
   const msg = (e?.message || e?.toString() || '').toLowerCase();
@@ -1246,8 +1255,31 @@ const VolumeSlider = memo(function VolumeSlider({ value, onValueChange, color = 
   const TW = SW - 80;
   const tx = useRef(new Animated.Value(value * TW)).current;
   const cv = useRef(value);
+  // ✅ FIX (real cause of "the bar doesn't track well with my finger"): the
+  // effect below re-syncs tx/cv.current from the `value` PROP on every
+  // render — including the re-renders triggered by THIS component's own
+  // onValueChange calls during a drag. onPanResponderMove fires far faster
+  // than React can round-trip a new value back down as a prop (especially
+  // in a screen this large), so that effect could fire with a still-stale
+  // `value` WHILE the finger is actively moving, snapping the thumb
+  // backward mid-drag. isDragging skips the external-sync effect for the
+  // whole duration of a gesture — this component already owns the value
+  // during a drag (tx/cv.current), it doesn't need the prop echoed back.
+  const isDragging = useRef(false);
+  // ✅ FIX (real cause of "too fast"/erratic feeling volume sliders):
+  // onValueChange used to fire on every single onPanResponderMove event —
+  // often 60-100+ times during one drag gesture. Each call triggers a full
+  // re-render (fill bar + percentage text are driven by the value PROP, not
+  // the Animated thumb position) AND an async native setVolumeAsync bridge
+  // call. Stacking that many re-renders plus native calls within a single
+  // drag is what made it feel unstable rather than smooth. The thumb itself
+  // (tx) still updates on every move for a buttery-smooth drag feel — only
+  // the downstream value/native-call frequency is throttled, to ~20 updates/
+  // sec, which is still visually smooth for a fill bar but far lighter.
+  const lastEmitMs = useRef(0);
 
   useEffect(() => {
+    if (isDragging.current) return;
     tx.setValue(value * TW);
     cv.current = value;
   }, [value]);
@@ -1256,13 +1288,17 @@ const VolumeSlider = memo(function VolumeSlider({ value, onValueChange, color = 
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
     onPanResponderGrant: () => {
+      isDragging.current = true;
       // Snapshot the current value at drag start so next drag starts from here
       cv.current = value;
     },
     onPanResponderMove: (_, gs) => {
       const startX = cv.current * TW;
       const x = Math.min(Math.max(startX + gs.dx, 0), TW);
-      tx.setValue(x);
+      tx.setValue(x); // always smooth — native-driven, doesn't touch React state
+      const now = Date.now();
+      if (now - lastEmitMs.current < 50) return; // throttle the expensive part only
+      lastEmitMs.current = now;
       const newVal = Math.round(x / TW * 100) / 100;
       onValueChange(newVal);
     },
@@ -1271,7 +1307,8 @@ const VolumeSlider = memo(function VolumeSlider({ value, onValueChange, color = 
       const x = Math.min(Math.max(startX + gs.dx, 0), TW);
       const newVal = Math.round(x / TW * 100) / 100;
       cv.current = newVal; // ✅ update stored value after each drag completes
-      onValueChange(newVal);
+      onValueChange(newVal); // always fire on release, regardless of throttle, for final accuracy
+      isDragging.current = false;
     },
   })).current;
 
@@ -1311,14 +1348,26 @@ const StudioSlider = memo(function StudioSlider({ value, onChange, color }: { va
   const TW = SW - 100;
   const tx = useRef(new Animated.Value(value * TW)).current;
   const cv = useRef(value);
-  useEffect(() => { tx.setValue(value * TW); cv.current = value; }, [value]);
+  // ✅ FIX: same "doesn't track well while dragging" race as VolumeSlider
+  // above — skip the external-sync effect for the duration of a gesture.
+  const isDragging = useRef(false);
+  // ✅ FIX: same "too fast"/erratic throttle as VolumeSlider above — onChange
+  // fired on every single move event, causing a full re-render each time.
+  const lastEmitMs = useRef(0);
+  useEffect(() => {
+    if (isDragging.current) return;
+    tx.setValue(value * TW); cv.current = value;
+  }, [value]);
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: () => { cv.current = value; },
+    onPanResponderGrant: () => { isDragging.current = true; cv.current = value; },
     onPanResponderMove: (_, gs) => {
       const x = Math.min(Math.max(cv.current * TW + gs.dx, 0), TW);
       tx.setValue(x);
+      const now = Date.now();
+      if (now - lastEmitMs.current < 50) return;
+      lastEmitMs.current = now;
       onChange(Math.round(x / TW * 100) / 100);
     },
     onPanResponderRelease: (_, gs) => {
@@ -1326,6 +1375,7 @@ const StudioSlider = memo(function StudioSlider({ value, onChange, color }: { va
       const v = Math.round(x / TW * 100) / 100;
       cv.current = v;
       onChange(v);
+      isDragging.current = false;
     },
   })).current;
   const pct = Math.round(value * 100);
@@ -1340,7 +1390,164 @@ const StudioSlider = memo(function StudioSlider({ value, onChange, color }: { va
   );
 });
 
-// ─── STUDIO WAVEFORM — driven by REAL microphone amplitude ────────────────────
+// ─── MUSIC TRIM SLIDER — waveform, dual handles (start + end) ────────────────
+// Replaces the old single-handle "start point only" trim. The waveform itself
+// is decorative (seeded by the song's URI so it looks the same every time you
+// view the same song, not randomly reshuffling on re-render) — real
+// per-sample audio analysis would need native audio decoding this project
+// doesn't have a pipeline for (same reason there's no FFmpeg-style filters
+// elsewhere). It's not reflecting actual loudness, but it reads as a real
+// waveform and gives the same visual trim experience as the WhatsApp
+// reference.
+const MusicTrimSlider = memo(function MusicTrimSlider({
+  durationMs, startMs, endMs, onStartChange, onEndChange, seedKey, color = '#00ff88',
+}: {
+  durationMs: number; startMs: number; endMs: number;
+  onStartChange: (ms: number) => void; onEndChange: (ms: number) => void;
+  seedKey: string; color?: string;
+}) {
+  const TRACK_W = SW - 64;
+  const BAR_COUNT = 48;
+  const HANDLE_MIN_GAP = 28; // px — stops the two handles crossing/overlapping
+
+  // Seeded pseudo-random bars — stable per song (same seedKey → same shape),
+  // not real waveform data.
+  const bars = useMemo(() => {
+    let seed = 0;
+    for (let i = 0; i < seedKey.length; i++) seed = (seed * 31 + seedKey.charCodeAt(i)) >>> 0;
+    if (seed === 0) seed = 12345;
+    const rand = () => { seed = (seed * 1103515245 + 12345) >>> 0; return (seed % 1000) / 1000; };
+    return Array.from({ length: BAR_COUNT }, () => 0.28 + rand() * 0.72);
+  }, [seedKey]);
+
+  const startX = useRef(new Animated.Value(0)).current;
+  const endX = useRef(new Animated.Value(TRACK_W)).current;
+  const cvStart = useRef(0);
+  const cvEnd = useRef(TRACK_W);
+  const isDraggingStart = useRef(false);
+  const isDraggingEnd = useRef(false);
+  const lastEmitStart = useRef(0);
+  const lastEmitEnd = useRef(0);
+
+  // Keep handle positions synced to real ms values whenever they change
+  // externally (a preset button tap, a new song picked) — skipped mid-drag
+  // for the same reason the other sliders skip it (see VolumeSlider's doc).
+  useEffect(() => {
+    if (durationMs <= 0) return;
+    if (!isDraggingStart.current) {
+      const x = (startMs / durationMs) * TRACK_W;
+      startX.setValue(x);
+      cvStart.current = x;
+    }
+    if (!isDraggingEnd.current) {
+      const x = (endMs / durationMs) * TRACK_W;
+      endX.setValue(x);
+      cvEnd.current = x;
+    }
+  }, [startMs, endMs, durationMs]);
+
+  const panStart = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => { isDraggingStart.current = true; },
+    onPanResponderMove: (_, gs) => {
+      const x = Math.min(Math.max(cvStart.current + gs.dx, 0), cvEnd.current - HANDLE_MIN_GAP);
+      startX.setValue(x);
+      const now = Date.now();
+      if (now - lastEmitStart.current < 50) return;
+      lastEmitStart.current = now;
+      onStartChange(Math.round((x / TRACK_W) * durationMs));
+    },
+    onPanResponderRelease: (_, gs) => {
+      const x = Math.min(Math.max(cvStart.current + gs.dx, 0), cvEnd.current - HANDLE_MIN_GAP);
+      cvStart.current = x;
+      onStartChange(Math.round((x / TRACK_W) * durationMs));
+      isDraggingStart.current = false;
+    },
+  })).current;
+
+  const panEnd = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => { isDraggingEnd.current = true; },
+    onPanResponderMove: (_, gs) => {
+      const x = Math.min(Math.max(cvEnd.current + gs.dx, cvStart.current + HANDLE_MIN_GAP), TRACK_W);
+      endX.setValue(x);
+      const now = Date.now();
+      if (now - lastEmitEnd.current < 50) return;
+      lastEmitEnd.current = now;
+      onEndChange(Math.round((x / TRACK_W) * durationMs));
+    },
+    onPanResponderRelease: (_, gs) => {
+      const x = Math.min(Math.max(cvEnd.current + gs.dx, cvStart.current + HANDLE_MIN_GAP), TRACK_W);
+      cvEnd.current = x;
+      onEndChange(Math.round((x / TRACK_W) * durationMs));
+      isDraggingEnd.current = false;
+    },
+  })).current;
+
+  // 🆕 Tap anywhere on the waveform to relocate the WHOLE segment there
+  // (keeping its current length) — e.g. tap near the 1:00 mark to move a
+  // 15s segment to 1:00-1:15. This is a much more discoverable way to pick
+  // "start from the middle of the song" than dragging the two thin edge
+  // handles is on its own — those still work for fine-tuning afterward.
+  // Only fires on a genuine tap (small total movement); a real drag
+  // starting on empty waveform is otherwise ignored so it can't fight with
+  // dragging either handle (a touch that starts ON a handle is claimed by
+  // that handle's own responder first, per RN's normal touch propagation).
+  const tapStartX = useRef(0);
+  const panTrack = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderGrant: (evt) => { tapStartX.current = evt.nativeEvent.locationX; },
+    onPanResponderRelease: (evt, gs) => {
+      if (Math.abs(gs.dx) > 8 || Math.abs(gs.dy) > 8) return; // was a drag, not a tap — ignore
+      if (durationMs <= 0) return;
+      const segmentLen = cvEnd.current - cvStart.current;
+      let newStartX = Math.min(Math.max(tapStartX.current - segmentLen / 2, 0), TRACK_W - segmentLen);
+      const newStartMs = Math.round((newStartX / TRACK_W) * durationMs);
+      const newEndMs = Math.round(((newStartX + segmentLen) / TRACK_W) * durationMs);
+      onStartChange(newStartMs);
+      onEndChange(newEndMs);
+    },
+  })).current;
+
+  return (
+    <View style={{ height: 56, width: TRACK_W, alignSelf: 'center' }} {...panTrack.panHandlers}>
+      {/* Waveform bars */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', height: 48, gap: 2, position: 'absolute', top: 4, left: 0, right: 0 }}>
+        {bars.map((h, i) => (
+          <View key={i} style={{ flex: 1, height: `${Math.round(h * 100)}%` as any, backgroundColor: '#333', borderRadius: 2 }} />
+        ))}
+      </View>
+      {/* Selected region highlight */}
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: 'absolute', top: 4, height: 48,
+          left: startX, width: Animated.subtract(endX, startX),
+          backgroundColor: `${color}33`, borderRadius: 4,
+          borderWidth: 1, borderColor: color,
+        }}
+      />
+      {/* Start handle */}
+      <Animated.View
+        {...panStart.panHandlers}
+        style={{ position: 'absolute', top: 0, height: 56, width: 32, left: Animated.subtract(startX, 16), alignItems: 'center', justifyContent: 'center' }}
+      >
+        <View style={{ width: 6, height: 48, backgroundColor: color, borderRadius: 3 }} />
+      </Animated.View>
+      {/* End handle */}
+      <Animated.View
+        {...panEnd.panHandlers}
+        style={{ position: 'absolute', top: 0, height: 56, width: 32, left: Animated.subtract(endX, 16), alignItems: 'center', justifyContent: 'center' }}
+      >
+        <View style={{ width: 6, height: 48, backgroundColor: color, borderRadius: 3 }} />
+      </Animated.View>
+    </View>
+  );
+});
+
+
 function StudioWave({ active }: { active: boolean }) {
   const vuLevel = useVUMeter(active);
   const bars = useRef(Array.from({ length: 32 }, () => new Animated.Value(0.3))).current;
@@ -2907,7 +3114,7 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
       setRecDur(0);
       timerRef.current = setInterval(() => setRecDur(d => d + 1), 1000);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    } catch (e: any) { Alert.alert('Error', 'Could not start recording: ' + e.message); }
+    } catch (e: any) { Alert.alert('Error', 'Could not start recording: ' + getFriendlyError(e)); }
   };
 
   const stopRec = async () => {
@@ -2922,7 +3129,7 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
       const uri = recRef.current.uri; recRef.current = null; setRecActive(false);
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
       if (uri) { setVoiceUri(uri); Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); Alert.alert('✅ Recorded!', 'Voice ready. Go to Effects tab to add pitch effects.'); }
-    } catch (e: any) { Alert.alert('Error', e.message); }
+    } catch (e: any) { Alert.alert('Error', getFriendlyError(e)); }
   };
 
 
@@ -4155,6 +4362,14 @@ export default function CreateScreen() {
   const [musicArtist, setMusicArtist]   = useState<string | null>(null);
   const [musicVolume, setMusicVolume]   = useState(0.85);
   const [originalVolume, setOriginalVolume] = useState(1.0);
+  // 🆕 Trim: which segment of the song to use, so a user making a 20s video
+  // isn't forced to always use the very beginning of a full-length track —
+  // musicDurationMs is 0 until the file's real length is known (loaded
+  // right after picking). Both start and end are now tracked (dual-handle
+  // waveform trim), not just a start point.
+  const [musicDurationMs, setMusicDurationMs] = useState(0);
+  const [musicStartOffsetMs, setMusicStartOffsetMs] = useState(0);
+  const [musicEndOffsetMs, setMusicEndOffsetMs] = useState(0);
 
   // ─── Audio Studio state ───────────────────────────────
   const [showAudioStudio, setShowAudioStudio] = useState(false);
@@ -4174,6 +4389,52 @@ export default function CreateScreen() {
   const [isScheduled, setIsScheduled]   = useState(false);
   const [scheduledFor, setScheduledFor] = useState<Date | null>(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
+
+  // ✅ FIX (real root cause of "Cannot read property 'dismiss' of
+  // undefined" on Schedule Post): Android's DateTimePicker, used
+  // declaratively (<DateTimePicker .../> mounted/unmounted via React
+  // state), is fundamentally a native dialog wrapped to LOOK like a
+  // regular view — React's mount/unmount cycle and the native dialog's
+  // own internal dismiss lifecycle can race, and if the JS side unmounts
+  // the component before the native side finishes its own event, the
+  // native module references an already-torn-down dialog. This is a
+  // documented issue with @react-native-community/datetimepicker on
+  // Android specifically. The previous fix here (deferring the unmount
+  // with setTimeout(...,0)) is the commonly-suggested band-aid, but it's
+  // still a race, not a guarantee. The library's own maintainers
+  // recommend the IMPERATIVE API for Android instead — DateTimePickerAndroid
+  // .open() — which shows the OS's real native dialog outside of React's
+  // render tree entirely, so there's no component to race against. Android
+  // doesn't support a combined date+time spinner via this API, so we chain
+  // two native dialogs: date first, then time, then combine them.
+  const openSchedulePicker = () => {
+    if (Platform.OS === 'android') {
+      const base = scheduledFor || new Date(Date.now() + 3600000);
+      DateTimePickerAndroid.open({
+        value: base,
+        mode: 'date',
+        minimumDate: new Date(),
+        onChange: (dateEvent, pickedDate) => {
+          if (dateEvent.type !== 'set' || !pickedDate) return;
+          DateTimePickerAndroid.open({
+            value: base,
+            mode: 'time',
+            onChange: (timeEvent, pickedTime) => {
+              if (timeEvent.type !== 'set' || !pickedTime) return;
+              const combined = new Date(pickedDate);
+              combined.setHours(pickedTime.getHours(), pickedTime.getMinutes(), 0, 0);
+              setScheduledFor(combined);
+            },
+          });
+        },
+      });
+    } else {
+      // iOS's picker is a real mounted view, not an imperative native
+      // dialog — it doesn't have this race, so the existing declarative
+      // <DateTimePicker> below is fine as-is for iOS.
+      setShowDatePicker(true);
+    }
+  };
 
   // ─── Video preview state ──────────────────────────────
   const [videoPlaying, setVideoPlaying] = useState(true); // auto-play so filters are visible
@@ -4209,9 +4470,70 @@ export default function CreateScreen() {
   // ─── Music preview state ──────────────────────────────
   const [previewMusicPlaying, setPreviewMusicPlaying] = useState(false);
   const previewMusicSoundRef = useRef<CompatSound | null>(null);
+  // 🆕 Keeps the already-loaded preview in sync when the trim slider moves,
+  // so dragging it is immediately audible instead of needing a manual
+  // stop/replay. Placed here (well before any of this component's
+  // conditional early returns below) so it always runs — a hook after an
+  // early return would only fire on some renders, not others.
+  //
+  // ✅ FIX (dragging felt janky/stuttery): MusicTrimSlider's own drag
+  // handler already throttles state updates to once per 50ms — but that
+  // still meant this effect could call the REAL native player.seekTo() up
+  // to 20 times a second while dragging. Native audio seeking isn't
+  // instant (each call can take 100-300ms to actually settle, depending on
+  // codec/keyframes), so 20 overlapping seek calls a second is exactly
+  // what produces stutter. Debouncing here means: while your finger is
+  // still moving, zero seek calls happen at all (each new position just
+  // resets the timer) — the moment you pause or lift your finger, exactly
+  // ONE seek fires to wherever you ended up. Dragging itself is now silky
+  // (no audio operations fighting the gesture), and playback catches up
+  // instantly once you stop — the same scrubbing feel as WhatsApp/most
+  // proper video/audio editors.
+  const seekDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (seekDebounceRef.current) clearTimeout(seekDebounceRef.current);
+    seekDebounceRef.current = setTimeout(() => {
+      previewMusicSoundRef.current?.setPositionAsync(musicStartOffsetMs).catch(() => {});
+    }, 120);
+    return () => { if (seekDebounceRef.current) clearTimeout(seekDebounceRef.current); };
+  }, [musicStartOffsetMs]);
+  // 🆕 While previewing, poll playback position and loop back to the trim
+  // START (not the whole song) once it crosses the trim END — so the
+  // preview accurately reflects the segment that'll actually be used,
+  // matching the end-boundary looping already implemented in videos-2.tsx's
+  // feed playback. 400ms is frequent enough to feel responsive without
+  // hammering the native bridge the way per-frame polling would.
+  useEffect(() => {
+    if (!previewMusicPlaying || musicEndOffsetMs <= musicStartOffsetMs) return;
+    const interval = setInterval(async () => {
+      const sound = previewMusicSoundRef.current;
+      if (!sound) return;
+      try {
+        const status = await sound.getStatusAsync();
+        if (status.isLoaded && (status.positionMillis ?? 0) >= musicEndOffsetMs) {
+          await sound.setPositionAsync(musicStartOffsetMs);
+        }
+      } catch (e) { /* sound may have just unloaded — safe to ignore */ }
+    }, 400);
+    return () => clearInterval(interval);
+  }, [previewMusicPlaying, musicStartOffsetMs, musicEndOffsetMs]);
   // FIX: separate ref for voice status preview so it never conflicts with music preview
   const [voicePreviewPlaying, setVoicePreviewPlaying] = useState(false);
   const voicePreviewSoundRef = useRef<CompatSound | null>(null);
+
+  // ✅ FIX (real cause of music continuing to play across the whole app
+  // after posting/leaving this screen): the only existing cleanup
+  // (handleBackToCamera) only ran from the success alert's "Done" button
+  // onPress — the hardware back button, a swipe-back gesture, or any other
+  // way of leaving this screen skipped it entirely, leaving the native
+  // audio player running with nothing left to ever tell it to stop. This
+  // runs on unmount for ANY reason, not just the one happy-path button.
+  useEffect(() => {
+    return () => {
+      previewMusicSoundRef.current?.unloadAsync().catch(() => {});
+      voicePreviewSoundRef.current?.unloadAsync().catch(() => {});
+    };
+  }, []);
 
   // ─── Drafts state ─────────────────────────────────────
   const [drafts, setDrafts]             = useState<Draft[]>([]);
@@ -4233,9 +4555,6 @@ export default function CreateScreen() {
 
   const [composeFxCat, setComposeFxCat] = useState('all');
   const [selectedPhotoPreset, setSelectedPhotoPreset] = useState('none');
-
-  // TASK 5: Style effects
-  const [selectedStyleEffect, setSelectedStyleEffect] = useState('style_none');
 
   // TASK 6: Beat Sync, Green Screen, Duet Mode, Trending Sounds
   const [beatMarkers, setBeatMarkers] = useState<{time: number; intensity: number}[]>([]);
@@ -4308,7 +4627,7 @@ export default function CreateScreen() {
         setMediaUri(`file://${outputPath}`);
         setMediaType('image');
         setScreenView('compose');
-      } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + e.message); }
+      } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + getFriendlyError(e)); }
       finally { setIsCapturingPhoto(false); }
       return;
     }
@@ -4326,7 +4645,7 @@ export default function CreateScreen() {
       setMediaUri(uri);
       setMediaType('image');
       setScreenView('compose');
-    } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + e.message); }
+    } catch (e: any) { Alert.alert('Error', 'Could not take photo: ' + getFriendlyError(e)); }
     finally { setIsCapturingPhoto(false); }
   };
 
@@ -4379,7 +4698,7 @@ export default function CreateScreen() {
       } catch (e: any) {
         recordingViaLiveFxRef.current = false;
         setIsRecording(false);
-        Alert.alert('Error', 'Could not start recording: ' + e.message);
+        Alert.alert('Error', 'Could not start recording: ' + getFriendlyError(e));
       }
       return;
     }
@@ -4416,13 +4735,13 @@ export default function CreateScreen() {
           setIsRecording(false);
           setIsFinalizingRecording(false);
           if (!error.message?.includes('stopped')) {
-            Alert.alert('Error', 'Could not record video: ' + error.message);
+            Alert.alert('Error', 'Could not record video: ' + getFriendlyError(error));
           }
         },
       });
     } catch (e: any) {
       setIsRecording(false);
-      Alert.alert('Error', 'Could not start recording: ' + e.message);
+      Alert.alert('Error', 'Could not start recording: ' + getFriendlyError(e));
     }
   };
 
@@ -4465,7 +4784,7 @@ export default function CreateScreen() {
       } catch (e: any) {
         setIsRecording(false);
         setIsFinalizingRecording(false);
-        Alert.alert('Error', 'Could not finish recording: ' + e.message);
+        Alert.alert('Error', 'Could not finish recording: ' + getFriendlyError(e));
       }
       return;
     }
@@ -4527,7 +4846,7 @@ export default function CreateScreen() {
         setVideoPlaying(false);
         setScreenView('compose');
       }
-    } catch (e: any) { Alert.alert('Error', 'Could not pick media: ' + e.message); }
+    } catch (e: any) { Alert.alert('Error', 'Could not pick media: ' + getFriendlyError(e)); }
   };
 
   const handleGetLocation = async () => {
@@ -4536,11 +4855,48 @@ export default function CreateScreen() {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') { Alert.alert('Permission denied', 'Location permission is needed.'); return; }
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const [place] = await Location.reverseGeocodeAsync({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
-      const label = [place.city, place.region, place.country].filter(Boolean).join(', ');
-      setLocation(label || 'Unknown location');
       setLocationCoords({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
-    } catch (e: any) { Alert.alert('Error', 'Could not get location: ' + e.message); }
+      // ✅ FIX: reverseGeocodeAsync (turning coordinates into a "City, Region,
+      // Country" label) is a real network call to the device's geocoding
+      // service and has no timeout of its own — it was hanging 9+ seconds
+      // then throwing DEADLINE_EXCEEDED. Races it against an explicit 6s
+      // timeout so it fails fast instead of hanging.
+      let label = '';
+      try {
+        const [place] = await Promise.race([
+          Location.reverseGeocodeAsync({ latitude: loc.coords.latitude, longitude: loc.coords.longitude }),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('geocode timeout')), 6000)),
+        ]);
+        label = [place?.city, place?.region, place?.country].filter(Boolean).join(', ');
+      } catch (geoErr) {
+        console.warn('On-device reverse geocode failed/timed out, trying web fallback:', geoErr);
+      }
+      // ✅ FIX (real cause of raw coordinates showing to the user): the
+      // previous fallback, when the on-device geocoder failed, showed the
+      // raw "9.615, 6.547" numbers directly — meaningless to a normal user.
+      // Nominatim (OpenStreetMap's free reverse-geocoding API) is a second,
+      // independent attempt via a plain HTTP call, which is often more
+      // reliable than the device's own geocoder on a flaky connection —
+      // and only if BOTH attempts fail does this fall back to a generic,
+      // honest label instead of ever showing raw numbers.
+      if (!label) {
+        try {
+          const res = await Promise.race([
+            fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${loc.coords.latitude}&lon=${loc.coords.longitude}&zoom=10&addressdetails=1`, {
+              headers: { 'User-Agent': 'LumVibe/1.0' },
+            }),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('nominatim timeout')), 5000)),
+          ]);
+          const json = await res.json();
+          const addr = json?.address || {};
+          const city = addr.city || addr.town || addr.village || addr.county;
+          label = [city, addr.state, addr.country].filter(Boolean).join(', ');
+        } catch (webGeoErr) {
+          console.warn('Web reverse geocode also failed:', webGeoErr);
+        }
+      }
+      setLocation(label || 'Current Location');
+    } catch (e: any) { Alert.alert('Error', 'Could not get location: ' + getFriendlyError(e)); }
     finally { setLoadingLocation(false); }
   };
 
@@ -4589,8 +4945,10 @@ export default function CreateScreen() {
     // ─── Go back ─────────────────────────────────────────
     setScreenView('camera');
     // TASK 5/6: reset new states
-    setSelectedStyleEffect('style_none');
     setBeatMarkers([]);
+    setMusicStartOffsetMs(0);
+    setMusicDurationMs(0);
+    setMusicEndOffsetMs(0);
     setGreenScreenMode(false);
     setDuetMode(false);
     setDuetPartnerUri(null);
@@ -5109,17 +5467,30 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             }
           }
 
-          // Bake watermark into image via Cloudinary l_image overlay — same
-          // logo, same position as the video path, for visual consistency.
-          // ✅ l_image works on IMAGE resources on the free plan (only video
-          // l_image/l_text at serve-time is paid — this isn't that).
-          if (addWatermark && imgCdnUrl) {
-            const wmIdx = imgCdnUrl.indexOf('/upload/');
-            if (wmIdx !== -1) {
-              const wmTransform = `l_${LOGO_PUBLIC_ID},w_70,o_75,g_north,y_24`;
-              imgCdnUrl = imgCdnUrl.slice(0, wmIdx + 8) + wmTransform + '/' + imgCdnUrl.slice(wmIdx + 8);
-            }
-          }
+          // ✅ FIX (confirmed root cause of "image doesn't show" / black-box
+          // posts): this baked a Cloudinary named overlay (l_lumvibe_logo)
+          // into every image URL. That asset was never actually uploaded to
+          // Cloudinary (see the SETUP REQUIRED comment on LOGO_PUBLIC_ID
+          // above) — so Cloudinary rejects the WHOLE URL whenever it's
+          // referenced, breaking every single posted image, 100% of the
+          // time (addWatermark defaults to true).
+          // The video upload path hit this exact same bug and already fixed
+          // it by baking the watermark natively on-device instead and
+          // passing addWatermark:false to Cloudinary (see the video upload
+          // call below — "watermark is already baked into the pixels").
+          // Images don't need that fix at all: the feed already renders its
+          // own watermark overlay client-side on top of every image post
+          // (see watermarkOverlay in the feed screen) — so this Cloudinary
+          // overlay was redundant even when it worked. Disabling it here
+          // doesn't remove your watermark; the feed's own overlay still
+          // shows it exactly as before.
+          // if (addWatermark && imgCdnUrl) {
+          //   const wmIdx = imgCdnUrl.indexOf('/upload/');
+          //   if (wmIdx !== -1) {
+          //     const wmTransform = `l_${LOGO_PUBLIC_ID},w_70,o_75,g_north,y_24`;
+          //     imgCdnUrl = imgCdnUrl.slice(0, wmIdx + 8) + wmTransform + '/' + imgCdnUrl.slice(wmIdx + 8);
+          //   }
+          // }
           finalMediaUrl = imgCdnUrl;
           // TASK 7: Add q_auto,f_auto params to all Cloudinary image URLs for performance
           if (finalMediaUrl && finalMediaUrl.includes('/upload/') && !finalMediaUrl.includes('q_auto')) {
@@ -5373,7 +5744,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         playback_rate: mediaType === 'video' ? speedRate : null,
         vibe_type: selectedVibe,
         voice_auto_tune: autoTuneEnabled,
-        blur_enabled: blurEnabled && mediaType === 'image',
       };
 
       if (finalMediaUrl) { postData.media_url = finalMediaUrl; postData.media_type = finalMediaType; }
@@ -5387,7 +5757,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
       // from StatusCreator. Both paths write to the same state variable.
       if (statusVoiceDuration > 0) postData.voice_duration = statusVoiceDuration;
       if (location) { postData.location = location; if (locationCoords) { postData.latitude = locationCoords.latitude; postData.longitude = locationCoords.longitude; } }
-      if (selectedMusicName) { postData.music_name = selectedMusicName; postData.music_artist = musicArtist ?? undefined; postData.music_volume = Math.max(musicVolume, 0.85); postData.original_volume = originalVolume; }
+      if (selectedMusicName) { postData.music_name = selectedMusicName; postData.music_artist = musicArtist ?? undefined; postData.music_volume = Math.max(musicVolume, 0.85); postData.original_volume = originalVolume; postData.music_start_offset_ms = musicStartOffsetMs; postData.music_end_offset_ms = musicEndOffsetMs || undefined; }
       if (marketplaceListingId) { postData.marketplace_listing_id = marketplaceListingId; postData.marketplace_price = marketplacePrice; postData.marketplace_title = marketplaceTitle; }
 
       // ── MUSIC / BEAT UPLOAD ──
@@ -5439,19 +5809,19 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   const musicErrText = await musicRes.text().catch(() => '(could not read response body)');
                   console.error('🔍 [music upload] Cloudinary rejected the upload:', musicRes.status, musicErrText);
                   delete postData.music_name; delete postData.music_artist;
-                  delete postData.music_volume; delete postData.original_volume;
+                  delete postData.music_volume; delete postData.original_volume; delete postData.music_start_offset_ms; delete postData.music_end_offset_ms;
                 }
               } else {
                 Alert.alert('🎵 Music File Too Large', `Your music file is ${sizeMb.toFixed(1)}MB. Files over ${MUSIC_UPLOAD_LIMIT_MB}MB can't be uploaded.\n\nPost saved without music.`);
                 delete postData.music_name; delete postData.music_artist;
-                delete postData.music_volume; delete postData.original_volume;
+                delete postData.music_volume; delete postData.original_volume; delete postData.music_start_offset_ms; delete postData.music_end_offset_ms;
               }
             }
           }
         } catch (me) {
           console.error('🔍 [music upload] threw:', me);
           delete postData.music_name; delete postData.music_artist;
-          delete postData.music_volume; delete postData.original_volume;
+          delete postData.music_volume; delete postData.original_volume; delete postData.music_start_offset_ms; delete postData.music_end_offset_ms;
         }
       }
 
@@ -6034,7 +6404,25 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         setSelectedMusic(r.assets[0].uri);
         setSelectedMusicName(name);
         setMusicArtist('My Music');
+        setMusicStartOffsetMs(0);
+        setMusicDurationMs(0);
+        setMusicEndOffsetMs(0);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        // 🆕 Load just enough to read the real duration for the trim slider —
+        // shouldPlay:false so this doesn't audibly start playing anything,
+        // unloaded right away since this is purely a metadata probe.
+        try {
+          const { sound: probeSound } = await createCompatSound({ uri: r.assets[0].uri }, { shouldPlay: false });
+          const status = await probeSound.getStatusAsync();
+          if ((status as any).isLoaded && (status as any).durationMillis) {
+            const dur = (status as any).durationMillis;
+            setMusicDurationMs(dur);
+            setMusicEndOffsetMs(Math.min(15000, dur)); // default 15s segment, or the whole song if shorter
+          }
+          await probeSound.unloadAsync();
+        } catch (probeErr) {
+          console.warn('Could not read music duration for trim:', probeErr);
+        }
       }
     } catch { Alert.alert('Error', 'Could not pick music file'); }
   };
@@ -6094,7 +6482,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                       setOriginalMediaUri(asset.uri); setMediaUri(asset.uri); setMediaType(type);
                       setVideoPlaying(false); setShowEndScreen(false);
                     }
-                  } catch (e: any) { Alert.alert('Error', 'Could not pick media: ' + e.message); }
+                  } catch (e: any) { Alert.alert('Error', 'Could not pick media: ' + getFriendlyError(e)); }
                 }}
               >
                 <Ionicons name="images-outline" size={13} color="#fff" />
@@ -6228,18 +6616,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   </View>
                 </View>
               )}
-              {/* Blur BG overlay — frosted-glass layered effect */}
-              {blurEnabled && (
-                <>
-                  <View style={[StyleSheet.absoluteFill, { zIndex: 18, backgroundColor: 'rgba(0,0,0,0.55)' }]} pointerEvents="none" />
-                  <View style={[StyleSheet.absoluteFill, { zIndex: 19, backgroundColor: 'rgba(20,20,40,0.35)' }]} pointerEvents="none" />
-                  <View style={{ position: 'absolute', top: '50%', left: 0, right: 0, alignItems: 'center', zIndex: 20 }} pointerEvents="none">
-                    <View style={{ backgroundColor: 'rgba(0,0,0,0.7)', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)' }}>
-                      <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }}>🌫️ Blur BG ON</Text>
-                    </View>
-                  </View>
-                </>
-              )}
               {/* Info pill at bottom */}
               <View style={[ms.previewInfo, { zIndex: 16 }]}>
                 <Text style={ms.previewInfoTxt} numberOfLines={1}>
@@ -6316,7 +6692,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                           setPreviewMusicPlaying(false);
                         }
                       });
-                    } catch (e: any) { Alert.alert('Playback Error', e.message); }
+                    } catch (e: any) { Alert.alert('Playback Error', getFriendlyError(e)); }
                   }
                 }}
               >
@@ -6411,40 +6787,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 <Feather name="external-link" size={14} color="#666" />
               </TouchableOpacity>
             ))}
-          </View>
-        )}
-
-        {/* ── TASK 5: STYLE EFFECTS PANEL ── */}
-        {(mediaType === 'video' || mediaType === 'image') && (
-          <View style={{ marginHorizontal: 12, marginBottom: 8, backgroundColor: '#0d0d0d', borderRadius: 16, paddingVertical: 12, borderWidth: 1, borderColor: '#1a1a1a' }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, marginBottom: 10 }}>
-              <Text style={{ fontSize: 18 }}>🎨</Text>
-              <View style={{ flex: 1, marginLeft: 8 }}>
-                <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Style Effects</Text>
-                <Text style={{ color: '#666', fontSize: 10, marginTop: 1 }}>AI-grade styles baked via FFmpeg</Text>
-              </View>
-            </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}>
-              {STYLE_EFFECTS.map(style => {
-                const isActive = selectedStyleEffect === style.id;
-                return (
-                  <TouchableOpacity
-                    key={style.id}
-                    style={{ alignItems: 'center', backgroundColor: isActive ? '#001a0a' : '#111', borderRadius: 12, padding: 10, minWidth: 78, borderWidth: 1, borderColor: isActive ? '#00ff88' : '#1a1a1a', position: 'relative' }}
-                    onPress={() => { setSelectedStyleEffect(style.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
-                  >
-                    <Text style={{ fontSize: 22 }}>{style.emoji}</Text>
-                    <Text style={{ color: isActive ? '#00ff88' : '#fff', fontSize: 10, fontWeight: '700', marginTop: 4, textAlign: 'center' }}>{style.name}</Text>
-                    <Text style={{ color: '#555', fontSize: 8, textAlign: 'center', marginTop: 2 }}>{style.desc}</Text>
-                    {isActive && (
-                      <View style={{ position: 'absolute', top: 4, right: 4, width: 14, height: 14, borderRadius: 7, backgroundColor: '#00ff88', alignItems: 'center', justifyContent: 'center' }}>
-                        <Feather name="check" size={8} color="#000" />
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
           </View>
         )}
 
@@ -6596,10 +6938,17 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                           { shouldPlay: true, volume: musicVolume, isLooping: true }
                         );
                         previewMusicSoundRef.current = sound;
+                        // ✅ FIX: createCompatSound has no positionMillis option
+                        // (it was silently ignored) — seek explicitly right
+                        // after creation instead. A brief instant of playing
+                        // from 0 before landing on the trim point is expected
+                        // and fine for a preview.
+                        if (musicStartOffsetMs > 0) await sound.setPositionAsync(musicStartOffsetMs);
                         sound.setOnPlaybackStatusUpdate(st => {
                           if ((st as any).error) setPreviewMusicPlaying(false);
                         });
                       } else {
+                        await previewMusicSoundRef.current.setPositionAsync(musicStartOffsetMs);
                         await previewMusicSoundRef.current.playAsync();
                       }
                       setPreviewMusicPlaying(true);
@@ -6627,9 +6976,74 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 setSelectedMusic(null);
                 setSelectedMusicName(null);
                 setMusicArtist(null);
+                setMusicStartOffsetMs(0);
+                setMusicDurationMs(0);
+                setMusicEndOffsetMs(0);
               }}>
                 <Feather name="x" size={16} color="#ff4444" />
               </TouchableOpacity>
+            </View>
+          )}
+
+          {/* 🆕 Trim — waveform with independent start/end handles, so a
+              specific segment (e.g. the drop, or the middle of a longer
+              track) can be picked instead of always using the very
+              beginning. Only shown once the song's real duration is known. */}
+          {selectedMusicName && selectedMusic && musicDurationMs > 0 && (
+            <View style={{ marginTop: 10, backgroundColor: '#0d0d0d', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#1a1a1a' }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+                <Text style={{ color: '#aaa', fontSize: 11, fontWeight: '700' }}>✂️ Trim segment</Text>
+                <Text style={{ color: '#00ff88', fontSize: 11, fontWeight: '700' }}>
+                  {formatMs(musicStartOffsetMs)} – {formatMs(musicEndOffsetMs)} · {formatMs(musicEndOffsetMs - musicStartOffsetMs)} long
+                </Text>
+              </View>
+              <MusicTrimSlider
+                durationMs={musicDurationMs}
+                startMs={musicStartOffsetMs}
+                endMs={musicEndOffsetMs || Math.min(15000, musicDurationMs)}
+                seedKey={selectedMusic}
+                color="#00ff88"
+                onStartChange={ms => setMusicStartOffsetMs(Math.max(0, Math.min(ms, musicEndOffsetMs - 1000)))}
+                onEndChange={ms => setMusicEndOffsetMs(Math.min(musicDurationMs, Math.max(ms, musicStartOffsetMs + 1000)))}
+              />
+              {/* Quick segment-length presets — tap one to set the clip
+                  length starting from the current start handle, shifting
+                  the start back if there isn't enough room ahead of it to
+                  fit the full length. */}
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                {[15, 30, 45, 60].map(sec => {
+                  const isActive = Math.abs((musicEndOffsetMs - musicStartOffsetMs) - sec * 1000) < 500;
+                  return (
+                    <TouchableOpacity
+                      key={sec}
+                      onPress={() => {
+                        const durMs = sec * 1000;
+                        let newStart = musicStartOffsetMs;
+                        let newEnd = Math.min(newStart + durMs, musicDurationMs);
+                        if (newEnd - newStart < Math.min(durMs, musicDurationMs)) {
+                          newStart = Math.max(0, musicDurationMs - durMs);
+                          newEnd = musicDurationMs;
+                        }
+                        setMusicStartOffsetMs(newStart);
+                        setMusicEndOffsetMs(newEnd);
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      }}
+                      style={{
+                        flex: 1, paddingVertical: 8, borderRadius: 8, alignItems: 'center',
+                        backgroundColor: isActive ? '#00ff8822' : '#151515',
+                        borderWidth: 1, borderColor: isActive ? '#00ff88' : '#2a2a2a',
+                      }}
+                    >
+                      <Text style={{ color: isActive ? '#00ff88' : '#888', fontSize: 11, fontWeight: '700' }}>
+                        {sec < 60 ? `${sec}s` : '1 min'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={{ color: '#555', fontSize: 9, marginTop: 8 }}>
+                Tap anywhere on the waveform to move your segment there, drag either edge to fine-tune, or tap a length above — tap play up top to preview.
+              </Text>
             </View>
           )}
 
@@ -6710,10 +7124,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               <Text style={ms.settingLabel}>⚡ Optimize</Text>
               <Switch value={autoOptimize} onValueChange={setAutoOptimize} trackColor={{ false: '#2a2a2a', true: '#00ff8855' }} thumbColor={autoOptimize ? '#00ff88' : '#555'} />
             </View>
-            <View style={ms.settingItem}>
-              <Text style={ms.settingLabel}>🌫️ Blur BG</Text>
-              <Switch value={blurEnabled} onValueChange={setBlurEnabled} trackColor={{ false: '#2a2a2a', true: '#00ff8855' }} thumbColor={blurEnabled ? '#00ff88' : '#555'} />
-            </View>
           </View>
         </View>
 
@@ -6749,29 +7159,32 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               <Text style={ms.scheduleTxt}>Schedule this post</Text>
               <Switch
                 value={isScheduled}
-                onValueChange={v => { setIsScheduled(v); if (v && !scheduledFor) setShowDatePicker(true); }}
+                onValueChange={v => { setIsScheduled(v); if (v && !scheduledFor) openSchedulePicker(); }}
                 trackColor={{ false: '#2a2a2a', true: '#ffd70055' }}
                 thumbColor={isScheduled ? '#ffd700' : '#555'}
               />
             </View>
             {isScheduled && (
-              <TouchableOpacity style={ms.datePickerBtn} onPress={() => setShowDatePicker(true)}>
+              <TouchableOpacity style={ms.datePickerBtn} onPress={openSchedulePicker}>
                 <Ionicons name="calendar-outline" size={16} color="#ffd700" />
                 <Text style={ms.datePickerTxt}>{scheduledFor ? scheduledFor.toLocaleString() : 'Pick date & time'}</Text>
               </TouchableOpacity>
             )}
-            {showDatePicker && (
+            {/* Android now uses the imperative DateTimePickerAndroid.open()
+                API via openSchedulePicker() above — see the fix note on that
+                function. This declarative picker only renders on iOS, where
+                it's a real mounted view with no dismiss race. */}
+            {Platform.OS === 'ios' && showDatePicker && (
               <DateTimePicker
                 value={scheduledFor || new Date(Date.now() + 3600000)}
                 mode="datetime"
-                display={Platform.OS === 'android' ? 'spinner' : 'default'}
+                display="default"
                 minimumDate={new Date()}
                 onChange={(event, date) => {
-                  // Always dismiss first to avoid "dismiss of undefined" crash on Android
-                  setShowDatePicker(false);
-                  if (date && (event.type === 'set' || Platform.OS === 'ios')) {
+                  if (date && event.type === 'set') {
                     setScheduledFor(date);
                   }
+                  setShowDatePicker(false);
                 }}
               />
             )}

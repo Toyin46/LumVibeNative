@@ -26,4 +26,5 @@ export type ChatStackParamList = {
   Circle:       { id: string };
   Cowatch:      { conversationId: string; otherName: string; otherPhoto: string; isAiMatch?: string };
   GroupInfo:    { id: string };
+  CircleSettings: { id: string };
 }; 

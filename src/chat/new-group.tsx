@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, StatusBar, Image,
+  StyleSheet, StatusBar, Image, Switch,
   ActivityIndicator, Alert, ScrollView, KeyboardAvoidingView, Platform,
 } from 'react-native';
 // FIX: plain react-native's SafeAreaView is iOS-only (a no-op View on
@@ -39,6 +39,10 @@ export default function NewGroupScreen() {
   const { user } = useAuthStore();
   const [groupName,   setGroupName]   = useState('');
   const [description, setDescription] = useState('');
+  // NEW: public groups can be discovered and requested to join; private
+  // groups can only ever be added to directly by an admin — same public/
+  // private concept already used for Circles.
+  const [isPublic, setIsPublic] = useState(true);
   const [search,      setSearch]      = useState('');
   const [friends,     setFriends]     = useState<Friend[]>([]);
   const [selected,    setSelected]    = useState<Friend[]>([]);
@@ -116,6 +120,7 @@ export default function NewGroupScreen() {
           description: description.trim() || null,
           created_by: user.id,
           member_count: selected.length + 1,
+          is_public: isPublic,
         })
         .select().single();
       if (error) throw error;
@@ -183,6 +188,20 @@ export default function NewGroupScreen() {
                 onChangeText={setDescription} maxLength={200}
               />
             </View>
+          </View>
+
+          <View style={s.toggleRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.toggleLabel}>Public Group</Text>
+              <Text style={s.toggleSub}>
+                {isPublic ? 'Anyone can find it and request to join' : 'Only admins can add people'}
+              </Text>
+            </View>
+            <Switch
+              value={isPublic} onValueChange={setIsPublic}
+              trackColor={{ false: C.card, true: C.green }}
+              thumbColor={C.white}
+            />
           </View>
 
           {selected.length > 0 && (
@@ -281,4 +300,7 @@ const s = StyleSheet.create({
   friendHandle:{ fontSize: 12, color: C.muted, marginTop: 2 },
   checkbox:    { width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
   checkboxOn:  { backgroundColor: C.green, borderColor: C.green },
+  toggleRow:   { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, borderRadius: 14, padding: 16, borderWidth: 1, borderColor: C.border, marginHorizontal: 20, marginBottom: 16 },
+  toggleLabel: { fontSize: 14, fontWeight: '700', color: C.white, marginBottom: 3 },
+  toggleSub:   { fontSize: 12, color: C.muted },
 }); 

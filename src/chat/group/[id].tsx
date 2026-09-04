@@ -17,9 +17,7 @@
 //    GroupChatScreen().
 // ✅ Converted route param: `id` now comes from useRoute() against
 //    ChatStackParamList's GroupChat: { id: string }.
-// ⚠️ GroupInfo screen isn't converted/registered yet (see ChatStack.tsx
-//    TODO) — the navigate call below points at the correct future
-//    screen name so no further changes are needed here once it exists.
+// ✅ GroupInfo is built and registered (see group/info.tsx, ChatStack.tsx).
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -80,8 +78,10 @@ function formatTime(d: string) {
   return new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvikzffqe';
-const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'unsigned_preset_name';
+// FIX: same wrong-cloud-name issue as circle/[id].tsx — hardcoding the
+// proven-working values instead of an env var that may not be loading.
+const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvllxm0wg';
+const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'Kinsta_unsigned';
 
 async function uploadImage(uri: string): Promise<string | null> {
   try {
@@ -180,7 +180,9 @@ export default function GroupChatScreen() {
 
   const subscribeMessages = () => {
     if (!id) return;
-    channelRef.current = supabase.channel(`group:${id}`)
+    // FIX: same remount race fixed in circle/[id].tsx and messages.tsx.
+    const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    channelRef.current = supabase.channel(`group:${id}:${mountId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'group_messages', filter: `group_id=eq.${id}` },
         async (payload) => {
           const { data: sender } = await supabase.from('users')
@@ -219,15 +221,34 @@ export default function GroupChatScreen() {
     if (!perm.granted) { Alert.alert('Permission needed', 'Allow gallery access.'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({ quality: 0.8 });
     if (result.canceled || !result.assets[0] || !user?.id) return;
+
+    // NEW: same instant local preview as circle/[id].tsx — shows the picked
+    // image immediately while it uploads, instead of a blank wait. Removed
+    // once the real row lands via the realtime subscription, or on failure.
+    const tempId = `temp-${Date.now()}`;
+    const localUri = result.assets[0].uri;
+    setMessages(prev => [...prev, {
+      id: tempId, group_id: id!, sender_id: user.id, message_type: 'image',
+      media_url: localUri, created_at: new Date().toISOString(), is_deleted: false, _uploading: true,
+    } as any]);
+
     setSending(true);
     try {
       const url = await uploadImage(result.assets[0].uri);
-      if (!url) { Alert.alert('Upload failed', 'Try again.'); return; }
+      if (!url) {
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+        Alert.alert('Upload failed', 'Try again.');
+        return;
+      }
       const { error } = await supabase.from('group_messages').insert({
         group_id: id, sender_id: user.id, message_type: 'image', media_url: url,
       });
       if (error) throw error;
-    } catch (e: any) { Alert.alert('Error', e?.message || 'Failed to send image.'); }
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+    } catch (e: any) {
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      Alert.alert('Error', e?.message || 'Failed to send image.');
+    }
     finally { setSending(false); }
   };
 
@@ -352,7 +373,16 @@ export default function GroupChatScreen() {
             activeOpacity={0.85}
           >
             {item.message_type === 'image' && item.media_url
-              ? <Image source={{ uri: item.media_url }} style={ms.msgImg} resizeMode="cover" />
+              ? (
+                <View>
+                  <Image source={{ uri: item.media_url }} style={ms.msgImg} resizeMode="cover" />
+                  {(item as any)._uploading && (
+                    <View style={ms.uploadingOverlay}>
+                      <ActivityIndicator color="#fff" size="small" />
+                    </View>
+                  )}
+                </View>
+              )
               : item.message_type === 'voice'
               ? <View style={ms.voiceRow}>
                   <Ionicons name="mic-outline" size={16} color={isMe ? '#000' : C.green} />
@@ -500,6 +530,11 @@ const ms = StyleSheet.create({
   bubbleMe:   { backgroundColor: C.green, borderBottomRightRadius: 5 },
   bubbleText: { fontSize: 14, lineHeight: 21, color: C.white },
   msgImg:   { width: 180, height: 200, borderRadius: 14 },
+  uploadingOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center', justifyContent: 'center',
+  },
   voiceRow: { flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 160 },
   voiceBar: { flex: 1, height: 3, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 2 },
   voiceDur: { fontSize: 11, color: C.muted },

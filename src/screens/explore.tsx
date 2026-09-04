@@ -14,6 +14,20 @@ import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase'; 
 import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from '../locales/LanguageContext'; 
+import NetInfo from '@react-native-community/netinfo';
+
+// ✅ NEW: when a caught error is network-shaped (or the device is
+// confirmed offline), shows a clear "No internet" message instead of a
+// raw JS error like "TypeError: Network request failed". For any other
+// error (a real, human-readable message), the original message passes
+// through completely unchanged — this never alters any error message
+// that was already working correctly.
+function getFriendlyErrorMessage(e: any, isOffline: boolean, fallback: string): string {
+  const msg = String(e?.message || '');
+  const isNetworkErr = isOffline || /network request failed|failed to fetch|timeout|abort|no internet/i.test(msg);
+  return isNetworkErr ? 'No internet connection. Please check your network and try again.' : (msg || fallback);
+}
+
 
 const { width } = Dimensions.get('window');
 const GRID_ITEM_SIZE = (width - 32) / 3;
@@ -56,6 +70,15 @@ export default function ExploreScreen() {
   const insets = useSafeAreaInsets();
   const [loading,           setLoading]           = useState(false);
   const [refreshing,        setRefreshing]        = useState(false);
+  // ✅ NEW: tracks connectivity so failed loads can show a clear "no
+  // internet" message instead of a raw error.
+  const [isOffline,         setIsOffline]         = useState(false);
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener(state => {
+      setIsOffline(state.isConnected === false);
+    });
+    return () => unsub();
+  }, []);
   const [allPosts,          setAllPosts]          = useState<Post[]>([]);
   const [searchPostResults, setSearchPostResults] = useState<Post[]>([]);
   const [searchUserResults, setSearchUserResults] = useState<UserProfile[]>([]);
@@ -122,7 +145,9 @@ export default function ExploreScreen() {
       await Promise.all([loadAllPosts(), loadTrendingPosts(), loadSuggestedUsers()]);
     } catch (error) {
       console.error('Error loading explore data:', error);
-      Alert.alert(t.errors.generic, t.errors.loadFailed);
+      // ✅ FIX: was always the same generic message, even when the real
+      // cause was simply no internet — now distinguishes that case.
+      Alert.alert(t.errors.generic, getFriendlyErrorMessage(error, isOffline, t.errors.loadFailed));
     } finally { setLoading(false); }
   };
 
@@ -317,7 +342,7 @@ export default function ExploreScreen() {
       }
     } catch (error: any) {
       console.error('Follow error:', error);
-      Alert.alert(t.errors.generic, error.message || t.errors.generic);
+      Alert.alert(t.errors.generic, getFriendlyErrorMessage(error, isOffline, t.errors.generic));
     }
   };
 
