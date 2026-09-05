@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from '../locales/LanguageContext';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
+import { notifyNewFollower } from '../utils/notificationHelpers';
 import { useNavigation, CommonActions, useFocusEffect } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -1439,6 +1440,12 @@ export default function ProfileScreen() {
         await supabase.from('follows').insert({ follower_id: user.id, following_id: userId });
         await supabase.rpc('increment_followers', { target_id: userId, delta: 1 });
         await supabase.rpc('increment_following', { target_id: user.id, delta: 1 });
+        // ✅ NEW: DB trigger already creates the in-app notification row —
+        // this never sent an actual push notification though. Nothing here
+        // did before.
+        notifyNewFollower(
+          userId, user.id, userProfile?.username || '', userProfile?.display_name || 'Someone'
+        ).catch(e => console.warn('Push notify (follow) failed:', e));
       }
       Promise.all([loadUserStats(), loadFollowers(), loadFollowing()]);
     } catch {

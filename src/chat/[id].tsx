@@ -21,6 +21,7 @@ import ContextStoryBar from './components/ContextStoryBar';
 // both platforms, so it replaces the 'react-native' import below.
 import { useSafeAreaInsets, SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '../config/supabase';
+import { notifyNewMessage } from '../utils/notificationHelpers';
 import { useAuthStore } from '../store/authStore';
 // FIX: this app uses @react-navigation, not expo-router. useRoute() replaces
 // expo-router's useLocalSearchParams(), and useNavigation() must be called
@@ -669,6 +670,13 @@ function usePresence(currentUserId: string | null, otherUserId: string | null): 
 function useMessages(
   conversationId: string | null, currentUserId: string | null,
   disappearingEnabled: boolean, disappearingDuration: number,
+  // ✅ FIX: these two are what the "Cannot find name 'otherUserId'" /
+  // "Cannot find name 'userProfile'" errors were pointing at — this hook
+  // is a separate function from ChatScreen() below, so it never had access
+  // to those two names at all; they only exist in ChatScreen()'s own
+  // scope. Passing them in as parameters instead of referencing them
+  // directly.
+  otherUserId: string | null, senderUsername: string, senderDisplayName: string,
 ) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading,  setLoading]  = useState(true);
@@ -707,9 +715,20 @@ function useMessages(
     setSending(true);
     try {
       const msg = await sendTextMessage(conversationId, currentUserId, text, replyToId, disappearingEnabled, disappearingDuration);
+      // ✅ NEW: nothing anywhere previously sent an actual push notification
+      // for a chat message — this was a completely separate gap from the
+      // like/comment/follow one (chat messages were never even in the
+      // PushNotificationData type at all). Fire-and-forget: never blocks
+      // sending even if the push itself fails.
+      if (msg && otherUserId) {
+        notifyNewMessage(
+          otherUserId, currentUserId, senderUsername, senderDisplayName,
+          text, conversationId
+        ).catch(e => console.warn('Push notify (message) failed:', e));
+      }
       return !!msg;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId, disappearingEnabled, disappearingDuration]);
+  }, [conversationId, currentUserId, disappearingEnabled, disappearingDuration, otherUserId, senderUsername, senderDisplayName]);
 
   const sendVoiceNote = useCallback(async (fileUri: string, duration: number): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
@@ -717,9 +736,16 @@ function useMessages(
     try {
       const url = await uploadToCloudinary(fileUri, 'voice');
       if (!url) return false;
-      return !!(await sendMediaMessage(conversationId, currentUserId, url, 'voice', duration));
+      const msg = await sendMediaMessage(conversationId, currentUserId, url, 'voice', duration);
+      if (msg && otherUserId) {
+        notifyNewMessage(
+          otherUserId, currentUserId, senderUsername, senderDisplayName,
+          '🎤 Voice message', conversationId
+        ).catch(e => console.warn('Push notify (message) failed:', e));
+      }
+      return !!msg;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId]);
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName]);
 
   const sendImage = useCallback(async (fileUri: string): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
@@ -738,13 +764,19 @@ function useMessages(
       const url = await uploadToCloudinary(fileUri, 'image');
       if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
       const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'image'));
+      if (ok && otherUserId) {
+        notifyNewMessage(
+          otherUserId, currentUserId, senderUsername, senderDisplayName,
+          '📷 Photo', conversationId
+        ).catch(e => console.warn('Push notify (message) failed:', e));
+      }
       setMessages(prev => prev.filter(m => m.id !== tempId));
       return ok;
     } catch (e) {
       setMessages(prev => prev.filter(m => m.id !== tempId));
       return false;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId]);
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName]);
 
   const sendVideo = useCallback(async (fileUri: string): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
@@ -760,13 +792,19 @@ function useMessages(
       const url = await uploadToCloudinary(fileUri, 'video');
       if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
       const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'video'));
+      if (ok && otherUserId) {
+        notifyNewMessage(
+          otherUserId, currentUserId, senderUsername, senderDisplayName,
+          '🎥 Video', conversationId
+        ).catch(e => console.warn('Push notify (message) failed:', e));
+      }
       setMessages(prev => prev.filter(m => m.id !== tempId));
       return ok;
     } catch (e) {
       setMessages(prev => prev.filter(m => m.id !== tempId));
       return false;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId]);
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName]);
 
   const reactToMessage = useCallback(async (messageId: string, emoji: string): Promise<void> => {
     if (!currentUserId) return;
@@ -1138,7 +1176,10 @@ export default function ChatScreen() {
   const {
     messages, loading, sending, sendText, sendVoiceNote,
     sendImage, sendVideo, reactToMessage, deleteMessage,
-  } = useMessages(id, user?.id || null, vanishOn, 86400);
+  } = useMessages(
+    id, user?.id || null, vanishOn, 86400,
+    otherUserId || null, userProfile?.username || '', userProfile?.display_name || 'Someone',
+  );
 
   const displayName = userProfile?.display_name || userProfile?.username || 'LumVibe User';
 

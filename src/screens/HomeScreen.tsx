@@ -26,6 +26,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // FIX 1: relative paths replace @/ aliases
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
+import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/notificationHelpers';
 import { useAudioPlayer, useAudioPlayerStatus, AudioModule } from 'expo-audio';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
@@ -1824,11 +1825,21 @@ export default function HomeScreen() {
           const multipliers = await getOwnerBadgeMultipliers(post.user_id);
           await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.likePoints }).eq('id', post.user_id);
         }
-        if (post.user_id !== userId)
-          await supabase.from('notifications').insert({ user_id: post.user_id, type: 'like', title: 'New Like', message: 'Someone liked your post', from_user_id: userId, post_id: post.id, is_read: false });
+        if (post.user_id !== userId) {
+          // ✅ FIX: this used to manually insert into `notifications` here —
+          // but the DB trigger create_like_notification() already does that
+          // automatically on every `likes` insert, so this was creating a
+          // DUPLICATE notification row for every single like. Removed the
+          // duplicate insert; now actually sends the push notification
+          // instead, which nothing here ever did before.
+          notifyPostLike(
+            post.id, post.user_id, userId,
+            userProfile?.username || '', userProfile?.display_name || 'Someone'
+          ).catch(e => console.warn('Push notify (like) failed:', e));
+        }
       }
     } catch (e: any) { await loadFeed(); }
-  }, [userId]);
+  }, [userId, userProfile]);
 
   const handleFollow = useCallback(async (targetUserId: string, isFollowing: boolean) => {
     if (!userId) { Alert.alert(t.videos.loginRequired, t.videos.loginToFollow); return; }
@@ -1851,7 +1862,13 @@ export default function HomeScreen() {
         const { data: tu } = await supabase.from('users').select('followers_count').eq('id', targetUserId).single();
         if (cu) await supabase.from('users').update({ following_count: (cu.following_count || 0) + 1 }).eq('id', userId);
         if (tu) await supabase.from('users').update({ followers_count: (tu.followers_count || 0) + 1 }).eq('id', targetUserId);
-        await supabase.from('notifications').insert({ user_id: targetUserId, type: 'follow', title: 'New Follower', message: `@${userProfile?.username || 'Someone'} started following you`, from_user_id: userId, is_read: false });
+        // ✅ FIX: same duplicate-insert issue as handleLike above — the
+        // create_follow_notification() DB trigger already creates this row
+        // automatically. Removed the duplicate; now actually sends the
+        // push notification, which nothing here did before.
+        notifyNewFollower(
+          targetUserId, userId, userProfile?.username || '', userProfile?.display_name || 'Someone'
+        ).catch(e => console.warn('Push notify (follow) failed:', e));
         setFollowStatusMap(prev => { const m = new Map(prev); m.set(targetUserId, true); return m; });
       }
       await loadProfile();
@@ -1994,6 +2011,14 @@ export default function HomeScreen() {
           const { data: ownerData } = await supabase.from('users').select('points').eq('id', selectedPost.user_id).single();
           if (ownerData) { const multipliers = await getOwnerBadgeMultipliers(selectedPost.user_id); await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.commentPoints }).eq('id', selectedPost.user_id); }
         } catch (e) {}
+        // ✅ NEW: nothing here ever sent an actual push notification for a
+        // comment before — the DB trigger already creates the in-app
+        // notification row correctly (no duplicate-insert issue here,
+        // unlike likes/follows above), it just never triggered a push.
+        notifyPostComment(
+          selectedPost.id, selectedPost.user_id, userId,
+          userProfile?.username || '', userProfile?.display_name || 'Someone', trimmedText
+        ).catch(e => console.warn('Push notify (comment) failed:', e));
       }
       setCommentText(''); setReplyingTo(null);
       const updateComments = (p: Post) => p.id === selectedPost.id ? { ...p, comments_count: p.comments_count + 1 } : p;
@@ -2002,7 +2027,7 @@ export default function HomeScreen() {
       await handleComment(selectedPost);
     } catch (e: any) { Alert.alert('Error', getFriendlyErrorMessage(e, isOffline, 'Failed to post comment.')); }
     finally { setSubmittingComment(false); }
-  }, [commentText, selectedPost, userId, submittingComment, replyingTo]);
+  }, [commentText, selectedPost, userId, submittingComment, replyingTo, userProfile]);
 
   const handleReply       = useCallback((comment: Comment) => { setReplyingTo(comment); setCommentText(''); }, []);
   const handleCancelReply = useCallback(() => { setReplyingTo(null); setCommentText(''); }, []);

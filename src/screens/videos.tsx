@@ -30,6 +30,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
+import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/notificationHelpers';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
@@ -1686,7 +1687,17 @@ export default function VideosScreen() {
         if (error) throw error;
         const { data: ownerData } = await supabase.from('users').select('points').eq('id', post.user_id).single();
         if (ownerData) { const multipliers = await getOwnerBadgeMultipliers(post.user_id); await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.likePoints }).eq('id', post.user_id); }
-        if (post.user_id !== userId) await supabase.from('notifications').insert({ user_id: post.user_id, type: 'like', title: 'New Like', message: `@${userProfile?.username || 'Someone'} liked your video`, from_user_id: userId, post_id: post.id, is_read: false });
+        if (post.user_id !== userId) {
+          // ✅ FIX: same duplicate-insert bug found and fixed in
+          // HomeScreen.tsx/explore.tsx/profile.tsx — the
+          // create_like_notification() DB trigger already creates this row
+          // automatically. Removed the duplicate; now actually sends the
+          // push notification, which nothing here did before.
+          notifyPostLike(
+            post.id, post.user_id, userId,
+            userProfile?.username || '', userProfile?.display_name || 'Someone'
+          ).catch(e => console.warn('Push notify (like) failed:', e));
+        }
       }
     } catch (error: any) { await loadVideos(); }
   }, [userId, userProfile]);
@@ -1829,7 +1840,13 @@ export default function VideosScreen() {
       if (replyingTo) { const { data: parentComment } = await supabase.from('comments').select('replies_count').eq('id', replyingTo.id).single(); if (parentComment) await supabase.from('comments').update({ replies_count: (parentComment.replies_count || 0) + 1 }).eq('id', replyingTo.id); }
       if (selectedPost.user_id !== userId) {
         try { const { data: ownerData } = await supabase.from('users').select('points').eq('id', selectedPost.user_id).single(); if (ownerData) { const multipliers = await getOwnerBadgeMultipliers(selectedPost.user_id); await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.commentPoints }).eq('id', selectedPost.user_id); } } catch (e) {}
-        await supabase.from('notifications').insert({ user_id: selectedPost.user_id, type: 'comment', title: 'New Comment', message: `@${userProfile?.username || 'Someone'} commented: ${trimmedText.substring(0, 50)}${trimmedText.length > 50 ? '...' : ''}`, from_user_id: userId, post_id: selectedPost.id, comment_id: newComment.id, is_read: false });
+        // ✅ FIX: same duplicate-insert issue — create_comment_notification()
+        // already creates this row automatically. Removed the duplicate;
+        // now sends the actual push notification.
+        notifyPostComment(
+          selectedPost.id, selectedPost.user_id, userId,
+          userProfile?.username || '', userProfile?.display_name || 'Someone', trimmedText
+        ).catch(e => console.warn('Push notify (comment) failed:', e));
       }
       setCommentText(''); setReplyingTo(null);
       const updateComments = (p: Post) => p.id === selectedPost.id ? { ...p, comments_count: p.comments_count + 1 } : p;
@@ -1920,7 +1937,12 @@ export default function VideosScreen() {
         const { data: tu } = await supabase.from('users').select('followers_count').eq('id', targetUserId).single();
         if (cu) await supabase.from('users').update({ following_count: (cu.following_count || 0) + 1 }).eq('id', userId);
         if (tu) await supabase.from('users').update({ followers_count: (tu.followers_count || 0) + 1 }).eq('id', targetUserId);
-        await supabase.from('notifications').insert({ user_id: targetUserId, type: 'follow', title: 'New Follower', message: `@${userProfile?.username || 'Someone'} started following you`, from_user_id: userId, is_read: false });
+        // ✅ FIX: same duplicate-insert issue — create_follow_notification()
+        // already creates this row. Removed the duplicate; now sends the
+        // actual push notification.
+        notifyNewFollower(
+          targetUserId, userId, userProfile?.username || '', userProfile?.display_name || 'Someone'
+        ).catch(e => console.warn('Push notify (follow) failed:', e));
         setFollowStatusMap(prev => { const m = new Map(prev); m.set(targetUserId, true); return m; });
       }
     } catch (e: any) { throw e; }

@@ -99,6 +99,66 @@ export async function notifyNewFollower(
 }
 
 /**
+* Send notification when someone places an order on your marketplace listing
+*/
+export async function notifyMarketplaceOrder(
+  sellerId: string,
+  buyerId: string,
+  buyerUsername: string,
+  buyerDisplayName: string,
+  listingTitle: string
+) {
+  try {
+    if (sellerId === buyerId) return;
+
+    await sendPushNotification(
+      sellerId,
+      'New Order! 🛍️',
+      `${buyerDisplayName} ordered "${listingTitle}"`,
+      {
+        type: 'marketplace',
+        fromUserId: buyerId,
+        fromUsername: buyerUsername,
+      }
+    );
+
+    console.log('Marketplace order notification sent');
+  } catch (error) {
+    console.error('Error sending marketplace order notification:', error);
+  }
+}
+
+/**
+* Send notification when someone sends you a direct message
+*/
+export async function notifyNewMessage(
+  recipientUserId: string,
+  senderUserId: string,
+  senderUsername: string,
+  senderDisplayName: string,
+  messageText: string,
+  conversationId: string
+) {
+  try {
+    if (recipientUserId === senderUserId) return;
+
+    const title = senderDisplayName;
+    const body = messageText.length > 80 ? `${messageText.substring(0, 80)}...` : messageText;
+
+    await sendPushNotification(recipientUserId, title, body, {
+      type: 'message',
+      fromUserId: senderUserId,
+      fromUsername: senderUsername,
+      conversationId,
+    });
+
+    console.log('Message notification sent');
+  } catch (error) {
+    console.error('Error sending message notification:', error);
+  }
+}
+
+/**
 * Send notification when someone mentions you in a comment
 */
 export async function notifyMention(

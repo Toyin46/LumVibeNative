@@ -11,6 +11,7 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../../config/supabase'; 
+import { notifyMarketplaceOrder } from '../../../utils/notificationHelpers';
 import { useAuthStore } from '../../../store/authStore';
 import { useTranslation } from '../../../locales/LanguageContext'; 
 import type { MarketplaceStackParamList } from '../../../navigation/MarketplaceStackTypes';
@@ -27,7 +28,7 @@ export default function ListingDetailScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<ListingDetailRouteProp>();
   const id = route.params?.listingId;
-  const { user } = useAuthStore();
+  const { user, userProfile } = useAuthStore();
   const { t }    = useTranslation();
 
   // #region agent log
@@ -126,6 +127,15 @@ export default function ListingDetailScreen() {
         user_id: listing.seller_id, from_user_id: user!.id, type: 'marketplace',
         title: 'New Order! 🛍️', message: `You have a new order for "${listing.title}"`, is_read: false,
       });
+      // ✅ NEW: this in-app notification insert above was already correct
+      // (no DB trigger exists for marketplace_orders, so it's not a
+      // duplicate like the likes/comments/follows cases were) — it just
+      // never sent an actual push notification. Nothing did before.
+      notifyMarketplaceOrder(
+        listing.seller_id, user!.id,
+        userProfile?.username || '', userProfile?.display_name || 'Someone',
+        listing.title
+      ).catch(e => console.warn('Push notify (marketplace order) failed:', e));
 
       Alert.alert('Order Placed! 🎉', 'Your order has been placed. The seller will be notified.', [
         { text: 'View Orders', onPress: () => navigation.navigate('Orders') },
@@ -170,7 +180,7 @@ export default function ListingDetailScreen() {
             <View style={s.stat}><Text style={s.statNum}>📦 {listing.orders_count || 0}</Text><Text style={s.statLabel}>Orders</Text></View>
           </View>
 
-          <TouchableOpacity style={s.sellerCard} onPress={() => navigation.getParent()?.navigate('UserProfile' as never, { userId: listing.seller_id } as never)} activeOpacity={0.8}>
+          <TouchableOpacity style={s.sellerCard} onPress={() => (navigation.getParent() as any)?.navigate('UserProfile', { userId: listing.seller_id })} activeOpacity={0.8}>
             {listing.seller?.avatar_url
               ? <Image source={{ uri: listing.seller.avatar_url }} style={s.sellerAvatar} />
               : <View style={[s.sellerAvatar, s.avatarPh]}><Feather name="user" size={20} color="#00ff88" /></View>}

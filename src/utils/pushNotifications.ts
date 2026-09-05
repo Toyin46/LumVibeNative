@@ -6,12 +6,13 @@ import { supabase } from '../config/supabase';
 import Constants from 'expo-constants';
 
 export interface PushNotificationData {
-  type: 'like' | 'comment' | 'follow' | 'mention' | 'coin';
+  type: 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message' | 'marketplace';
   fromUserId: string;
   fromUsername: string;
   postId?: string;
   commentText?: string;
   coinAmount?: number;
+  conversationId?: string;
 }
 
 /**

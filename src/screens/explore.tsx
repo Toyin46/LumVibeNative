@@ -12,6 +12,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuthStore } from '../store/authStore'; 
 import { supabase } from '../config/supabase'; 
+import { notifyNewFollower } from '../utils/notificationHelpers';
 import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from '../locales/LanguageContext'; 
 import NetInfo from '@react-native-community/netinfo';
@@ -327,13 +328,13 @@ export default function ExploreScreen() {
         await supabase.from('users').update({ followers_count: (ud?.followers_count || 0) + 1 }).eq('id', targetUser.id);
         const { data: me } = await supabase.from('users').select('following_count').eq('id', userId).single();
         await supabase.from('users').update({ following_count: (me?.following_count || 0) + 1 }).eq('id', userId);
-        try {
-          await supabase.from('notifications').insert({
-            user_id: targetUser.id, type: 'follow', title: 'New Follower',
-            message: `@${userProfile?.username || 'Someone'} started following you`,
-            from_user_id: userId, is_read: false,
-          });
-        } catch {}
+        // ✅ FIX: same duplicate-insert issue found in HomeScreen.tsx — the
+        // create_follow_notification() DB trigger already creates this row
+        // automatically. Removed the duplicate; now sends the actual push
+        // notification instead, which nothing here did before.
+        notifyNewFollower(
+          targetUser.id, userId, userProfile?.username || '', userProfile?.display_name || 'Someone'
+        ).catch(e => console.warn('Push notify (follow) failed:', e));
         const newSet = new Set(followingUsers); newSet.add(targetUser.id); setFollowingUsers(newSet);
         const updater = (u: UserProfile) => u.id === targetUser.id
           ? { ...u, followers_count: u.followers_count + 1, isFollowing: true } : u;

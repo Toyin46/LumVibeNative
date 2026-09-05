@@ -30,7 +30,7 @@ import type { NavigationContainerRef } from '@react-navigation/native';
 
 // Matches PushNotificationData in utils/pushNotifications.ts — the only
 // types actually ever sent via push right now.
-type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin';
+type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message';
 
 function navigateForPushData(
   navigationRef: React.RefObject<NavigationContainerRef<any> | null>,
@@ -51,6 +51,28 @@ function navigateForPushData(
     case 'follow':
       if (data.fromUserId) {
         nav.navigate('UserProfile', { userId: data.fromUserId });
+      }
+      break;
+
+    // ✅ NEW: tapping a message push (from outside the app or backgrounded)
+    // now lands directly in that conversation, matching the in-app tap
+    // handler in notification.tsx. The push payload doesn't carry a
+    // photo, so this falls back to '' — ChatDM/HomeScreen already handle
+    // a missing photo with an initial-letter placeholder.
+    case 'message':
+      if (data.conversationId && data.fromUserId) {
+        nav.navigate('Main', {
+          screen: 'Messages',
+          params: {
+            screen: 'ChatDM',
+            params: {
+              id:          data.conversationId,
+              otherUserId: data.fromUserId,
+              otherName:   data.fromUsername || 'User',
+              otherPhoto:  '',
+            },
+          },
+        });
       }
       break;
 

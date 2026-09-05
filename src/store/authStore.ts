@@ -2,6 +2,14 @@
 import { create } from 'zustand';
 import { supabase } from '../config/supabase';
 import { User } from '@supabase/supabase-js';
+// ✅ NEW: registerForPushNotificationsAsync already existed (permission
+// request, Android notification channel, Expo push token retrieval, saves
+// to push_tokens) but was never actually called anywhere in the app — so
+// no device had ever requested permission or saved a token in the first
+// place. Wiring it into onAuthStateChange below covers every path that
+// needs it in one place: fresh login, signup email verification
+// completing, AND session restore on every app launch.
+import { registerForPushNotificationsAsync } from '../utils/pushNotifications';
 
 export interface UserProfile {
   id: string;
@@ -85,6 +93,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         if (session?.user) {
           set({ user: session.user });
           await get().loadUserProfile(session.user.id);
+          // ✅ NEW: registers this device for push notifications on every
+          // sign-in event — covers fresh login, email verification
+          // completing, and session restore on app launch, all in one
+          // place. Fire-and-forget: a failure here (permission denied,
+          // etc.) should never block the user from actually getting into
+          // the app.
+          registerForPushNotificationsAsync(session.user.id).catch(e =>
+            console.warn('Push registration failed:', e)
+          );
         } else {
           set({ user: null, userProfile: null });
         }
