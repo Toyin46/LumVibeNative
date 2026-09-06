@@ -58,6 +58,18 @@ function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
   });
 }
 
+// ✅ NEW: opens the conversation WITHOUT auto-joining the call — used for
+// the Decline action, so declining still lands the user somewhere
+// sensible (the chat itself) instead of silently doing nothing visible
+// when the app cold-starts from a Decline tap.
+function navigateToChatOnly(navRef: NavigationContainerRef<any>, data: any) {
+  if (data?.type !== 'incoming_call') return;
+  navRef.navigate('Messages', {
+    screen: 'ChatDM',
+    params: { id: data.conversationId },
+  });
+}
+
 /**
  * Call once from your root component, passing the same ref you give to
  * <NavigationContainer ref={navigationRef}>.
@@ -77,7 +89,14 @@ export function useCallPushNavigation(navRef: React.RefObject<NavigationContaine
       handledColdStart.current = true;
       Notifications.getLastNotificationResponseAsync().then((response) => {
         const data = response?.notification.request.content.data as any;
-        if (data && navRef.current?.isReady()) {
+        if (!data || !navRef.current?.isReady()) return;
+        // ✅ FIX: this never checked WHICH action was tapped — Decline
+        // and Answer (and just tapping the notification body) all did the
+        // exact same thing: navigate in and auto-join the call. Declining
+        // now genuinely declines instead of joining anyway.
+        if (response!.actionIdentifier === 'decline') {
+          navigateToChatOnly(navRef.current, data);
+        } else {
           navigateToCall(navRef.current, data);
         }
       });
@@ -86,7 +105,10 @@ export function useCallPushNavigation(navRef: React.RefObject<NavigationContaine
     // Warm case: app already running, user taps the notification tray.
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data as any;
-      if (data && navRef.current?.isReady()) {
+      if (!data || !navRef.current?.isReady()) return;
+      if (response.actionIdentifier === 'decline') {
+        navigateToChatOnly(navRef.current, data);
+      } else {
         navigateToCall(navRef.current, data);
       }
     });

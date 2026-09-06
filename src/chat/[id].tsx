@@ -89,6 +89,26 @@ async function registerCallPushToken(userId: string) {
         lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
       });
     }
+    // ✅ NEW: registers the "Answer"/"Decline" action buttons that appear
+    // directly on the incoming-call notification itself, so it can be
+    // handled without first opening the app — the "banner ... with answer
+    // or decline" behavior. This is a heads-up notification with
+    // interactive actions, not a true full-screen lock-takeover UI (that
+    // level specifically needs Notifee or CallKeep — a separate, bigger
+    // step). Registering the category is safe to call every session; it's
+    // idempotent.
+    await Notifications.setNotificationCategoryAsync('incoming_call', [
+      {
+        identifier: 'decline',
+        buttonTitle: 'Decline',
+        options: { opensAppToForeground: false, isDestructive: true },
+      },
+      {
+        identifier: 'answer',
+        buttonTitle: 'Answer',
+        options: { opensAppToForeground: true },
+      },
+    ]);
     const { status: existing } = await Notifications.getPermissionsAsync();
     let finalStatus = existing;
     if (existing !== 'granted') {
@@ -523,6 +543,12 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     callState, incomingCall, localVideoTrack, remoteVideoTrack,
     startCall, endCall, acceptCall, declineCall,
     toggleMute, toggleCamera, toggleSpeaker,
+    // ✅ NEW: exposed so ChatScreen's autoAnswerCall effect (notification-
+    // tap auto-answer) can join a room directly, the same safe way
+    // acceptCall does, without needing incomingCall state to already be
+    // populated locally (which it won't be on a cold start from a killed
+    // app — the original broadcast fired before this screen even mounted).
+    joinLiveKitRoom,
   };
 }
 
@@ -1288,7 +1314,7 @@ export default function ChatScreen() {
   const {
     callState, incomingCall, localVideoTrack, remoteVideoTrack,
     startCall, endCall, acceptCall, declineCall,
-    toggleMute, toggleCamera, toggleSpeaker,
+    toggleMute, toggleCamera, toggleSpeaker, joinLiveKitRoom,
   } = useCall(user?.id || '', displayName, id || null, otherUserId || null);
 
   // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
@@ -1296,13 +1322,28 @@ export default function ChatScreen() {
   // relaunched straight into this screen with these params. Auto-join once.
   // This also covers a warm tap (app already running elsewhere) since the
   // same root-level handler drives both — see call-push-app-entry-snippet.
+  //
+  // ✅ FIX: this used to call startCall(id, ...) — the exact same bug just
+  // fixed in acceptCall() above, via a different path. startCall()
+  // unconditionally re-broadcasts 'incoming_call', which would make the
+  // ORIGINAL caller's screen incorrectly pop the incoming-call modal again
+  // the moment someone answered via a notification tap, same as it did via
+  // the in-app Answer button before that fix. Joins the room directly
+  // instead, deriving the same deterministic room name startCall() itself
+  // uses (`call_${conversationId}`), never re-signaling a call that's
+  // already ringing.
   const autoAnsweredRef = useRef(false);
   useEffect(() => {
     if (autoAnswerCall && !autoAnsweredRef.current && id) {
       autoAnsweredRef.current = true;
-      startCall(id, autoAnswerCallType === 'video' ? 'video' : 'voice');
+      const callType = autoAnswerCallType === 'video' ? 'video' : 'voice';
+      setCallState(prev => ({
+        ...prev, isInCall: true, callType,
+        isConnecting: true, remoteConnected: false, permDenied: false,
+      }));
+      joinLiveKitRoom(`call_${id}`, callType);
     }
-  }, [autoAnswerCall, autoAnswerCallType, id, startCall]);
+  }, [autoAnswerCall, autoAnswerCallType, id, joinLiveKitRoom]);
 
   const [streak, setStreak] = useState(0);
 

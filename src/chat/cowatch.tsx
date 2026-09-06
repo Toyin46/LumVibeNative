@@ -1831,6 +1831,16 @@ const FeedPostCard = memo(function FeedPostCard({
               ignoreSilentSwitch="ignore"
               playInBackground={false}
               playWhenInactive={false}
+              // FIX: Android's default SurfaceView ignores normal View
+              // zIndex/elevation and paints in its own compositing layer,
+              // so the feed video was bleeding through and covering the
+              // LiveKit PiP call tiles (PipOverlay/LocalPreview) whenever
+              // a video post was playing, even though those tiles are
+              // absolutely-positioned above it in the JSX. TextureView is
+              // a normal composited view that respects stacking order, so
+              // the call tiles now always render on top, exactly like
+              // they already do over non-video posts.
+              useTextureView={true}
             />
           ) : (
             <View style={{ flex: 1, backgroundColor: '#111', justifyContent: 'center', alignItems: 'center' }}>
