@@ -8,7 +8,7 @@ import {
   Platform, Modal, Alert, ActivityIndicator, Image,
   ScrollView, Dimensions, PermissionsAndroid,
 } from 'react-native';
-import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
+import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, createAudioPlayer } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 import { RealtimeChannel } from '@supabase/supabase-js';
@@ -177,6 +177,64 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef   = useRef(true);
   const signalRef    = useRef<RealtimeChannel | null>(null);
+  // ✅ NEW: nothing anywhere played any sound at all for a ringing call —
+  // neither the callee's actual ringtone nor a ringback tone for the
+  // caller while waiting. Both use the same createAudioPlayer pattern
+  // already established elsewhere in this app (see HomeScreen.tsx/
+  // videos.tsx background-music playback).
+  // ⚠️ REQUIRES TWO REAL SOUND FILES that don't exist yet — this can't
+  // work until actual .mp3 files are added at these two paths. This part
+  // needs a rebuild (adding new asset files that a require() call points
+  // to needs Metro to bundle them fresh), unlike the accept-call fix
+  // above which is pure JS logic.
+  const ringtonePlayerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
+  const ringbackPlayerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
+
+  const stopRingtone = useCallback(() => {
+    if (ringtonePlayerRef.current) {
+      try { ringtonePlayerRef.current.pause(); ringtonePlayerRef.current.remove(); } catch (_) {}
+      ringtonePlayerRef.current = null;
+    }
+  }, []);
+  const stopRingback = useCallback(() => {
+    if (ringbackPlayerRef.current) {
+      try { ringbackPlayerRef.current.pause(); ringbackPlayerRef.current.remove(); } catch (_) {}
+      ringbackPlayerRef.current = null;
+    }
+  }, []);
+
+  // Callee's actual ringtone — plays while an incoming call is showing.
+  useEffect(() => {
+    if (incomingCall) {
+      try {
+        const player = createAudioPlayer(require('../assets/sounds/ringtone.mp3'));
+        player.loop = true;
+        player.play();
+        ringtonePlayerRef.current = player;
+      } catch (e) { console.warn('[LumVibe] ringtone playback failed:', e); }
+    } else {
+      stopRingtone();
+    }
+    return stopRingtone;
+  }, [incomingCall, stopRingtone]);
+
+  // Caller's ringback tone — plays while waiting for the other side to
+  // answer (isConnecting, nobody's joined the room yet).
+  useEffect(() => {
+    if (callState.isInCall && callState.isConnecting && !callState.remoteConnected) {
+      if (!ringbackPlayerRef.current) {
+        try {
+          const player = createAudioPlayer(require('../assets/sounds/ringback.mp3'));
+          player.loop = true;
+          player.play();
+          ringbackPlayerRef.current = player;
+        } catch (e) { console.warn('[LumVibe] ringback playback failed:', e); }
+      }
+    } else {
+      stopRingback();
+    }
+    return stopRingback;
+  }, [callState.isInCall, callState.isConnecting, callState.remoteConnected, stopRingback]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -229,49 +287,20 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     };
   }, [conversationId, currentUserId]);
 
-  const startCall = useCallback(async (convId: string, callType: 'voice' | 'video') => {
-    if (!LIVEKIT_URL) {
-      Alert.alert('Call Setup', 'LiveKit URL not configured. Set LIVEKIT_URL in app.config.js extras.');
-      return;
-    }
-
-    if (Platform.OS === 'android') {
-      const perms = callType === 'video'
-        ? [PermissionsAndroid.PERMISSIONS.CAMERA, PermissionsAndroid.PERMISSIONS.RECORD_AUDIO]
-        : [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
-      const results = await PermissionsAndroid.requestMultiple(perms);
-      const denied  = perms.some(p => results[p] !== PermissionsAndroid.RESULTS.GRANTED);
-      if (denied) {
-        setCallState(prev => ({ ...prev, permDenied: true }));
-        return;
-      }
-    }
-
-    const roomName = `call_${convId}`;
-    setCallState(prev => ({
-      ...prev, isInCall: true, callType,
-      isConnecting: true, remoteConnected: false, permDenied: false,
-    }));
-    setIncomingCall(prev => (prev?.roomName === roomName ? null : prev));
-
-    // ✅ NEW: tell the other participant a call is starting, so their
-    // screen can show the incoming-call UI and join the same room.
-    try {
-      await signalRef.current?.send({
-        type: 'broadcast', event: 'incoming_call',
-        payload: { callerId: currentUserId, callerName: displayName || 'Someone', callType, roomName },
-      });
-    } catch (e) { console.error('incoming_call broadcast error:', e); }
-
-    // ✅ NEW: also ring them via push, so it reaches backgrounded/killed
-    // devices, not just an already-open chat screen.
-    if (otherUserId) {
-      sendCallPush({
-        calleeId: otherUserId, callerId: currentUserId,
-        callerName: displayName || 'Someone', callType, roomName, conversationId: convId,
-      });
-    }
-
+  // ✅ FIX (real root cause of "caller sees the incoming-call screen again
+  // after the other person answers"): this room-joining logic used to be
+  // inline inside startCall() itself, which meant EVERY call to startCall
+  // — including from acceptCall() below — also re-ran the
+  // "broadcast incoming_call + send a call push" step further up. When B
+  // accepted a call, acceptCall() called startCall(), which re-broadcast
+  // 'incoming_call' to the whole shared channel — reaching A too. A's own
+  // listener only filters out ITS OWN broadcasts (payload.callerId ===
+  // currentUserId), not ones from whoever they're already calling, so A's
+  // screen incorrectly popped the incoming-call modal again, even though A
+  // was the original caller mid-call. Splitting the actual LiveKit
+  // room-join into its own function fixes this: acceptCall() now calls
+  // ONLY this, never re-signaling a call that's already happening.
+  const joinLiveKitRoom = useCallback(async (roomName: string, callType: 'voice' | 'video') => {
     try {
       // ✅ NEW: configure the native audio session before connecting, and
       // start it so mic/speaker routing behaves like a real call rather
@@ -343,7 +372,58 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       console.error('LiveKit call error:', err);
       if (mountedRef.current) setCallState(prev => ({ ...prev, isConnecting: false }));
     }
-  }, [currentUserId, displayName, otherUserId]);
+  }, [currentUserId, displayName]);
+
+  const startCall = useCallback(async (convId: string, callType: 'voice' | 'video') => {
+    if (!LIVEKIT_URL) {
+      Alert.alert('Call Setup', 'LiveKit URL not configured. Set LIVEKIT_URL in app.config.js extras.');
+      return;
+    }
+
+    if (Platform.OS === 'android') {
+      const perms = callType === 'video'
+        ? [PermissionsAndroid.PERMISSIONS.CAMERA, PermissionsAndroid.PERMISSIONS.RECORD_AUDIO]
+        : [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+      const results = await PermissionsAndroid.requestMultiple(perms);
+      const denied  = perms.some(p => results[p] !== PermissionsAndroid.RESULTS.GRANTED);
+      if (denied) {
+        setCallState(prev => ({ ...prev, permDenied: true }));
+        return;
+      }
+    }
+
+    const roomName = `call_${convId}`;
+    setCallState(prev => ({
+      ...prev, isInCall: true, callType,
+      isConnecting: true, remoteConnected: false, permDenied: false,
+    }));
+    setIncomingCall(prev => (prev?.roomName === roomName ? null : prev));
+
+    // ✅ NEW: tell the other participant a call is starting, so their
+    // screen can show the incoming-call UI and join the same room.
+    try {
+      await signalRef.current?.send({
+        type: 'broadcast', event: 'incoming_call',
+        payload: { callerId: currentUserId, callerName: displayName || 'Someone', callType, roomName },
+      });
+    } catch (e) { console.error('incoming_call broadcast error:', e); }
+
+    // ✅ NEW: also ring them via push, so it reaches backgrounded/killed
+    // devices, not just an already-open chat screen.
+    if (otherUserId) {
+      sendCallPush({
+        calleeId: otherUserId, callerId: currentUserId,
+        callerName: displayName || 'Someone', callType, roomName, conversationId: convId,
+      });
+    }
+
+    try {
+      await joinLiveKitRoom(roomName, callType);
+    } catch (err) {
+      console.error('LiveKit call error:', err);
+      if (mountedRef.current) setCallState(prev => ({ ...prev, isConnecting: false }));
+    }
+  }, [currentUserId, displayName, otherUserId, joinLiveKitRoom]);
 
   const endCall = useCallback(() => {
     // If we're still ringing (nobody joined yet), let the other side know
@@ -370,13 +450,35 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
 
   // ✅ NEW: accept an incoming call — joins the same LiveKit room the
   // caller created (deterministic room name from the conversation id).
+  // ✅ FIX: this used to call startCall(), which unconditionally
+  // re-broadcasts 'incoming_call' and re-sends a call push — exactly what
+  // caused the caller's screen to see a bogus second "incoming call" the
+  // moment the callee accepted. Accepting a call should only join the
+  // room that's already ringing, never re-signal a new one.
   const acceptCall = useCallback(async () => {
     if (!incomingCall || !conversationId) return;
-    const { callType } = incomingCall;
+    const { callType, roomName } = incomingCall;
     setIncomingCall(null);
     if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
-    await startCall(conversationId, callType);
-  }, [incomingCall, conversationId, startCall]);
+
+    if (Platform.OS === 'android') {
+      const perms = callType === 'video'
+        ? [PermissionsAndroid.PERMISSIONS.CAMERA, PermissionsAndroid.PERMISSIONS.RECORD_AUDIO]
+        : [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+      const results = await PermissionsAndroid.requestMultiple(perms);
+      const denied  = perms.some(p => results[p] !== PermissionsAndroid.RESULTS.GRANTED);
+      if (denied) {
+        setCallState(prev => ({ ...prev, permDenied: true }));
+        return;
+      }
+    }
+
+    setCallState(prev => ({
+      ...prev, isInCall: true, callType,
+      isConnecting: true, remoteConnected: false, permDenied: false,
+    }));
+    await joinLiveKitRoom(roomName, callType);
+  }, [incomingCall, conversationId, joinLiveKitRoom]);
 
   // ✅ NEW: decline an incoming call — tells the caller so they can stop
   // ringing instead of timing out.

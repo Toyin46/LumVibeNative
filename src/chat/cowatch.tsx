@@ -883,6 +883,28 @@ async function syncFeedIndex(sessionId: string, postIndex: number, isPlaying: bo
   } catch (e) { console.error('syncFeedIndex:', e); }
 }
 
+// ✅ NEW (real fix for "scrolling should be super fast"): the only way
+// partner sync happened before was via syncFeedIndex() above writing to
+// the DB, then waiting for Postgres's realtime `postgres_changes` event to
+// propagate back out — a full write + WAL-replication + fan-out round
+// trip, on EVERY scroll. That's inherently much higher latency than a
+// direct broadcast (the same approach already used for call signaling in
+// chat/[id].tsx, which never touches the database at all). This sends the
+// sync instantly over the same realtime WebSocket channel, with zero DB
+// round trip. The DB write above is kept as-is and still happens in
+// parallel — that's what lets a reconnecting or late-joining partner pick
+// up the correct state via getActiveCowatchSession; this broadcast is
+// purely for the already-connected partner to feel instant.
+function broadcastCowatchSync(
+  channel: RealtimeChannel | null,
+  updates: { current_post_index?: number; is_playing?: boolean; current_position?: number; feed_type?: string; host_id?: string | null }
+) {
+  if (!channel) return;
+  channel.send({ type: 'broadcast', event: 'cowatch_sync', payload: updates }).catch((e: any) =>
+    console.warn('broadcastCowatchSync failed:', e)
+  );
+}
+
 // NEW: claim or release "host" control of a session.
 // Pass null to release control back to free-for-all mode.
 async function setSessionHost(sessionId: string, hostId: string | null) {
@@ -898,8 +920,12 @@ async function endCowatchSession(sessionId: string) {
   } catch (e) { console.error('endCowatchSession:', e); }
 }
 
-function subscribeCowatchSession(sessionId: string, onSync: (s: CowatchSession) => void): RealtimeChannel {
-  return supabase.channel(`cowatch:${sessionId}`)
+function subscribeCowatchSession(sessionId: string, onSync: (s: Partial<CowatchSession>) => void): RealtimeChannel {
+  return supabase.channel(`cowatch:${sessionId}`, { config: { broadcast: { self: false } } })
+    // ✅ NEW: instant path — see broadcastCowatchSync above for why this
+    // was added alongside the existing DB-change subscription below,
+    // rather than replacing it.
+    .on('broadcast', { event: 'cowatch_sync' }, ({ payload }: any) => onSync(payload))
     .on('postgres_changes', {
       event: 'UPDATE', schema: 'public',
       table: 'cowatch_sessions', filter: `id=eq.${sessionId}`,
@@ -2819,19 +2845,21 @@ export default function CowatchScreen() {
     } catch (e) { console.error('setupSession error:', e); setIsLoading(false); }
   };
 
-  const handleRemoteSync = useCallback((updatedSession: CowatchSession) => {
+  const handleRemoteSync = useCallback((updatedSession: Partial<CowatchSession>) => {
     if (isSyncingRef.current) return;
     setOtherUserActive(true);
 
     // ✅ FIXED: sync scroll index to partner's position
-    const newIndex = updatedSession.current_post_index ?? 0;
-    setCurrentIndex(prev => {
-      if (prev !== newIndex && newIndex >= 0 && newIndex < postsRef.current.length) {
-        feedRef.current?.scrollToIndex({ index: newIndex, animated: true });
-        return newIndex;
-      }
-      return prev;
-    });
+    if (typeof updatedSession.current_post_index === 'number') {
+      const newIndex = updatedSession.current_post_index;
+      setCurrentIndex(prev => {
+        if (prev !== newIndex && newIndex >= 0 && newIndex < postsRef.current.length) {
+          feedRef.current?.scrollToIndex({ index: newIndex, animated: true });
+          return newIndex;
+        }
+        return prev;
+      });
+    }
 
     // ✅ FIXED: sync play/pause state from partner
     // is_playing comes from DB — we store in ref so FeedPostCard can read it
@@ -2846,7 +2874,16 @@ export default function CowatchScreen() {
     }
     // NEW: keep local host state in lockstep with the DB row so both
     // phones agree on who's allowed to drive.
-    setHostId(updatedSession.host_id ?? null);
+    // ✅ FIX: this used to be `setHostId(updatedSession.host_id ?? null)`
+    // unconditionally — fine when updatedSession was always a full DB row
+    // (the old postgres_changes-only path), but now that instant
+    // broadcasts can carry just the fields that changed, a broadcast that
+    // doesn't include host_id at all would have `?? null` incorrectly
+    // reset hosting to "free for all" on every single scroll sync. Only
+    // touches hostId when the payload actually says something about it.
+    if ('host_id' in updatedSession) {
+      setHostId(updatedSession.host_id ?? null);
+    }
     setIsSynced(true);
     setTimeout(() => setIsSynced(false), 2000);
   }, []);
@@ -3020,6 +3057,10 @@ export default function CowatchScreen() {
     feedRef.current?.scrollToIndex({ index: nextIndex, animated: true });
     if (session) {
       isSyncingRef.current = true;
+      // ✅ NEW: instant delivery to the partner over broadcast, while the
+      // DB write (unchanged, still happening) keeps state correct for
+      // reconnect/late-join.
+      broadcastCowatchSync(syncChannelRef.current, { current_post_index: nextIndex, is_playing: syncedIsPlaying, current_position: 0 });
       syncFeedIndex(session.id, nextIndex, syncedIsPlaying, 0).finally(() => {
         setTimeout(() => { isSyncingRef.current = false; }, 600);
       });
@@ -3033,6 +3074,7 @@ export default function CowatchScreen() {
     const nextPlaying = !syncedIsPlaying;
     setSyncedIsPlaying(nextPlaying);
     isSyncingRef.current = true;
+    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: nextPlaying, current_position: 0 });
     syncFeedIndex(session.id, currentIndex, nextPlaying, 0).finally(() => {
       setTimeout(() => { isSyncingRef.current = false; }, 600);
     });
@@ -3156,6 +3198,10 @@ export default function CowatchScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     const nextHost = hostId === user.id ? null : user.id;
     setHostId(nextHost); // optimistic — handleRemoteSync will confirm
+    // ✅ NEW: instant delivery to the partner, same as the scroll/play sync
+    // above — otherwise the partner's "who's hosting" pill lags behind by
+    // a full DB round trip even though this device already updated instantly.
+    broadcastCowatchSync(syncChannelRef.current, { host_id: nextHost });
     setSessionHost(session.id, nextHost);
   };
 
@@ -3204,6 +3250,12 @@ export default function CowatchScreen() {
               globalAudioManager.stopCurrent();
               setCurrentIndex(idx);
               isSyncingRef.current = true;
+              // ✅ NEW: this is the actual scroll handler — the hottest,
+              // most latency-sensitive path in the whole sync system.
+              // Broadcasting instantly here (DB write still happens in
+              // parallel below, unchanged) is what makes partner scrolling
+              // actually feel synced instead of lagging behind.
+              broadcastCowatchSync(syncChannelRef.current, { current_post_index: idx, is_playing: false, current_position: 0 });
               syncFeedIndex(session.id, idx, false, 0).finally(() => {
                 setTimeout(() => { isSyncingRef.current = false; }, 600);
               });
@@ -3233,6 +3285,7 @@ export default function CowatchScreen() {
                   onSyncPlayPause={index === currentIndex && session && amIHost ? (playing: boolean) => {
                     // ✅ FIXED: user tapped play/pause — write to DB so partner syncs
                     isSyncingRef.current = true;
+                    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: playing, current_position: 0 });
                     syncFeedIndex(session.id, currentIndex, playing, 0).finally(() => {
                       setTimeout(() => { isSyncingRef.current = false; }, 600);
                     });
