@@ -2828,8 +2828,20 @@ export default function CowatchScreen() {
     if (!user?.id || (!conversationId && isAiMatch !== 'true')) return;
     try {
       let activeSession: CowatchSession | null = null;
-      if (existingSessionId) {
-        activeSession = await getActiveCowatchSession(conversationId);
+      // FIX: previously only the notification-tap path (existingSessionId
+      // set from route params) checked for an already-active session.
+      // Any other way of opening CoWatch — e.g. both people independently
+      // tapping the in-chat "CoWatch" button — skipped straight to
+      // startCowatchSession, which explicitly deactivates whatever session
+      // is currently active for this conversation before inserting a new
+      // one. That silently moved the partner's realtime channel out from
+      // under them (cowatch:<oldId> vs cowatch:<newId>), which is exactly
+      // why swipes/play-pause stopped syncing between the two devices —
+      // they were no longer even subscribed to the same channel. Now we
+      // always look for an active session first and only start a new one
+      // if none exists, regardless of how this screen was entered.
+      activeSession = await getActiveCowatchSession(conversationId);
+      if (activeSession) {
         setOtherUserActive(true);
       } else {
         activeSession = await startCowatchSession(conversationId, user.id, feedType);

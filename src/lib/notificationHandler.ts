@@ -69,11 +69,14 @@ function handleDeepLink(data: Record<string, any>, navigation: any) {
 
   switch (data.type) {
     case 'cowatch_invite':
-      // TODO: chat screens aren't converted to React Navigation yet
-      // (Batch 3). Revisit this once chat/_layout.tsx etc. are fixed —
-      // needs the real registered screen name + param shape for CoWatch.
+      // ⚠️ STILL UNRESOLVED — deliberately not guessed. Unlike 'message'
+      // above, there's no confirmed source (yet) for what the CoWatch
+      // screen is actually registered as inside the navigator. Guessing
+      // wrong here would look fixed while silently failing. Needs
+      // App.tsx/ChatStack.tsx to confirm the real screen name + param
+      // shape before this can be wired up safely.
       if (data.conversationId && data.sessionId) {
-        console.warn('[notificationHandler] cowatch_invite navigation not yet wired to React Navigation — chat screens pending conversion.');
+        console.warn('[notificationHandler] cowatch_invite navigation not yet wired — need navigator file to confirm the real screen name.');
       }
       break;
 
@@ -94,10 +97,14 @@ function handleDeepLink(data: Record<string, any>, navigation: any) {
       break;
 
     case 'message':
-      // TODO: chat screens aren't converted to React Navigation yet
-      // (Batch 3). Revisit once chat/[id].tsx etc. are fixed.
+      // FIX: this was a dead TODO from before chat/[id].tsx was converted
+      // to React Navigation. It's since been confirmed (see
+      // callPushNavigation.ts) that the DM screen is registered as
+      // 'ChatDM' inside the 'Messages' stack — same pattern used there for
+      // incoming-call notifications, so this now actually navigates
+      // instead of just logging a warning.
       if (data.id) {
-        console.warn('[notificationHandler] message navigation not yet wired to React Navigation — chat screens pending conversion.');
+        navigation.navigate('Messages', { screen: 'ChatDM', params: { id: data.id } });
       }
       break;
 

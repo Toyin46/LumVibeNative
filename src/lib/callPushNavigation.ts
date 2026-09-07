@@ -3,10 +3,13 @@
 // Handles an incoming-call push notification's tap — both the cold-start
 // case (app was fully killed, tapping the notification just launched it)
 // and the warm case (app already running, user taps the notification
-// tray entry). Confirmed against ChatStack.tsx: the chat DM screen is
-// registered there as 'ChatDM' inside the 'Messages' tab stack, so this
-// navigates with the same nested-navigator form used elsewhere
-// (navigation.navigate('Messages', { screen: 'ChatDM', params: {...} })).
+// tray entry). Confirmed against ChatStack.tsx + RootNavigator.tsx: the
+// chat DM screen is registered as 'ChatDM' inside the 'Messages' tab,
+// which is itself nested inside the root Stack's 'Main' screen — so
+// reaching it from this root-level nav ref needs the full 3-level path
+// (navigate('Main', { screen: 'Messages', params: { screen: 'ChatDM',
+// params: {...} } })), matching the pattern used in
+// notificationPushNavigation.ts.
 //
 // WHY THIS CAN'T LIVE IN chat/[id].tsx: that's a screen component — its
 // code only runs while that screen is mounted. Nothing is mounted yet
@@ -48,12 +51,21 @@ Notifications.setNotificationHandler({
 
 function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
   if (data?.type !== 'incoming_call') return;
-  navRef.navigate('Messages', {
-    screen: 'ChatDM',
+  // FIX: 'Messages' is a tab nested inside the root Stack's 'Main' screen
+  // (see RootNavigator.tsx -> MainTabs.tsx), not a root-level screen name
+  // itself — confirmed by cross-checking notificationPushNavigation.ts,
+  // which uses this same 3-level form for its own chat navigation. Calling
+  // navigate('Messages', ...) directly on the root ref, without 'Main' as
+  // the outer level, was inconsistent with that confirmed-working pattern.
+  navRef.navigate('Main', {
+    screen: 'Messages',
     params: {
-      id: data.conversationId,
-      autoAnswerCall: true,
-      autoAnswerCallType: data.callType,
+      screen: 'ChatDM',
+      params: {
+        id: data.conversationId,
+        autoAnswerCall: true,
+        autoAnswerCallType: data.callType,
+      },
     },
   });
 }
@@ -64,9 +76,9 @@ function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
 // when the app cold-starts from a Decline tap.
 function navigateToChatOnly(navRef: NavigationContainerRef<any>, data: any) {
   if (data?.type !== 'incoming_call') return;
-  navRef.navigate('Messages', {
-    screen: 'ChatDM',
-    params: { id: data.conversationId },
+  navRef.navigate('Main', {
+    screen: 'Messages',
+    params: { screen: 'ChatDM', params: { id: data.conversationId } },
   });
 }
 

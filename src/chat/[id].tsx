@@ -119,7 +119,18 @@ async function registerCallPushToken(userId: string) {
 
     const projectId = (Constants.expoConfig?.extra as any)?.eas?.projectId;
     const tokenResp = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
-    await supabase.from('profiles').update({ expo_push_token: tokenResp.data }).eq('id', userId);
+    // FIX: every other notification type (likes, comments, follows,
+    // messages — see lib/notifications.ts) reads the token from
+    // profiles.push_token, but this call-specific registration was only
+    // writing profiles.expo_push_token — a different column. Depending on
+    // which column your `send-call-push` Supabase Edge Function actually
+    // reads, that mismatch could mean call pushes silently never send.
+    // Writing to both removes the ambiguity without needing to touch the
+    // edge function itself.
+    await supabase.from('profiles').update({
+      expo_push_token: tokenResp.data,
+      push_token: tokenResp.data,
+    }).eq('id', userId);
   } catch (e) {
     console.error('registerCallPushToken error:', e);
   }
@@ -197,6 +208,23 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef   = useRef(true);
   const signalRef    = useRef<RealtimeChannel | null>(null);
+  // ✅ NEW: call-log support. isCallerRef distinguishes "I started this
+  // call" from "I answered this call" — needed so a callee hanging up
+  // fast during the connecting window isn't mislabeled as a missed call.
+  // loggedRoomsRef prevents BOTH sides from independently inserting a
+  // duplicate log row for the same call — whichever side logs first
+  // broadcasts it, and the other side just marks it done locally instead
+  // of inserting its own second row.
+  const isCallerRef   = useRef(false);
+  const loggedRoomsRef = useRef<Set<string>>(new Set());
+  const logCallOnce = useCallback((roomName: string, callType: 'voice' | 'video', outcome: 'missed' | 'declined' | 'completed', durationSeconds?: number) => {
+    if (loggedRoomsRef.current.has(roomName)) return;
+    loggedRoomsRef.current.add(roomName);
+    if (conversationId) {
+      insertCallLogMessage(conversationId, currentUserId, callType, outcome, durationSeconds);
+    }
+    signalRef.current?.send({ type: 'broadcast', event: 'call_logged', payload: { roomName } }).catch(() => {});
+  }, [conversationId, currentUserId]);
   // ✅ NEW: nothing anywhere played any sound at all for a ringing call —
   // neither the callee's actual ringtone nor a ringback tone for the
   // caller while waiting. Both use the same createAudioPlayer pattern
@@ -279,10 +307,26 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
         setIncomingCall(payload);
         if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
         ringTimerRef.current = setTimeout(() => {
-          setIncomingCall(prev => (prev?.roomName === payload.roomName ? null : prev));
+          // ✅ NEW: nobody answered within the ring window — log a missed
+          // call, but only if this exact call is still the one showing
+          // (guards against a stale timer firing after accept/decline/
+          // cancel already resolved it, which would otherwise log a
+          // "missed" call that was actually answered or declined).
+          setIncomingCall(prev => {
+            if (prev?.roomName === payload.roomName) {
+              logCallOnce(payload.roomName, payload.callType, 'missed');
+              return null;
+            }
+            return prev;
+          });
         }, 30000); // auto-dismiss the ring after 30s if nobody answers
       })
       .on('broadcast', { event: 'call_cancelled' }, ({ payload }: any) => {
+        // ✅ FIX: clear the pending ring-timeout too — otherwise, if the
+        // caller cancels before the 30s mark, this side's timer was still
+        // running and could fire later and log a redundant "missed" entry
+        // for a call that's already been logged by the caller's own hangup.
+        if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
         setIncomingCall(prev => (prev?.roomName === payload?.roomName ? null : prev));
       })
       .on('broadcast', { event: 'call_declined' }, ({ payload }: any) => {
@@ -297,6 +341,12 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
           }
           return prev;
         });
+      })
+      // ✅ NEW: the other device already inserted the call-log row for this
+      // call (e.g. they declined, or their ring timed out first) — mark it
+      // logged here too so nothing on this side inserts a duplicate.
+      .on('broadcast', { event: 'call_logged' }, ({ payload }: any) => {
+        if (payload?.roomName) loggedRoomsRef.current.add(payload.roomName);
       })
       .subscribe();
     signalRef.current = channel;
@@ -413,6 +463,7 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     }
 
     const roomName = `call_${convId}`;
+    isCallerRef.current = true;
     setCallState(prev => ({
       ...prev, isInCall: true, callType,
       isConnecting: true, remoteConnected: false, permDenied: false,
@@ -449,11 +500,25 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     // If we're still ringing (nobody joined yet), let the other side know
     // to stop showing the incoming-call banner.
     setCallState(prev => {
+      const roomName = conversationId ? `call_${conversationId}` : '';
       if (prev.isInCall && !prev.remoteConnected) {
         signalRef.current?.send({
           type: 'broadcast', event: 'call_cancelled',
-          payload: { roomName: conversationId ? `call_${conversationId}` : '' },
+          payload: { roomName },
         }).catch(() => {});
+        // ✅ NEW: only log "missed" if I'm the one who placed the call and
+        // gave up before anyone answered — a callee backing out during the
+        // brief connecting window right after accepting isn't a missed
+        // call, so isCallerRef guards against mislabeling that case.
+        if (roomName && isCallerRef.current) {
+          logCallOnce(roomName, prev.callType, 'missed');
+        }
+      } else if (prev.isInCall && prev.remoteConnected && roomName) {
+        // ✅ NEW: the call actually connected — log it as completed with
+        // however long it ran. callDuration is already tracked to the
+        // second by the existing timerRef interval, so no extra timing
+        // logic is needed here.
+        logCallOnce(roomName, prev.callType, 'completed', prev.callDuration);
       }
       return prev;
     });
@@ -465,8 +530,9 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     AudioSession.stopAudioSession().catch(() => {});
     setLocalVideoTrack(null);
     setRemoteVideoTrack(null);
+    isCallerRef.current = false;
     setCallState(CALL_INITIAL);
-  }, [conversationId]);
+  }, [conversationId, logCallOnce]);
 
   // ✅ NEW: accept an incoming call — joins the same LiveKit room the
   // caller created (deterministic room name from the conversation id).
@@ -478,6 +544,7 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
   const acceptCall = useCallback(async () => {
     if (!incomingCall || !conversationId) return;
     const { callType, roomName } = incomingCall;
+    isCallerRef.current = false;
     setIncomingCall(null);
     if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
 
@@ -508,9 +575,10 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       type: 'broadcast', event: 'call_declined',
       payload: { roomName: incomingCall.roomName },
     }).catch(() => {});
+    if (conversationId) logCallOnce(incomingCall.roomName, incomingCall.callType, 'declined');
     if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
     setIncomingCall(null);
-  }, [incomingCall]);
+  }, [incomingCall, conversationId, logCallOnce]);
 
   const toggleMute = useCallback(async () => {
     if (!roomRef.current) return;
@@ -570,7 +638,7 @@ interface MessageReaction {
 }
 interface Message {
   id: string; conversation_id: string; sender_id: string; created_at: string;
-  message_type: 'text' | 'voice' | 'image' | 'video' | 'gif' | 'sticker' | 'system';
+  message_type: 'text' | 'voice' | 'image' | 'video' | 'gif' | 'sticker' | 'system' | 'call_log';
   content?: string; media_url?: string; media_duration?: number;
   media_thumbnail?: string; shared_video_id?: string;
   shared_video_title?: string; shared_video_thumbnail?: string;
@@ -679,6 +747,44 @@ async function sendMediaMessage(
     if (error) throw error;
     return { ...data, reactions: [] };
   } catch (error) { console.error('sendMediaMessage error:', error); return null; }
+}
+
+// ✅ NEW: call log entries in the chat thread — "Missed call", "Declined",
+// or a completed call's duration, the same way WhatsApp shows them inline
+// in the conversation. Deliberately reuses the existing `content` column
+// (a small JSON string) and `media_duration` (already an int column, used
+// today for voice-note length) instead of adding new DB columns — the
+// only new thing is the 'call_log' message_type value itself. If your
+// `messages.message_type` column is a Postgres ENUM (not a plain text
+// column), this insert will fail with "invalid input value for enum"
+// until you run:
+//   ALTER TYPE message_type_enum ADD VALUE 'call_log';
+// (exact type name may differ — check your schema). If it's a plain text
+// column, which is the more common setup, this works with zero DB changes.
+async function insertCallLogMessage(
+  conversationId: string, senderId: string,
+  callType: 'voice' | 'video', outcome: 'missed' | 'declined' | 'completed',
+  durationSeconds?: number,
+): Promise<void> {
+  try {
+    await supabase.from('messages').insert({
+      conversation_id: conversationId, sender_id: senderId,
+      message_type: 'call_log',
+      content: JSON.stringify({ callType, outcome }),
+      media_duration: outcome === 'completed' ? Math.max(0, durationSeconds || 0) : null,
+    });
+  } catch (e) { console.error('insertCallLogMessage error:', e); }
+}
+
+function formatCallDuration(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds} sec`;
+  const mins = Math.floor(totalSeconds / 60);
+  const hrs = Math.floor(mins / 60);
+  if (hrs >= 1) {
+    const remMins = mins % 60;
+    return remMins > 0 ? `${hrs} hr ${remMins} min` : `${hrs} hr`;
+  }
+  return `${mins} min`;
 }
 
 async function addReaction(messageId: string, userId: string, emoji: string): Promise<void> {
@@ -812,6 +918,9 @@ function useMessages(
   // scope. Passing them in as parameters instead of referencing them
   // directly.
   otherUserId: string | null, senderUsername: string, senderDisplayName: string,
+  // ✅ NEW: needed so the recipient's push-tap can show the real sender's
+  // avatar instead of a generic placeholder — see notifyNewMessage below.
+  senderPhoto: string,
 ) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading,  setLoading]  = useState(true);
@@ -858,12 +967,12 @@ function useMessages(
       if (msg && otherUserId) {
         notifyNewMessage(
           otherUserId, currentUserId, senderUsername, senderDisplayName,
-          text, conversationId
+          text, conversationId, senderPhoto
         ).catch(e => console.warn('Push notify (message) failed:', e));
       }
       return !!msg;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId, disappearingEnabled, disappearingDuration, otherUserId, senderUsername, senderDisplayName]);
+  }, [conversationId, currentUserId, disappearingEnabled, disappearingDuration, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
   const sendVoiceNote = useCallback(async (fileUri: string, duration: number): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
@@ -875,12 +984,12 @@ function useMessages(
       if (msg && otherUserId) {
         notifyNewMessage(
           otherUserId, currentUserId, senderUsername, senderDisplayName,
-          '🎤 Voice message', conversationId
+          '🎤 Voice message', conversationId, senderPhoto
         ).catch(e => console.warn('Push notify (message) failed:', e));
       }
       return !!msg;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName]);
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
   const sendImage = useCallback(async (fileUri: string): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
@@ -902,7 +1011,7 @@ function useMessages(
       if (ok && otherUserId) {
         notifyNewMessage(
           otherUserId, currentUserId, senderUsername, senderDisplayName,
-          '📷 Photo', conversationId
+          '📷 Photo', conversationId, senderPhoto
         ).catch(e => console.warn('Push notify (message) failed:', e));
       }
       setMessages(prev => prev.filter(m => m.id !== tempId));
@@ -911,7 +1020,7 @@ function useMessages(
       setMessages(prev => prev.filter(m => m.id !== tempId));
       return false;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName]);
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
   const sendVideo = useCallback(async (fileUri: string): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
@@ -930,7 +1039,7 @@ function useMessages(
       if (ok && otherUserId) {
         notifyNewMessage(
           otherUserId, currentUserId, senderUsername, senderDisplayName,
-          '🎥 Video', conversationId
+          '🎥 Video', conversationId, senderPhoto
         ).catch(e => console.warn('Push notify (message) failed:', e));
       }
       setMessages(prev => prev.filter(m => m.id !== tempId));
@@ -939,7 +1048,7 @@ function useMessages(
       setMessages(prev => prev.filter(m => m.id !== tempId));
       return false;
     } finally { setSending(false); }
-  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName]);
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
   const reactToMessage = useCallback(async (messageId: string, emoji: string): Promise<void> => {
     if (!currentUserId) return;
@@ -1204,6 +1313,40 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
           </TouchableOpacity>
         );
 
+      case 'call_log': {
+        let parsed: { callType?: 'voice' | 'video'; outcome?: 'missed' | 'declined' | 'completed' } = {};
+        try { parsed = JSON.parse(message.content || '{}'); } catch (_) {}
+        const isVideo = parsed.callType === 'video';
+        const outcome = parsed.outcome || 'completed';
+        const label = isVideo ? 'Video call' : 'Voice call';
+        const isMissedOrDeclined = outcome === 'missed' || outcome === 'declined';
+        const subtitle =
+          outcome === 'missed' ? (isMe ? 'No answer' : 'Missed') :
+          outcome === 'declined' ? 'Declined' :
+          formatCallDuration(message.media_duration || 0);
+        return (
+          <TouchableOpacity onLongPress={() => onLongPress(message)}
+            style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
+            <View style={{
+              width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center',
+              backgroundColor: isMe ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.08)',
+            }}>
+              <Ionicons
+                name={isVideo ? 'videocam' : (isMissedOrDeclined ? 'call' : 'call')}
+                size={15}
+                color={isMissedOrDeclined && !isMe ? '#ff5555' : (isMe ? '#000' : C.green)}
+              />
+            </View>
+            <View>
+              <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe, { fontWeight: '700' }]}>{label}</Text>
+              <Text style={[styles.bubbleText, isMe ? { color: 'rgba(0,0,0,0.6)' } : { color: C.muted }, { fontSize: 12 }]}>
+                {subtitle}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        );
+      }
+
       default:
         return (
           <TouchableOpacity onLongPress={() => onLongPress(message)}
@@ -1314,6 +1457,11 @@ export default function ChatScreen() {
   } = useMessages(
     id, user?.id || null, vanishOn, 86400,
     otherUserId || null, userProfile?.username || '', userProfile?.display_name || 'Someone',
+    // ✅ NEW: so the recipient's push notification (and its tap-to-open
+    // navigation) can show your real avatar instead of a placeholder.
+    // Matches the field name already used elsewhere in this same file
+    // (see the `users` table select: '...display_name, photo_url').
+    userProfile?.photo_url || '',
   );
 
   const displayName = userProfile?.display_name || userProfile?.username || 'LumVibe User';

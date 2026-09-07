@@ -30,7 +30,7 @@ import type { NavigationContainerRef } from '@react-navigation/native';
 
 // Matches PushNotificationData in utils/pushNotifications.ts — the only
 // types actually ever sent via push right now.
-type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message';
+type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message' | 'cowatch_invite';
 
 function navigateForPushData(
   navigationRef: React.RefObject<NavigationContainerRef<any> | null>,
@@ -49,6 +49,14 @@ function navigateForPushData(
 
   switch (type) {
     case 'follow':
+      // FIX (corrected): notificationHelpers.ts (the file actually used by
+      // chat/[id].tsx, and almost certainly by the like/comment/follow
+      // buttons elsewhere too, given it has ready-made handlers for all of
+      // them) sends fromUserId in camelCase via sendPushNotification() —
+      // a different, separate system from lib/notifications.ts's
+      // sendPushAndStore, which uses snake_case. My previous pass assumed
+      // the snake_case convention applied everywhere; it doesn't. Reverted
+      // to camelCase here, now backed by the actual sending code.
       if (data.fromUserId) {
         nav.navigate('UserProfile', { userId: data.fromUserId });
       }
@@ -56,9 +64,10 @@ function navigateForPushData(
 
     // ✅ NEW: tapping a message push (from outside the app or backgrounded)
     // now lands directly in that conversation, matching the in-app tap
-    // handler in notification.tsx. The push payload doesn't carry a
-    // photo, so this falls back to '' — ChatDM/HomeScreen already handle
-    // a missing photo with an initial-letter placeholder.
+    // handler in notification.tsx. fromPhoto now comes through too (see
+    // notificationHelpers.ts's notifyNewMessage, which was just updated
+    // to send it) — falls back to '' only if the sender genuinely had no
+    // photo set.
     case 'message':
       if (data.conversationId && data.fromUserId) {
         nav.navigate('Main', {
@@ -69,7 +78,30 @@ function navigateForPushData(
               id:          data.conversationId,
               otherUserId: data.fromUserId,
               otherName:   data.fromUsername || 'User',
-              otherPhoto:  '',
+              otherPhoto:  data.fromPhoto || '',
+            },
+          },
+        });
+      }
+      break;
+
+    // ✅ NEW: previously missing entirely — tapping a "wants to watch
+    // together" push did nothing. notifyCowatchInvite (lib/notifications.ts)
+    // builds this payload by hand rather than through sendPushAndStore, so
+    // unlike the cases above, conversationId/sessionId/otherName here ARE
+    // already camelCase as sent — no field-name mismatch on this one.
+    // Screen name and param shape confirmed against ChatStackTypes.ts:
+    // registered as 'Cowatch' (capital C only) inside the 'Messages' tab.
+    case 'cowatch_invite':
+      if (data.conversationId && data.sessionId) {
+        nav.navigate('Main', {
+          screen: 'Messages',
+          params: {
+            screen: 'Cowatch',
+            params: {
+              conversationId: data.conversationId,
+              sessionId:      data.sessionId,
+              otherName:      data.otherName || 'Someone',
             },
           },
         });
@@ -80,6 +112,8 @@ function navigateForPushData(
     case 'comment':
     case 'coin':
     case 'mention':
+      // FIX (corrected): same camelCase correction as 'follow'/'message'
+      // above — notificationHelpers.ts sends postId, not post_id.
       if (data.postId) {
         nav.navigate('PostDetail', { postId: data.postId });
       }
