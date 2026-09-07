@@ -6,9 +6,7 @@ export default {
     "scheme": "lumvibenative",
     "orientation": "portrait",
     "icon": "./src/assets/images/icon.png",
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
+    "runtimeVersion": "1.0.0",
     "updates": {
   "url": "https://u.expo.dev/7c7127f1-b98d-4e09-b44b-68b0a05a434d"
 },
