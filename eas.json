@@ -13,7 +13,8 @@
       "env": {
         "LIVEKIT_URL": "wss://lumvibe-fn3kjths.livekit.cloud",
         "EXPO_PUBLIC_SUPABASE_URL": "https://exwhnzhnxvwatnvbilcq.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "YOUR_EXISTING_SUPABASE_ANON_KEY"
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "YOUR_EXISTING_SUPABASE_ANON_KEY",
+        "EAS_GRADLE_CACHE": "1"
       }
     },
     "preview": {
@@ -22,7 +23,9 @@
       "env": {
         "LIVEKIT_URL": "wss://lumvibe-fn3kjths.livekit.cloud",
         "EXPO_PUBLIC_SUPABASE_URL": "https://exwhnzhnxvwatnvbilcq.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "YOUR_EXISTING_SUPABASE_ANON_KEY"
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4d2huemhueHZ3YXRudmJpbGNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0ODkzNzUsImV4cCI6MjA3OTA2NTM3NX0.PQQqltyfegA_wunC7MmjsahJj1T87ARFa5JNIwuxl6o",
+
+        "EAS_GRADLE_CACHE": "1"
       }
     },
     "production": {
@@ -30,7 +33,9 @@
       "env": {
         "LIVEKIT_URL": "wss://lumvibe-fn3kjths.livekit.cloud",
         "EXPO_PUBLIC_SUPABASE_URL": "https://exwhnzhnxvwatnvbilcq.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "YOUR_EXISTING_SUPABASE_ANON_KEY"
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4d2huemhueHZ3YXRudmJpbGNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0ODkzNzUsImV4cCI6MjA3OTA2NTM3NX0.PQQqltyfegA_wunC7MmjsahJj1T87ARFa5JNIwuxl6o",
+
+        "EAS_GRADLE_CACHE": "1"
       }
     }
   }

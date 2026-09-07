@@ -549,6 +549,13 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     // populated locally (which it won't be on a cold start from a killed
     // app — the original broadcast fired before this screen even mounted).
     joinLiveKitRoom,
+    // FIX: the auto-answer effect below calls setCallState directly (the
+    // same isInCall/callType/isConnecting shape startCall/acceptCall already
+    // use) but this was never actually returned from the hook, causing a
+    // "Cannot find name 'setCallState'" TS error and a downstream implicit-
+    // any error on its callback param. Exposing the real setter (already
+    // correctly typed via useState<CallState> above) fixes both.
+    setCallState,
   };
 }
 
@@ -1315,6 +1322,7 @@ export default function ChatScreen() {
     callState, incomingCall, localVideoTrack, remoteVideoTrack,
     startCall, endCall, acceptCall, declineCall,
     toggleMute, toggleCamera, toggleSpeaker, joinLiveKitRoom,
+    setCallState,
   } = useCall(user?.id || '', displayName, id || null, otherUserId || null);
 
   // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
