@@ -1,233 +1,351 @@
-// utils/pushNotifications.ts
-import * as Notifications from 'expo-notifications';
-import * as Device from 'expo-device';
-import { Platform } from 'react-native';
+// utils/notificationHelpers.ts
 import { supabase } from '../config/supabase'; 
-import Constants from 'expo-constants';
+import { sendPushNotification } from './pushNotifications';
 
-export interface PushNotificationData {
-  type: 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message' | 'marketplace';
-  fromUserId: string;
-  fromUsername: string;
-  // ✅ NEW: notifyNewMessage (notificationHelpers.ts) now sends the
-  // sender's photo so the recipient's push-tap can show a real avatar.
-  // Optional since every other notification type doesn't set it.
-  fromPhoto?: string;
-  postId?: string;
-  commentText?: string;
-  coinAmount?: number;
-  conversationId?: string;
+/**
+* Send notification when someone likes a post
+*/
+export async function notifyPostLike(
+  postId: string,
+  postOwnerId: string,
+  likerUserId: string,
+  likerUsername: string,
+  likerDisplayName: string,
+  coinAmount?: number
+) {
+  try {
+    // Don't notify if user likes their own post
+    if (postOwnerId === likerUserId) return;
+
+    const title = coinAmount
+      ? `${likerDisplayName} sent ${coinAmount} coins! 💰`
+      : `${likerDisplayName} liked your post ❤️`;
+
+    const body = coinAmount
+      ? `They loved your post so much they sent coins!`
+      : `Check out what they thought of your post`;
+
+    await sendPushNotification(postOwnerId, title, body, {
+      type: coinAmount ? 'coin' : 'like',
+      fromUserId: likerUserId,
+      fromUsername: likerUsername,
+      postId: postId,
+      coinAmount: coinAmount,
+    });
+
+    console.log('Like notification sent');
+  } catch (error) {
+    console.error('Error sending like notification:', error);
+  }
 }
 
 /**
-* Register for push notifications and save token to database
+* Send notification when someone comments on a post
 */
-export async function registerForPushNotificationsAsync(userId: string): Promise<string | null> {
-  let token: string | null = null;
+export async function notifyPostComment(
+  postId: string,
+  postOwnerId: string,
+  commenterUserId: string,
+  commenterUsername: string,
+  commenterDisplayName: string,
+  commentText: string
+) {
+  try {
+    // Don't notify if user comments on their own post
+    if (postOwnerId === commenterUserId) return;
 
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('default', {
-      name: 'default',
-      importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#00ff88',
+    const title = `${commenterDisplayName} commented 💬`;
+    const body = commentText.length > 50
+      ? `${commentText.substring(0, 50)}...`
+      : commentText;
+
+    await sendPushNotification(postOwnerId, title, body, {
+      type: 'comment',
+      fromUserId: commenterUserId,
+      fromUsername: commenterUsername,
+      postId: postId,
+      commentText: commentText,
     });
+
+    console.log('Comment notification sent');
+  } catch (error) {
+    console.error('Error sending comment notification:', error);
   }
+}
 
-  if (Device.isDevice) {
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
-    let finalStatus = existingStatus;
+/**
+* Send notification when someone follows you
+*/
+export async function notifyNewFollower(
+  followedUserId: string,
+  followerUserId: string,
+  followerUsername: string,
+  followerDisplayName: string
+) {
+  try {
+    const title = `${followerDisplayName} followed you! 👤`;
+    const body = `@${followerUsername} started following you`;
 
-    if (existingStatus !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
-    }
+    await sendPushNotification(followedUserId, title, body, {
+      type: 'follow',
+      fromUserId: followerUserId,
+      fromUsername: followerUsername,
+    });
 
-    if (finalStatus !== 'granted') {
-      console.log('Failed to get push token for push notification!');
-      return null;
-    }
+    console.log('Follow notification sent');
+  } catch (error) {
+    console.error('Error sending follow notification:', error);
+  }
+}
 
-    try {
-      const projectId = Constants.expoConfig?.extra?.eas?.projectId;
-    
-      const expoPushToken = await Notifications.getExpoPushTokenAsync({
-        projectId,
-      });
-     
-      token = expoPushToken.data;
+/**
+* Send notification when someone places an order on your marketplace listing
+*/
+export async function notifyMarketplaceOrder(
+  sellerId: string,
+  buyerId: string,
+  buyerUsername: string,
+  buyerDisplayName: string,
+  listingTitle: string
+) {
+  try {
+    if (sellerId === buyerId) return;
 
-      console.log('Push token:', token);
-
-      // Save token to database
-      if (token && userId) {
-        await savePushToken(userId, token);
+    await sendPushNotification(
+      sellerId,
+      'New Order! 🛍️',
+      `${buyerDisplayName} ordered "${listingTitle}"`,
+      {
+        type: 'marketplace',
+        fromUserId: buyerId,
+        fromUsername: buyerUsername,
       }
-    } catch (error) {
-      console.error('Error getting push token:', error);
-    }
-  } else {
-    console.log('Must use physical device for Push Notifications');
-  }
+    );
 
-  return token;
-}
-
-/**
-* Save push token to database
-*/
-async function savePushToken(userId: string, token: string): Promise<void> {
-  try {
-    const platform = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'web';
-
-    const { error } = await supabase
-      .from('push_tokens')
-      .upsert(
-        {
-          user_id: userId,
-          token: token,
-          platform: platform,
-          updated_at: new Date().toISOString(),
-        },
-        {
-          onConflict: 'user_id,token',
-        }
-      );
-
-    if (error) throw error;
-
-    console.log('Push token saved successfully');
+    console.log('Marketplace order notification sent');
   } catch (error) {
-    console.error('Error saving push token:', error);
+    console.error('Error sending marketplace order notification:', error);
   }
 }
 
 /**
-* Remove push token from database (on logout)
+* Send notification when someone sends you a direct message
 */
-export async function removePushToken(userId: string, token: string): Promise<void> {
-  try {
-    const { error } = await supabase
-      .from('push_tokens')
-      .delete()
-      .eq('user_id', userId)
-      .eq('token', token);
-
-    if (error) throw error;
-
-    console.log('Push token removed successfully');
-  } catch (error) {
-    console.error('Error removing push token:', error);
-  }
-}
-
-/**
-* Send push notification via Expo Push Notification Service
-*/
-export async function sendPushNotification(
+export async function notifyNewMessage(
   recipientUserId: string,
-  title: string,
-  body: string,
-  data: PushNotificationData
-): Promise<void> {
+  senderUserId: string,
+  senderUsername: string,
+  senderDisplayName: string,
+  messageText: string,
+  conversationId: string,
+  // ✅ NEW: so the recipient's push (and its tap-to-open navigation) can
+  // show your real avatar instead of a placeholder. Optional + defaulted
+  // so any other existing caller of this function that doesn't pass it
+  // yet still compiles and works exactly as before.
+  senderPhoto: string = ''
+) {
   try {
-    // Get recipient's push tokens
-    const { data: tokens, error: tokensError } = await supabase
-      .from('push_tokens')
-      .select('token')
-      .eq('user_id', recipientUserId);
+    if (recipientUserId === senderUserId) return;
 
-    if (tokensError) throw tokensError;
+    const title = senderDisplayName;
+    const body = messageText.length > 80 ? `${messageText.substring(0, 80)}...` : messageText;
 
-    if (!tokens || tokens.length === 0) {
-      console.log('No push tokens found for user');
-      return;
-    }
-
-    // ✅ FIX: .single() throws when zero rows come back, not just when
-    // there's more than one — and a brand-new user who's never opened
-    // notification settings has NO row here at all. That throw was being
-    // silently swallowed by the outer catch, so push notifications quietly
-    // never sent for any such user, forever, with zero visible error.
-    // .maybeSingle() returns null instead of throwing, and we default to
-    // "notifications on" when no row exists yet — the sensible default,
-    // since nobody should have to visit settings just to receive their
-    // first notification.
-    const { data: prefs, error: prefsError } = await supabase
-      .from('notification_preferences')
-      .select('push_enabled, likes_enabled, comments_enabled, follows_enabled, coins_enabled')
-      .eq('user_id', recipientUserId)
-      .maybeSingle();
-
-    if (prefsError) throw prefsError;
-
-    const pushEnabled = prefs ? prefs.push_enabled : true;
-    if (!pushEnabled) {
-      console.log('Push notifications disabled for user');
-      return;
-    }
-
-    // Check if this type of notification is enabled
-    const typeEnabled = prefs
-      ? (data.type === 'like' && prefs.likes_enabled) ||
-        (data.type === 'comment' && prefs.comments_enabled) ||
-        (data.type === 'follow' && prefs.follows_enabled) ||
-        (data.type === 'coin' && prefs.coins_enabled) ||
-        (data.type === 'mention' && prefs.comments_enabled)
-      : true; // no row yet — default every type to enabled
-
-    if (!typeEnabled) {
-      console.log(`${data.type} notifications disabled for user`);
-      return;
-    }
-
-    // Send notifications to all tokens
-    const messages = tokens.map((tokenData) => ({
-      to: tokenData.token,
-      sound: 'default',
-      title: title,
-      body: body,
-      data: data,
-      badge: 1,
-    }));
-
-    // Send via Expo push notification service
-    const response = await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Accept-encoding': 'gzip, deflate',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(messages),
+    await sendPushNotification(recipientUserId, title, body, {
+      type: 'message',
+      fromUserId: senderUserId,
+      fromUsername: senderUsername,
+      fromPhoto: senderPhoto,
+      conversationId,
     });
 
-    const result = await response.json();
-    console.log('Push notification sent:', result);
+    console.log('Message notification sent');
   } catch (error) {
-    console.error('Error sending push notification:', error);
+    console.error('Error sending message notification:', error);
   }
 }
 
 /**
-* Get badge count
+* Send notification when someone mentions you in a comment
 */
-export async function getBadgeCount(): Promise<number> {
-  return await Notifications.getBadgeCountAsync();
+export async function notifyMention(
+  mentionedUserId: string,
+  mentionerUserId: string,
+  mentionerUsername: string,
+  mentionerDisplayName: string,
+  postId: string,
+  commentText: string
+) {
+  try {
+    // Don't notify if user mentions themselves
+    if (mentionedUserId === mentionerUserId) return;
+
+    const title = `${mentionerDisplayName} mentioned you @`;
+    const body = commentText.length > 50
+      ? `${commentText.substring(0, 50)}...`
+      : commentText;
+
+    await sendPushNotification(mentionedUserId, title, body, {
+      type: 'mention',
+      fromUserId: mentionerUserId,
+      fromUsername: mentionerUsername,
+      postId: postId,
+      commentText: commentText,
+    });
+
+    console.log('Mention notification sent');
+  } catch (error) {
+    console.error('Error sending mention notification:', error);
+  }
 }
 
 /**
-* Set badge count
+* Example: Use these in your like button handler
 */
-export async function setBadgeCount(count: number): Promise<void> {
-  await Notifications.setBadgeCountAsync(count);
+export async function handleLikePress(
+  postId: string,
+  postOwnerId: string,
+  currentUserId: string,
+  currentUsername: string,
+  currentDisplayName: string,
+  coinAmount?: number
+) {
+  try {
+    // Add like to database
+    const { error: likeError } = await supabase
+      .from('likes')
+      .insert({
+        post_id: postId,
+        user_id: currentUserId,
+        coins: coinAmount || 0,
+      });
+
+    if (likeError) throw likeError;
+
+    // Send notification (database trigger will create notification record)
+    await notifyPostLike(
+      postId,
+      postOwnerId,
+      currentUserId,
+      currentUsername,
+      currentDisplayName,
+      coinAmount
+    );
+
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error liking post:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 /**
-* Clear all notifications
+* Example: Use these in your comment submission
 */
-export async function clearAllNotifications(): Promise<void> {
-  await Notifications.dismissAllNotificationsAsync();
-  await setBadgeCount(0);
+export async function handleCommentSubmit(
+  postId: string,
+  postOwnerId: string,
+  currentUserId: string,
+  currentUsername: string,
+  currentDisplayName: string,
+  commentText: string
+) {
+  try {
+    // Add comment to database
+    const { data: comment, error: commentError } = await supabase
+      .from('comments')
+      .insert({
+        post_id: postId,
+        user_id: currentUserId,
+        content: commentText,
+      })
+      .select()
+      .single();
+
+    if (commentError) throw commentError;
+
+    // Send notification (database trigger will create notification record)
+    await notifyPostComment(
+      postId,
+      postOwnerId,
+      currentUserId,
+      currentUsername,
+      currentDisplayName,
+      commentText
+    );
+
+    // Check for mentions in comment
+    const mentionRegex = /@(\w+)/g;
+    const mentions = commentText.match(mentionRegex);
+
+    if (mentions) {
+      for (const mention of mentions) {
+        const mentionedUsername = mention.substring(1); // Remove @
+       
+        // Get mentioned user ID
+        const { data: mentionedUser } = await supabase
+          .from('users')
+          .select('id')
+          .eq('username', mentionedUsername.toLowerCase())
+          .single();
+
+        if (mentionedUser) {
+          await notifyMention(
+            mentionedUser.id,
+            currentUserId,
+            currentUsername,
+            currentDisplayName,
+            postId,
+            commentText
+          );
+        }
+      }
+    }
+
+    return { success: true, comment };
+  } catch (error: any) {
+    console.error('Error submitting comment:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+* Example: Use this in your follow button handler
+*/
+export async function handleFollowPress(
+  userToFollowId: string,
+  currentUserId: string,
+  currentUsername: string,
+  currentDisplayName: string
+) {
+  try {
+    // Add follow to database
+    const { error: followError } = await supabase
+      .from('follows')
+      .insert({
+        follower_id: currentUserId,
+        following_id: userToFollowId,
+      });
+
+    if (followError) throw followError;
+
+    // ✅ FIX: this comment used to claim "database trigger will create
+    // notification record" — that was true for likes/comments but NOT for
+    // follows; no such trigger existed, so followers never showed up in
+    // the in-app bell/Notification screen (push-only). Run
+    // add_follow_notification_trigger.sql in Supabase once to add the
+    // missing trigger — after that, this comment is accurate again and no
+    // code change is needed here.
+    await notifyNewFollower(
+      userToFollowId,
+      currentUserId,
+      currentUsername,
+      currentDisplayName
+    );
+
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error following user:', error);
+    return { success: false, error: error.message };
+  }
 } 
 	

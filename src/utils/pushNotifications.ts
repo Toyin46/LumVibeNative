@@ -9,6 +9,7 @@ export interface PushNotificationData {
   type: 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message' | 'marketplace';
   fromUserId: string;
   fromUsername: string;
+  fromPhoto?: string;
   postId?: string;
   commentText?: string;
   coinAmount?: number;
