@@ -25,6 +25,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuthStore } from '../store/authStore';
 import { useNavigation } from '@react-navigation/native';
+import { supabase } from '../config/supabase';
+import { checkAndApplyPendingReferral } from '../utils/referralUtils';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -62,6 +64,20 @@ export default function LoginScreen() {
       await login(trimmedEmail, password);
 
       console.log('✅ Login successful');
+
+      // ✅ NEW: picks up a referral code that was saved during signup if
+      // this account needed email verification first (see signup.tsx —
+      // that's the exact gap this closes). checkAndApplyPendingReferral
+      // is a safe no-op ("No pending referral") on every ordinary login
+      // where nothing was ever saved, so this doesn't need to be
+      // conditional on "is this a first login" or similar.
+      const { data: { user: loggedInUser } } = await supabase.auth.getUser();
+      if (loggedInUser?.id) {
+        const referralResult = await checkAndApplyPendingReferral(loggedInUser.id);
+        if (referralResult.applied) {
+          console.log('🎁 Pending referral applied on login:', referralResult.message);
+        }
+      }
 
       // RootNavigator reactively swaps to MainTabs once `user` updates —
       // no manual navigation needed here.

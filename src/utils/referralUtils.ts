@@ -8,6 +8,7 @@
 import { Share } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../config/supabase'; 
+import { processReferralReward } from './referralRewards';
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const BASE_URL = 'https://lumvibe.site';
@@ -359,7 +360,14 @@ export const checkAndApplyPendingReferral = async (
     const pendingCode = await AsyncStorage.getItem(PENDING_REFERRAL_KEY);
     if (!pendingCode) return { applied: false, message: 'No pending referral' };
 
-    const result = await processReferral(newUserId, pendingCode);
+    // ✅ FIX: was calling processReferral() (this file's own points-only
+    // version) — but signup.tsx's normal direct-session path calls
+    // processReferralReward() from referralRewards.ts instead, which also
+    // updates level and checks feature-unlock thresholds. Using the same
+    // function here means a referral applies identically regardless of
+    // which path (immediate session vs. verify-email-then-login) the new
+    // user took to get here.
+    const result = await processReferralReward(newUserId, pendingCode);
 
     // Always clear after attempting — prevent double-apply
     await AsyncStorage.removeItem(PENDING_REFERRAL_KEY);

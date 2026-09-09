@@ -76,91 +76,30 @@ export async function processReferralReward(
   newUserId: string,
   referralCode: string
 ): Promise<{ success: boolean; message: string }> {
+  // FIX: this used to update the referrer's row directly from the new
+  // user's own client session — e.g. `.update({ points: ... }).eq('id',
+  // referrer.id)`. Confirmed via the users table's RLS policies: the only
+  // UPDATE policy is `auth.uid() = id`, meaning a user can only ever
+  // update their OWN row. That update was silently matching zero rows —
+  // no error thrown, the referrer's points/successful_referrals just
+  // never actually changed, no matter how many people used their code.
+  // apply_referral (Supabase → SQL Editor) runs server-side with the
+  // correct elevated privilege for this one specific, narrow operation —
+  // it doesn't open up general cross-user write access anywhere else.
   try {
-    const { data: referrer, error: referrerError } = await supabase
-      .from('users')
-      .select('id, username, display_name, points, level, successful_referrals')
-      .eq('referral_code', referralCode.toUpperCase())
-      .single();
-
-    if (referrerError || !referrer) {
-      return { success: false, message: 'Invalid referral code' };
-    }
-
-    if (referrer.id === newUserId) {
-      return { success: false, message: 'Cannot refer yourself' };
-    }
-
-    const { data: existingReferral } = await supabase
-      .from('referrals')
-      .select('id')
-      .eq('referrer_id', referrer.id)
-      .eq('referred_id', newUserId)
-      .maybeSingle();
-
-    if (existingReferral) {
-      return { success: false, message: 'Referral already processed' };
-    }
-
-    const { error: referralError } = await supabase.from('referrals').insert({
-      referrer_id: referrer.id,
-      referred_id: newUserId,
-      referral_code: referralCode.toUpperCase(),
-      reward_given: true,
-      status: 'completed',
+    const { data, error } = await supabase.rpc('apply_referral', {
+      p_new_user_id: newUserId,
+      p_referral_code: referralCode.toUpperCase(),
     });
 
-    if (referralError) {
-      return { success: false, message: 'Failed to create referral' };
-    }
-
-    const newReferrerPoints = (referrer.points || 0) + REFERRAL_REWARDS.REFERRER_POINTS;
-    const newReferrerLevel = Math.floor(newReferrerPoints / 1000) + 1;
-
-    await supabase
-      .from('users')
-      .update({
-        points: newReferrerPoints,
-        level: newReferrerLevel,
-        successful_referrals: (referrer.successful_referrals || 0) + 1,
-      })
-      .eq('id', referrer.id);
-
-    const { data: newUser } = await supabase
-      .from('users')
-      .select('points, level')
-      .eq('id', newUserId)
-      .single();
-
-    const newUserPoints = (newUser?.points || 0) + REFERRAL_REWARDS.NEW_USER_POINTS;
-    const newUserLevel = Math.floor(newUserPoints / 1000) + 1;
-
-    await supabase
-      .from('users')
-      .update({ points: newUserPoints, level: newUserLevel, referred_by: referrer.id })
-      .eq('id', newUserId);
-
-    await supabase.from('notifications').insert({
-      user_id: referrer.id,
-      type: 'referral',
-      title: 'Referral Reward! 🎁',
-      message: `You earned ${REFERRAL_REWARDS.REFERRER_POINTS} points for referring a friend! You'll also earn 5% commission on every withdrawal they make.`,
-      from_user_id: newUserId,
-      is_read: false,
-    });
-
-    const { count: referralCount } = await supabase
-      .from('referrals')
-      .select('*', { count: 'exact', head: true })
-      .eq('referrer_id', referrer.id);
-
-    if (referralCount && referralCount > 0) {
-      await checkAndUnlockFeatures(referrer.id, referralCount);
+    if (error) {
+      console.error('❌ apply_referral RPC error:', error);
+      return { success: false, message: error.message || 'Failed to process referral' };
     }
 
     return {
-      success: true,
-      message: `🎉 Referral success! You earned ${REFERRAL_REWARDS.NEW_USER_POINTS} points!`,
+      success: !!data?.success,
+      message: data?.message || (data?.success ? 'Referral applied!' : 'Failed to process referral'),
     };
   } catch (error) {
     console.error('❌ Error processing referral reward:', error);
@@ -168,44 +107,11 @@ export async function processReferralReward(
   }
 }
 
-async function checkAndUnlockFeatures(userId: string, referralCount: number) {
-  const FEATURE_THRESHOLDS = [
-    { count: 3,  feature: 'custom_themes',      name: 'Custom Themes' },
-    { count: 5,  feature: 'advanced_analytics', name: 'Advanced Analytics' },
-    { count: 10, feature: 'priority_support',   name: 'Priority Support' },
-    // ─── NEW: Glowing Avatar Border at 20 referrals ───────────────────────
-    { count: 20, feature: 'glowing_avatar',     name: 'Glowing Avatar Border ✨' },
-    // ─────────────────────────────────────────────────────────────────────
-  ];
-
-  for (const threshold of FEATURE_THRESHOLDS) {
-    if (referralCount >= threshold.count) {
-      const { data: existing } = await supabase
-        .from('user_unlocked_features')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('feature_id', threshold.feature)
-        .maybeSingle();
-
-      if (!existing) {
-        const { error } = await supabase
-          .from('user_unlocked_features')
-          .insert({ user_id: userId, feature_id: threshold.feature });
-
-        if (!error) {
-          await supabase.from('notifications').insert({
-            user_id: userId,
-            type: 'achievement',
-            title: 'Feature Unlocked! 🎉',
-            message: `You unlocked ${threshold.name} by referring ${threshold.count} friends!`,
-            is_read: false,
-          });
-          console.log(`✅ Unlocked ${threshold.feature} for user ${userId}`);
-        }
-      }
-    }
-  }
-}
+// FIX: removed the old client-side checkAndUnlockFeatures() — it's now
+// handled inside the apply_referral SQL function (see apply_referral.sql),
+// since it has the exact same RLS problem this whole fix addresses: it
+// was writing to another user's (the referrer's) user_unlocked_features
+// rows from the new user's own session.
 
 export async function generateReferralCode(username: string): Promise<string> {
   let baseCode = username

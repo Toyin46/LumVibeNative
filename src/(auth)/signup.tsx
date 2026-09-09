@@ -43,6 +43,7 @@ import {
 import { Feather } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { generateReferralCode, processReferralReward } from '../utils/referralRewards';
+import { savePendingReferral } from '../utils/referralUtils';
 import { useNavigation } from '@react-navigation/native';
 import * as Contacts from 'expo-contacts';
 
@@ -498,6 +499,19 @@ export default function SignupScreen() {
       }
 
       if (!authData.session) {
+        // FIX: this was returning immediately, before the referral-code
+        // block further down ever ran. Whatever the person typed into
+        // "Referral Code" only ever lived in local state — nothing saved
+        // it anywhere, so it was permanently lost the moment this screen
+        // unmounted. Persisting it here means login.tsx (see the matching
+        // change there) can pick it up and apply it after the person
+        // actually verifies their email and logs in for the first time.
+        // savePendingReferral is existing infrastructure from
+        // referralUtils.ts — it was already built for this exact "survive
+        // a gap" scenario, just never actually called from here.
+        if (referralCode.trim()) {
+          await savePendingReferral(referralCode.trim());
+        }
         Alert.alert(
           '📧 Check Your Email!',
           `We sent a verification link to:\n\n${email.trim().toLowerCase()}\n\nClick the link in the email to activate your account, then come back and log in.\n\n(Check your spam folder if you don't see it.)`,
