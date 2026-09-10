@@ -345,6 +345,13 @@ function coinsToNGN(coins: number): string {
   return `₦${(coins * COIN_TO_NGN).toLocaleString('en-NG')}`;
 }
 
+const PARTNER_REPORT_REASONS = [
+  { label: 'Spam or Misleading' }, { label: 'Nudity or Sexual Content' },
+  { label: 'Hate Speech or Discrimination' }, { label: 'Violence or Dangerous Acts' },
+  { label: 'Harassment or Bullying' }, { label: 'Involves a Minor Inappropriately' },
+  { label: 'Illegal Activity' }, { label: 'Other' },
+];
+
 // ── Local Currency Detection (matches index.tsx) ───────────────
 const CURRENCY_BY_TIMEZONE: Record<string, { code: string; symbol: string; rateFromNgn: number; decimals: number }> = {
   'Africa/Lagos':        { code: 'NGN', symbol: '₦',   rateFromNgn: 1,        decimals: 0 },
@@ -2501,12 +2508,21 @@ export default function CowatchScreen() {
   const [aiMatchStatus,       setAiMatchStatus]       = useState<AiMatchStatus>('idle');
   const [aiMatchVibes,        setAiMatchVibes]        = useState<string[]>([]);
   const [aiMatchQueueId,      setAiMatchQueueId]      = useState<string | null>(null);
-  const [aiMatchPartnerName,  setAiMatchPartnerName]  = useState<string>('');
-  const [aiMatchPartnerPhoto, setAiMatchPartnerPhoto] = useState<string | null>(null);
   const [aiMatchSessionId,    setAiMatchSessionId]    = useState<string | null>(null);
   const [aiMatchElapsedMs,    setAiMatchElapsedMs]    = useState<number>(0);
   const aiMatchPollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const aiMatchMountedRef = useRef(true);
+  const [aiMatchPartnerName,  setAiMatchPartnerName]  = useState<string>('');
+  const [aiMatchPartnerPhoto, setAiMatchPartnerPhoto] = useState<string | null>(null);
+  const [aiMatchPartnerId,    setAiMatchPartnerId]    = useState<string | null>(null);
+  const [otherUserId,         setOtherUserId]         = useState<string | null>(null);
+  const [safetyModalVisible,  setSafetyModalVisible]  = useState(false);
+  const [reportReasonsVisible,setReportReasonsVisible]= useState(false);
+  const [reportSubmitting,    setReportSubmitting]    = useState(false);
+
+  const partnerUserId = isAiMatch === 'true' ? aiMatchPartnerId : otherUserId;
+  const partnerDisplayName = isAiMatch === 'true' ? aiMatchPartnerName : (otherName || 'Partner');
+
 
   // ── Cleanup tracking refs ────────────────────────────────────
   // useEffect cleanup functions and AppState callbacks close over
@@ -2518,6 +2534,16 @@ export default function CowatchScreen() {
   const sessionEndedRef  = useRef(false); // guards against double end_session writes
   useEffect(() => { sessionRef.current = session; }, [session]);
   useEffect(() => { aiMatchQueueIdRef.current = aiMatchQueueId; }, [aiMatchQueueId]);
+
+  // Resolve the other person's id for regular (chat-invited) cowatch — AI Match sets it separately below
+  useEffect(() => {
+    if (isAiMatch === 'true' || !conversationId || !user?.id || otherUserId) return;
+    (async () => {
+      const { data } = await supabase.from('conversations')
+        .select('user1_id, user2_id').eq('id', conversationId).single();
+      if (data) setOtherUserId(data.user1_id === user.id ? data.user2_id : data.user1_id);
+    })();
+  }, [conversationId, user?.id, isAiMatch, otherUserId]);
 
   // Ends the active session / abandons the AI-match queue exactly
   // once, however the user leaves: End Call button, back gesture,
@@ -2780,6 +2806,7 @@ export default function CowatchScreen() {
         setAiMatchStatus('matched');
         setAiMatchPartnerName(pName);
         setAiMatchPartnerPhoto(pPhoto);
+        setAiMatchPartnerId(row.matched_with);
         return;
       }
 
@@ -3061,6 +3088,33 @@ export default function CowatchScreen() {
     cleanupCowatchState();
     navigation.goBack();
   }, [disconnectLiveKit, cleanupCowatchState, navigation]);
+
+  const submitPartnerReport = useCallback(async (reason: string) => {
+    if (!partnerUserId || !user?.id || reportSubmitting) return;
+    setReportSubmitting(true);
+    try {
+      await supabase.from('user_reports').insert({ reporter_id: user.id, reported_user_id: partnerUserId, reason });
+      setReportReasonsVisible(false);
+      Alert.alert('Report Submitted', "Thanks — we'll review this.", [{ text: 'OK', onPress: endCowatch }]);
+    } catch (e) {
+      Alert.alert('Error', 'Failed to submit report. Please try again.');
+    } finally {
+      setReportSubmitting(false);
+    }
+  }, [partnerUserId, user?.id, reportSubmitting, endCowatch]);
+
+  const handleBlockPartner = useCallback(() => {
+    setSafetyModalVisible(false);
+    Alert.alert(`Block ${partnerDisplayName}?`, "They won't be able to message you, and you won't see each other's content.", [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Block', style: 'destructive', onPress: async () => {
+          if (!user?.id || !partnerUserId) return;
+          const { error } = await supabase.from('blocked_users').insert({ blocker_id: user.id, blocked_id: partnerUserId });
+          if (error) { Alert.alert('Error', error.message); return; }
+          endCowatch();
+        } },
+    ]);
+  }, [partnerUserId, partnerDisplayName, user?.id, endCowatch]);
 
   // ✅ NEW: Queue tab "Next" — advances to the next post in the shared feed.
   // Only the host's tap actually drives the room (same rule scrolling already
@@ -3380,6 +3434,38 @@ export default function CowatchScreen() {
             <TouchableOpacity style={styles.iconPillBtnSquare} onPress={() => setMenuVisible(true)}>
               <Feather name="more-vertical" size={18} color={C.white} />
             </TouchableOpacity>
+              <Modal visible={safetyModalVisible} transparent animationType="fade" onRequestClose={() => setSafetyModalVisible(false)}>
+        <TouchableOpacity style={sheetStyles.backdrop} activeOpacity={1} onPress={() => setSafetyModalVisible(false)}>
+          <View style={[sheetStyles.sheet, { padding: 16, paddingTop: 10 }]}>
+            <View style={sheetStyles.handle} />
+            <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12 }}
+              onPress={() => { setSafetyModalVisible(false); setTimeout(() => setReportReasonsVisible(true), 300); }}>
+              <Feather name="flag" size={18} color={C.white} />
+              <Text style={{ color: C.white, fontSize: 15, fontWeight: '600' }}>Report {partnerDisplayName}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12 }} onPress={handleBlockPartner}>
+              <Feather name="slash" size={18} color={C.red} />
+              <Text style={{ color: C.red, fontSize: 15, fontWeight: '600' }}>Block {partnerDisplayName}</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      <Modal visible={reportReasonsVisible} transparent animationType="fade" onRequestClose={() => setReportReasonsVisible(false)}>
+        <TouchableOpacity style={sheetStyles.backdrop} activeOpacity={1} onPress={() => setReportReasonsVisible(false)}>
+          <View style={[sheetStyles.sheet, { padding: 16, paddingTop: 10 }]}>
+            <View style={sheetStyles.handle} />
+            <Text style={[sheetStyles.sheetTitle, { marginBottom: 10 }]}>Why are you reporting {partnerDisplayName}?</Text>
+            {PARTNER_REPORT_REASONS.map(r => (
+              <TouchableOpacity key={r.label} style={{ paddingVertical: 12 }} onPress={() => submitPartnerReport(r.label)} disabled={reportSubmitting}>
+                <Text style={{ color: C.white, fontSize: 14 }}>{r.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+
           </View>
           <View style={styles.topBarRow2}>
             <View style={styles.watchingTogetherPill}>

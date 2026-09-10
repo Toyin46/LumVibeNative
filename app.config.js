@@ -37,7 +37,8 @@ export default {
       "expo-web-browser",
       ["@livekit/react-native-expo-plugin", { "android": { "audioType": "communication" } }],
       "@config-plugins/react-native-webrtc",
-      "expo-notifications"
+      "expo-notifications",
+      "expo-iap"
     ]
   }
 };

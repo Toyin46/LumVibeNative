@@ -34,6 +34,11 @@ import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/n
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
+import { Asset } from 'expo-asset';
+// ✅ NEW: same native module create.tsx already uses for effects baking —
+// reusing it here for watermark baking adds nothing new to the native
+// layer, so this stays a plain JS/TS change (no rebuild needed).
+import { bakeVideo } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker';
 
 const { width, height } = Dimensions.get('window');
 
@@ -684,32 +689,12 @@ const VideoPost = memo(function VideoPost({
   const effectBadge      = effectInfo.badge || null;
   const effectBadgeColor = effectInfo.badgeColor || '#fff';
 
-  // Animated watermark — moves to 4 corners
-  const wmX       = useRef(new Animated.Value(16)).current;
-  const wmY       = useRef(new Animated.Value(height * 0.55)).current;
-  const wmOpacity = useRef(new Animated.Value(0.85)).current;
-
-  useEffect(() => {
-    if (!item.media_url) return;
-    const W = width - 160;
-    const positions = [{ x: 16, y: height * 0.55 }, { x: W, y: height * 0.55 }, { x: 16, y: height * 0.25 }, { x: W, y: height * 0.25 }];
-    let idx = 0; let active = true;
-    const next = () => {
-      if (!active) return;
-      idx = (idx + 1) % 4;
-      Animated.parallel([
-        Animated.timing(wmOpacity, { toValue: 0, duration: 300, useNativeDriver: true }),
-        Animated.timing(wmX, { toValue: positions[idx].x, duration: 300, useNativeDriver: true }),
-        Animated.timing(wmY, { toValue: positions[idx].y, duration: 300, useNativeDriver: true }),
-      ]).start(() => {
-        if (!active) return;
-        Animated.timing(wmOpacity, { toValue: 0.85, duration: 300, useNativeDriver: true })
-          .start(() => { if (active) setTimeout(next, 3500); });
-      });
-    };
-    const timer = setTimeout(next, 3500);
-    return () => { active = false; clearTimeout(timer); };
-  }, [item.id]);
+  // ✅ REMOVED: the animated "moves to 4 corners" watermark overlay that
+  // used to render here. It was showing on top of the baked-in watermark
+  // at the same time (see create.tsx's move of watermark baking to
+  // download-time) — genuinely redundant and the actual cause of the
+  // "two watermarks" duplication. In-feed playback is now always the
+  // clean version; the watermark only ever appears on a downloaded copy.
 
   useEffect(() => {
     if (isActive) {
@@ -950,12 +935,8 @@ const VideoPost = memo(function VideoPost({
           </View>
         )}
 
-        {item.has_watermark && item.media_url && (
-          <Animated.View style={[styles.watermarkOverlay, { transform: [{ translateX: wmX }, { translateY: wmY }], opacity: wmOpacity, position: 'absolute', top: 0, left: 0 }]}>
-            <Image source={require('../assets/images/adaptive-icon.png')} style={styles.watermarkLogo} resizeMode="contain" />
-            <View><Text style={styles.watermarkText}>LumVibe</Text><Text style={styles.watermarkUsername}>@{item.username}</Text></View>
-          </Animated.View>
-        )}
+        {/* ✅ REMOVED: floating watermark overlay — see the removal note
+            near wmX/wmY above for why. */}
 
         {!isPlaying && (
           <View style={styles.playOverlay}>
@@ -1960,12 +1941,21 @@ export default function VideosScreen() {
 
   const handleSaveMedia = useCallback(async (post: Post) => {
     if (!post.media_url) return;
-    const hasBakedVersion = !!post.watermarked_url;
+    const mediaUri = post.media_url;
+    // Legacy posts from before this change may still have a real
+    // pre-baked watermarked_url — honor that untouched. Everything
+    // posted after this change relies on has_watermark + baking here
+    // instead.
+    const hasLegacyBakedVersion = !!post.watermarked_url;
+    const needsFreshBake = !hasLegacyBakedVersion && !!post.has_watermark;
+
     Alert.alert(
       t.videos.saveVideo,
-      hasBakedVersion
+      hasLegacyBakedVersion
         ? 'Save this video? Watermark and effects are already baked in.'
-        : 'Save this video?',
+        : needsFreshBake
+          ? 'Save this video? Your watermark will be added to the downloaded copy.'
+          : 'Save this video?',
       [
         { text: t.common.cancel, style: 'cancel' },
         { text: t.common.save, onPress: async () => {
@@ -1973,23 +1963,60 @@ export default function VideosScreen() {
             const { status } = await MediaLibrary.requestPermissionsAsync();
             if (status !== 'granted') { Alert.alert(t.videos.permissionDenied, t.videos.permissionMsg); return; }
 
-            const sourceUrl = post.watermarked_url || post.media_url || '';
             const outFileName = `lumvibe_${post.id}_${Date.now()}.mp4`;
-            const outUri = `${(FileSystem as any).cacheDirectory ?? (FileSystem as any).documentDirectory ?? ''}${outFileName}`;
+            const cacheDir = (FileSystem as any).cacheDirectory ?? (FileSystem as any).documentDirectory ?? '';
+            let finalUri = `${cacheDir}${outFileName}`;
 
-            Alert.alert('⬇️ Downloading...', 'Saving your video...');
+            Alert.alert('⬇️ Downloading...', needsFreshBake ? 'Preparing your watermarked copy...' : 'Saving your video...');
 
-            const downloadResult = await FileSystem.downloadAsync(sourceUrl, outUri);
-            if (downloadResult.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
+            if (hasLegacyBakedVersion) {
+              // Old behavior, unchanged: the baked file already exists
+              // somewhere, just download it directly.
+              const downloadResult = await FileSystem.downloadAsync(post.watermarked_url!, finalUri);
+              if (downloadResult.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
+            } else if (needsFreshBake) {
+              // ✅ NEW: download the clean original first, then bake the
+              // watermark into THIS copy only — the in-feed/original file
+              // on the server is never touched or replaced.
+              const cleanUri = `${cacheDir}clean_${outFileName}`;
+              const downloadResult = await FileSystem.downloadAsync(mediaUri, cleanUri);
+              if (downloadResult.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
 
-            const asset = await MediaLibrary.createAssetAsync(outUri);
+              try {
+                const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
+                if (!logoAsset.downloaded) await logoAsset.downloadAsync();
+                const logoDestPath = `${cacheDir}watermark_logo.png`;
+                await FileSystem.copyAsync({ from: logoAsset.localUri || logoAsset.uri, to: logoDestPath });
+                const logoPath = logoDestPath.replace('file://', '');
+                const safeUser = (post.username || '').replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
+
+                const bakedPath = await bakeVideo(cleanUri.replace('file://', ''), finalUri.replace('file://', ''), {
+                  watermarkPngPath: logoPath,
+                  watermarkUsername: safeUser,
+                });
+                finalUri = bakedPath.startsWith('file://') ? bakedPath : `file://${bakedPath}`;
+              } catch (bakeErr) {
+                // If baking fails for any reason, fall back to saving the
+                // clean copy rather than losing the download entirely.
+                console.warn('Download-time watermark bake failed, saving unwatermarked copy:', bakeErr);
+                finalUri = cleanUri;
+              } finally {
+                FileSystem.deleteAsync(cleanUri, { idempotent: true }).catch(() => {});
+              }
+            } else {
+              // No watermark wanted at all — plain download, as before.
+              const downloadResult = await FileSystem.downloadAsync(mediaUri, finalUri);
+              if (downloadResult.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
+            }
+
+            const asset = await MediaLibrary.createAssetAsync(finalUri);
             await MediaLibrary.createAlbumAsync('LumVibe', asset, false);
-            await FileSystem.deleteAsync(outUri, { idempotent: true });
+            await FileSystem.deleteAsync(finalUri, { idempotent: true });
 
             Alert.alert(
               '✅ Saved!',
-              hasBakedVersion
-                ? 'Video saved with watermark and effects to your LumVibe gallery.'
+              (hasLegacyBakedVersion || needsFreshBake)
+                ? 'Video saved with watermark to your LumVibe gallery.'
                 : 'Video saved to your LumVibe gallery.'
             );
           } catch (e: any) { Alert.alert('Error', 'Failed to save video: ' + (e.message || 'Unknown error')); }
@@ -2368,10 +2395,8 @@ const styles = StyleSheet.create({
   videoBackground:      { ...StyleSheet.absoluteFillObject, backgroundColor: '#000' },
   videoTouchable:       { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center' },
   filterTintOverlay:    { ...StyleSheet.absoluteFillObject, zIndex: 1 },
-  watermarkOverlay:     { zIndex: 3, backgroundColor: 'rgba(0,0,0,0.7)', borderRadius: 8, padding: 8, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  watermarkLogo:        { width: 24, height: 24 },
-  watermarkText:        { color: '#00ff88', fontSize: 12, fontWeight: '700' },
-  watermarkUsername:    { color: '#fff', fontSize: 10, fontWeight: '600', marginTop: 2 },
+  // ✅ REMOVED: watermarkOverlay/watermarkLogo/watermarkText/watermarkUsername
+  // styles — were only used by the floating overlay removed above.
   effectBadge:          { position: 'absolute', top: 80, left: 12, zIndex: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, borderWidth: 1.5, flexDirection: 'row', alignItems: 'center' },
   effectBadgeText:      { fontSize: 12, fontWeight: '700' },
   playOverlay:          { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 5 },
