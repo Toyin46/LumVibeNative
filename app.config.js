@@ -22,7 +22,7 @@ export default {
       "livekitUrl": process.env.LIVEKIT_URL
     },
         "android": {
-      "package": "com.kinsta.kinsta2",
+      "package": "com.lumvibeapp",
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./src/assets/images/adaptive-icon.png",
