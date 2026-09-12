@@ -34,7 +34,12 @@ type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'messa
 
 function navigateForPushData(
   navigationRef: React.RefObject<NavigationContainerRef<any> | null>,
-  data: Record<string, any>
+  data: Record<string, any>,
+  // ✅ NEW (fix #2/#3 — cowatch invite "Dismiss" action): defaults to ''
+  // so every existing call site (which never passed this) keeps working
+  // exactly as before; only the two call sites below that now pass the
+  // real action identifier can actually trigger the dismiss branch.
+  actionIdentifier: string = ''
 ) {
   if (!navigationRef.current) return;
   const type = data.type as KnownPushType | undefined;
@@ -93,6 +98,11 @@ function navigateForPushData(
     // Screen name and param shape confirmed against ChatStackTypes.ts:
     // registered as 'Cowatch' (capital C only) inside the 'Messages' tab.
     case 'cowatch_invite':
+      // ✅ NEW (fix #2/#3): honor the "Dismiss" action button on the
+      // notification itself (see the 'cowatch_invite' category registered
+      // in chat/[id].tsx's registerCallPushToken) — don't navigate anywhere
+      // if the person explicitly dismissed it rather than tapping to join.
+      if (actionIdentifier === 'dismiss') break;
       if (data.conversationId && data.sessionId) {
         nav.navigate('Main', {
           screen: 'Messages',
@@ -137,7 +147,7 @@ export function useNotificationPushNavigation(
     // Case 1: app already running, tap arrives via the live listener.
     const subscription = Notifications.addNotificationResponseReceivedListener(response => {
       const data = response.notification.request.content.data as any;
-      navigateForPushData(navigationRef, data || {});
+      navigateForPushData(navigationRef, data || {}, response.actionIdentifier);
     });
 
     // Case 2: app was fully closed — the tap is what launched it. The live
@@ -146,7 +156,7 @@ export function useNotificationPushNavigation(
     Notifications.getLastNotificationResponseAsync().then(response => {
       if (!response) return;
       const data = response.notification.request.content.data as any;
-      navigateForPushData(navigationRef, data || {});
+      navigateForPushData(navigationRef, data || {}, response.actionIdentifier);
     });
 
     return () => subscription.remove();

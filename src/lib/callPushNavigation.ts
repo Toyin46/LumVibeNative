@@ -63,6 +63,16 @@ function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
       screen: 'ChatDM',
       params: {
         id: data.conversationId,
+        // ✅ FIX: chat/[id].tsx reads otherUserId/otherName purely from
+        // route params — it never looks them up itself. Without these,
+        // a call answered from a cold-started/backgrounded push left the
+        // whole screen not knowing who the other person even was for the
+        // rest of that session (presence dot, and critically, hanging up
+        // and calling back would have no calleeId to push to). The
+        // send-call-push payload already includes callerId/callerName —
+        // this just forwards them.
+        otherUserId: data.callerId,
+        otherName:   data.callerName,
         autoAnswerCall: true,
         autoAnswerCallType: data.callType,
       },
@@ -74,11 +84,48 @@ function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
 // the Decline action, so declining still lands the user somewhere
 // sensible (the chat itself) instead of silently doing nothing visible
 // when the app cold-starts from a Decline tap.
+// ✅ FIX (fix #2 — missed calls): also handles 'missed_call' pushes now,
+// so tapping the notification body (or its "Message" action) just opens
+// the chat, matching image 3's "Message" button.
 function navigateToChatOnly(navRef: NavigationContainerRef<any>, data: any) {
-  if (data?.type !== 'incoming_call') return;
+  if (data?.type !== 'incoming_call' && data?.type !== 'missed_call') return;
   navRef.navigate('Main', {
     screen: 'Messages',
-    params: { screen: 'ChatDM', params: { id: data.conversationId } },
+    params: {
+      screen: 'ChatDM',
+      params: {
+        id: data.conversationId,
+        otherUserId: data.callerId,
+        otherName:   data.callerName,
+      },
+    },
+  });
+}
+
+// ✅ NEW (fix #2 — missed call "Call back" action): mirrors navigateToCall
+// above but sets autoStartCall instead of autoAnswerCall. Requires a
+// matching effect in chat/[id].tsx that reads autoStartCall/
+// autoStartCallType from route params and calls startCall() once on
+// mount — the outbound-call equivalent of the existing autoAnswerCall
+// effect there.
+function navigateToStartCall(navRef: NavigationContainerRef<any>, data: any) {
+  if (data?.type !== 'missed_call') return;
+  navRef.navigate('Main', {
+    screen: 'Messages',
+    params: {
+      screen: 'ChatDM',
+      params: {
+        id: data.conversationId,
+        // ✅ FIX: startCall() only sends a push at all when otherUserId is
+        // set (`if (otherUserId) { sendCallPush(...) }`) — without this,
+        // tapping "Call back" against someone whose app is closed would
+        // ring silently on their end via realtime-only (i.e. not at all).
+        otherUserId: data.callerId,
+        otherName:   data.callerName,
+        autoStartCall: true,
+        autoStartCallType: data.callType,
+      },
+    },
   });
 }
 
@@ -102,15 +149,7 @@ export function useCallPushNavigation(navRef: React.RefObject<NavigationContaine
       Notifications.getLastNotificationResponseAsync().then((response) => {
         const data = response?.notification.request.content.data as any;
         if (!data || !navRef.current?.isReady()) return;
-        // ✅ FIX: this never checked WHICH action was tapped — Decline
-        // and Answer (and just tapping the notification body) all did the
-        // exact same thing: navigate in and auto-join the call. Declining
-        // now genuinely declines instead of joining anyway.
-        if (response!.actionIdentifier === 'decline') {
-          navigateToChatOnly(navRef.current, data);
-        } else {
-          navigateToCall(navRef.current, data);
-        }
+        handleCallResponse(navRef.current, data, response!.actionIdentifier);
       });
     }
 
@@ -118,12 +157,31 @@ export function useCallPushNavigation(navRef: React.RefObject<NavigationContaine
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data as any;
       if (!data || !navRef.current?.isReady()) return;
-      if (response.actionIdentifier === 'decline') {
-        navigateToChatOnly(navRef.current, data);
-      } else {
-        navigateToCall(navRef.current, data);
-      }
+      handleCallResponse(navRef.current, data, response.actionIdentifier);
     });
     return () => sub.remove();
   }, [navRef]);
+}
+
+// ✅ FIX (fix #2): this never checked WHICH action was tapped for a plain
+// incoming call — Decline and Answer (and just tapping the notification
+// body) all did the exact same thing: navigate in and auto-join the call.
+// Declining now genuinely declines instead of joining anyway. Also
+// branches on the two new missed_call actions (image 3's "Call back" /
+// "Message" buttons) — see navigateToStartCall/navigateToChatOnly above.
+function handleCallResponse(navRef: NavigationContainerRef<any>, data: any, actionIdentifier: string) {
+  if (data?.type === 'missed_call') {
+    if (actionIdentifier === 'call_back') {
+      navigateToStartCall(navRef, data);
+    } else {
+      // 'message' action, or just tapping the notification body.
+      navigateToChatOnly(navRef, data);
+    }
+    return;
+  }
+  if (actionIdentifier === 'decline') {
+    navigateToChatOnly(navRef, data);
+  } else {
+    navigateToCall(navRef, data);
+  }
 }

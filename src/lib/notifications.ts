@@ -253,7 +253,18 @@ export async function notifyCowatchInvite(
         body:     'Tap to join the watch party',
         sound:    'default',
         priority: 'high',
-        channelId: 'default',
+        // ✅ FIX (WhatsApp-style banner for cowatch, requested alongside
+        // calls): 'default' is a low-importance Android channel — on
+        // Android 8+ that's a quiet notification-tray entry, not a
+        // heads-up banner, regardless of priority/sound set here. 'calls'
+        // is the high-importance channel chat/[id].tsx already creates
+        // for incoming calls; reusing it is what actually makes this pop
+        // up over other apps / the lock screen the same way a call does.
+        channelId: 'calls',
+        // ✅ NEW: lets the notification carry real Join/Dismiss action
+        // buttons on the banner itself, matching the 'cowatch_invite'
+        // category chat/[id].tsx registers client-side (Android + iOS).
+        categoryIdentifier: 'cowatch_invite',
         // Deep-link payload — read in your notification response handler
         data: {
           type:           'cowatch_invite',

@@ -109,6 +109,41 @@ async function registerCallPushToken(userId: string) {
         options: { opensAppToForeground: true },
       },
     ]);
+    // ✅ NEW (fix #2, part 2 — missed-call notification): matches the
+    // WhatsApp "Call back / Message" quick actions shown after a call goes
+    // unanswered. Registering the category is the client-side half of
+    // this; it only actually appears once whatever sends the push (see
+    // sendMissedCallPush below) sets categoryIdentifier: 'missed_call' on
+    // that notification.
+    await Notifications.setNotificationCategoryAsync('missed_call', [
+      {
+        identifier: 'call_back',
+        buttonTitle: 'Call back',
+        options: { opensAppToForeground: true },
+      },
+      {
+        identifier: 'message',
+        buttonTitle: 'Message',
+        options: { opensAppToForeground: true },
+      },
+    ]);
+    // ✅ NEW (fix #3, notification half — cowatch invite): same
+    // heads-up-with-actions treatment as calls, so a cowatch invite that
+    // arrives while the app is backgrounded/killed shows as more than a
+    // plain silent notification. Requires notifyCowatchInvite's push (in
+    // lib/notifications.ts) to set categoryIdentifier: 'cowatch_invite'.
+    await Notifications.setNotificationCategoryAsync('cowatch_invite', [
+      {
+        identifier: 'dismiss',
+        buttonTitle: 'Dismiss',
+        options: { opensAppToForeground: false, isDestructive: true },
+      },
+      {
+        identifier: 'join',
+        buttonTitle: 'Join',
+        options: { opensAppToForeground: true },
+      },
+    ]);
     const { status: existing } = await Notifications.getPermissionsAsync();
     let finalStatus = existing;
     if (existing !== 'granted') {
@@ -146,6 +181,33 @@ async function sendCallPush(payload: {
     // Non-fatal — the realtime broadcast may still reach them if their
     // chat screen is open, so a push failure shouldn't block the call.
     console.error('sendCallPush error:', e);
+  }
+}
+
+// ✅ NEW (fix #2, part 2 — "Missed voice call" banner like image 3): only
+// the CALLER's device can reliably detect "nobody ever answered" for a
+// callee whose app is fully killed (the callee's own 30s ring-timeout in
+// the effect below never runs in that case, since no JS is executing on
+// their device at all). So when the caller gives up, THIS device tells
+// the send-call-push function to fire a second, distinct push at the
+// callee — a "Missed voice call" notification with Call back/Message
+// actions, instead of just letting the original ringing notification sit
+// there or silently vanish.
+// ⚠️ This assumes send-call-push accepts a `type` field and branches on
+// it to build a different notification body/category for 'missed_call'
+// vs the default 'incoming_call' case. I don't have that function's
+// source in front of me — if it ignores unknown fields, this call is a
+// harmless no-op until it's updated to handle `type: 'missed_call'`.
+async function sendMissedCallPush(payload: {
+  calleeId: string; callerId: string; callerName: string;
+  callType: 'voice' | 'video'; roomName: string; conversationId: string;
+}) {
+  try {
+    await supabase.functions.invoke('send-call-push', {
+      body: { ...payload, type: 'missed_call' },
+    });
+  } catch (e) {
+    console.error('sendMissedCallPush error:', e);
   }
 }
 
@@ -198,16 +260,41 @@ interface IncomingCall {
   roomName:    string;
 }
 
+// ✅ NEW (fix #3 — cowatch invite): same shape as IncomingCall above, but
+// for "come watch with me" invites, delivered over the same per-
+// conversation signaling channel as calls so it works the instant both
+// people have this chat screen open — no dependency on push delivery.
+interface IncomingCowatch {
+  inviterId:    string;
+  inviterName:  string;
+  inviterPhoto?: string;
+  sessionId:    string;
+  conversationId: string;
+}
+
 function useCall(currentUserId: string, displayName: string, conversationId: string | null, otherUserId: string | null) {
   const [callState,      setCallState]      = useState<CallState>(CALL_INITIAL);
   const [incomingCall,   setIncomingCall]   = useState<IncomingCall | null>(null);
+  // ✅ NEW (fix #3): incoming cowatch invite banner state — lives here
+  // because it rides the same already-open `call_signal:${conversationId}`
+  // channel this hook already subscribes to (see the channel setup below).
+  const [incomingCowatch, setIncomingCowatch] = useState<IncomingCowatch | null>(null);
   const [localVideoTrack,  setLocalVideoTrack]  = useState<Track | null>(null);
   const [remoteVideoTrack, setRemoteVideoTrack] = useState<Track | null>(null);
   const roomRef      = useRef<Room | null>(null);
   const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cowatchRingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef   = useRef(true);
   const signalRef    = useRef<RealtimeChannel | null>(null);
+  // ✅ NEW (fix #1 — symmetric hangup): joinLiveKitRoom is defined (and its
+  // RoomEvent handlers wired up) BEFORE endCall exists as a value further
+  // down this hook, so its ParticipantDisconnected handler can't close over
+  // endCall directly — that would be a stale/undefined reference at
+  // definition time. Routing the call through a ref that's kept in sync
+  // (see the effect right after endCall's definition) lets the room-event
+  // handler always invoke whatever the CURRENT endCall closure is.
+  const endCallRef = useRef<() => void>(() => {});
   // ✅ NEW: call-log support. isCallerRef distinguishes "I started this
   // call" from "I answered this call" — needed so a callee hanging up
   // fast during the connecting window isn't mislabeled as a missed call.
@@ -348,10 +435,30 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       .on('broadcast', { event: 'call_logged' }, ({ payload }: any) => {
         if (payload?.roomName) loggedRoomsRef.current.add(payload.roomName);
       })
+      // ✅ NEW (fix #3 — cowatch invite): mirrors the 'incoming_call'
+      // handler above exactly. cowatch.tsx broadcasts this the moment it
+      // creates a brand-new session (see broadcastCowatchInvite there), so
+      // whoever's on the other end of THIS conversation's chat screen sees
+      // an in-app "invited you to watch together" banner immediately —
+      // the same instant-delivery path calls already had, which is exactly
+      // what was missing.
+      .on('broadcast', { event: 'cowatch_invite' }, ({ payload }: any) => {
+        if (!mountedRef.current || payload?.inviterId === currentUserId) return;
+        setIncomingCowatch(payload);
+        if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
+        cowatchRingTimerRef.current = setTimeout(() => {
+          setIncomingCowatch(prev => (prev?.sessionId === payload.sessionId ? null : prev));
+        }, 30000); // auto-dismiss, same window as an unanswered call
+      })
+      .on('broadcast', { event: 'cowatch_cancelled' }, ({ payload }: any) => {
+        if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
+        setIncomingCowatch(prev => (prev?.sessionId === payload?.sessionId ? null : prev));
+      })
       .subscribe();
     signalRef.current = channel;
     return () => {
       if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
+      if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
       supabase.removeChannel(channel);
       signalRef.current = null;
     };
@@ -401,9 +508,22 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
         if (mountedRef.current) setCallState(prev => ({ ...prev, remoteConnected: true }));
       });
 
+      // ✅ FIX (bug #1 — hangup only ended the call for whoever pressed the
+      // button): this used to just flip remoteConnected to false and clear
+      // the video track, then stop — leaving THIS side's call screen open,
+      // timer still running, still "connected" to a LiveKit room the other
+      // person had already left. These are 1:1 calls (exactly one caller +
+      // one callee), so the other participant disconnecting always means
+      // the call is over, full stop — there's nobody left to talk to.
+      // Routing through endCallRef runs the exact same teardown the red
+      // hang-up button does (stop timer, disconnect our own room, log the
+      // call as completed with its real duration, reset callState), so
+      // both sides end up in the identical post-call state instead of one
+      // side being stuck.
       room.on(RoomEvent.ParticipantDisconnected, () => {
-        if (mountedRef.current) setCallState(prev => ({ ...prev, remoteConnected: false }));
+        if (!mountedRef.current) return;
         setRemoteVideoTrack(null);
+        endCallRef.current();
       });
 
       room.on(RoomEvent.Disconnected, () => {
@@ -512,6 +632,16 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
         // call, so isCallerRef guards against mislabeling that case.
         if (roomName && isCallerRef.current) {
           logCallOnce(roomName, prev.callType, 'missed');
+          // ✅ NEW (fix #2): fire the missed-call push described above —
+          // see sendMissedCallPush's own comment for the one assumption
+          // this depends on server-side.
+          if (otherUserId) {
+            sendMissedCallPush({
+              calleeId: otherUserId, callerId: currentUserId,
+              callerName: displayName || 'Someone', callType: prev.callType,
+              roomName, conversationId: conversationId || '',
+            });
+          }
         }
       } else if (prev.isInCall && prev.remoteConnected && roomName) {
         // ✅ NEW: the call actually connected — log it as completed with
@@ -532,7 +662,15 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     setRemoteVideoTrack(null);
     isCallerRef.current = false;
     setCallState(CALL_INITIAL);
-  }, [conversationId, logCallOnce]);
+  }, [conversationId, logCallOnce, otherUserId, currentUserId, displayName]);
+
+  // ✅ NEW (fix #1): keep endCallRef pointed at the current endCall closure
+  // so the ParticipantDisconnected handler above (defined earlier, inside
+  // joinLiveKitRoom) always calls the up-to-date version — see the comment
+  // on endCallRef's declaration for why a ref is needed here at all.
+  useEffect(() => {
+    endCallRef.current = endCall;
+  }, [endCall]);
 
   // ✅ NEW: accept an incoming call — joins the same LiveKit room the
   // caller created (deterministic room name from the conversation id).
@@ -580,6 +718,15 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     setIncomingCall(null);
   }, [incomingCall, conversationId, logCallOnce]);
 
+  // ✅ NEW (fix #3): dismiss an incoming cowatch invite without joining —
+  // the "Dismiss" side of the banner. Accepting is just openCowatch(
+  // incomingCowatch.sessionId) from the screen component (below), which
+  // reuses the existing "join an already-active session" path.
+  const dismissCowatchInvite = useCallback(() => {
+    if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
+    setIncomingCowatch(null);
+  }, []);
+
   const toggleMute = useCallback(async () => {
     if (!roomRef.current) return;
     const next = !callState.isMuted;
@@ -611,6 +758,8 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     callState, incomingCall, localVideoTrack, remoteVideoTrack,
     startCall, endCall, acceptCall, declineCall,
     toggleMute, toggleCamera, toggleSpeaker,
+    // ✅ NEW (fix #3): incoming cowatch invite banner state + dismiss.
+    incomingCowatch, dismissCowatchInvite,
     // ✅ NEW: exposed so ChatScreen's autoAnswerCall effect (notification-
     // tap auto-answer) can join a room directly, the same safe way
     // acceptCall does, without needing incomingCall state to already be
@@ -1412,7 +1561,10 @@ export default function ChatScreen() {
   // from wherever the conversation list lives.
   const route = useRoute<any>();
   const navigation = useNavigation<any>();
-  const { id, otherUserId, otherName, otherPhoto, autoAnswerCall, autoAnswerCallType } = route.params || {};
+  // ✅ NEW (fix #2 — "Call back" from a missed-call notification):
+  // autoStartCall/autoStartCallType, set by callPushNavigation.ts's
+  // navigateToStartCall when that action is tapped.
+  const { id, otherUserId, otherName, otherPhoto, autoAnswerCall, autoAnswerCallType, autoStartCall, autoStartCallType } = route.params || {};
 
   // FIX: MainTabBar was always visible on this screen — it never told the
   // parent tab navigator to hide it. MainTabBar itself already knows how to
@@ -1471,6 +1623,8 @@ export default function ChatScreen() {
     startCall, endCall, acceptCall, declineCall,
     toggleMute, toggleCamera, toggleSpeaker, joinLiveKitRoom,
     setCallState,
+    // ✅ NEW (fix #3): incoming cowatch invite.
+    incomingCowatch, dismissCowatchInvite,
   } = useCall(user?.id || '', displayName, id || null, otherUserId || null);
 
   // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
@@ -1500,6 +1654,20 @@ export default function ChatScreen() {
       joinLiveKitRoom(`call_${id}`, callType);
     }
   }, [autoAnswerCall, autoAnswerCallType, id, joinLiveKitRoom]);
+
+  // ✅ NEW (fix #2 — "Call back" action): unlike autoAnswerCall above
+  // (which joins a room someone ELSE already opened), calling back means
+  // WE are the caller this time — startCall() is the right function here
+  // since it's the one that signals the other side + sends them a fresh
+  // call push, not joinLiveKitRoom (which only ever joins, never rings
+  // anyone).
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStartCall && !autoStartedRef.current && id) {
+      autoStartedRef.current = true;
+      startCall(id, autoStartCallType === 'video' ? 'video' : 'voice');
+    }
+  }, [autoStartCall, autoStartCallType, id, startCall]);
 
   const [streak, setStreak] = useState(0);
 
@@ -1992,6 +2160,38 @@ export default function ChatScreen() {
               </TouchableOpacity>
               <TouchableOpacity style={[styles.incomingBtn, styles.incomingAccept]} onPress={acceptCall}>
                 <Ionicons name={incomingCall?.callType === 'video' ? 'videocam' : 'call'} size={24} color="#000" />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ✅ NEW (fix #3): Incoming cowatch invite banner — shown the instant
+          the other person starts a watch-together session while this chat
+          is open, same as the incoming call banner above. */}
+      <Modal visible={!!incomingCowatch} transparent animationType="fade" statusBarTranslucent>
+        <View style={styles.incomingOverlay}>
+          <View style={styles.incomingCard}>
+            {incomingCowatch?.inviterPhoto
+              ? <Image source={{ uri: incomingCowatch.inviterPhoto }} style={styles.incomingAvatar} />
+              : <View style={[styles.incomingAvatar, styles.incomingAvatarPlaceholder]}>
+                  <Text style={styles.incomingAvatarInitial}>{(incomingCowatch?.inviterName || 'U')[0].toUpperCase()}</Text>
+                </View>}
+            <Text style={styles.incomingName}>{incomingCowatch?.inviterName || 'Someone'}</Text>
+            <Text style={styles.incomingSubtitle}>Wants to watch together…</Text>
+            <View style={styles.incomingActions}>
+              <TouchableOpacity style={[styles.incomingBtn, styles.incomingDecline]} onPress={dismissCowatchInvite}>
+                <Ionicons name="close" size={26} color="#fff" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.incomingBtn, styles.incomingAccept]}
+                onPress={() => {
+                  const sessionId = incomingCowatch?.sessionId;
+                  dismissCowatchInvite();
+                  if (sessionId) openCowatch(sessionId);
+                }}
+              >
+                <Ionicons name="play" size={24} color="#000" />
               </TouchableOpacity>
             </View>
           </View>

@@ -912,6 +912,37 @@ function broadcastCowatchSync(
   );
 }
 
+// ✅ NEW (fix #3 — "user B never gets an incoming cowatch invite"): pushes
+// an instant, in-app "wants to watch together" banner to the other person
+// IF their chat screen is currently mounted — the exact same realtime
+// mechanism chat/[id].tsx already uses for incoming voice/video calls
+// (`call_signal:${conversationId}`, see useCall() there). Previously the
+// only signal sent on session creation was notifyCowatchInvite (a push
+// notification), which only ever reaches a backgrounded/killed device with
+// a registered token — it does nothing for the extremely common case of
+// both people already having the app open, which is exactly why B saw
+// nothing. This is signaling-only and deliberately doesn't touch the DB.
+//
+// Supabase realtime requires a channel to reach SUBSCRIBED before send()
+// will actually deliver anything — unlike chat/[id].tsx's signalRef (kept
+// open for the screen's whole lifetime), this is a fire-and-forget channel
+// that exists just long enough to deliver one broadcast, then closes.
+function broadcastCowatchInvite(
+  conversationId: string,
+  payload: { inviterId: string; inviterName: string; inviterPhoto?: string; sessionId: string; conversationId: string }
+) {
+  const channel = supabase.channel(`call_signal:${conversationId}`, { config: { broadcast: { self: false } } });
+  channel.subscribe((status: string) => {
+    if (status === 'SUBSCRIBED') {
+      channel.send({ type: 'broadcast', event: 'cowatch_invite', payload })
+        .catch((e: any) => console.warn('broadcastCowatchInvite failed:', e))
+        .finally(() => { supabase.removeChannel(channel); });
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      supabase.removeChannel(channel);
+    }
+  });
+}
+
 // NEW: claim or release "host" control of a session.
 // Pass null to release control back to free-for-all mode.
 async function setSessionHost(sessionId: string, hostId: string | null) {
@@ -1506,6 +1537,7 @@ const FeedPostCard = memo(function FeedPostCard({
   post, isCurrent, userId, isOwnPost,
   onLike, onComment, onGift, onShare, onView, onDelete, itemHeight,
   syncedIsPlaying, onSyncPlayPause,
+  canControl, syncedSeek, onSyncSeek, onHeartbeat,
 }: {
   post: FeedPost; isCurrent: boolean; userId: string; isOwnPost: boolean;
   onLike: (post: FeedPost) => void;
@@ -1517,6 +1549,24 @@ const FeedPostCard = memo(function FeedPostCard({
   itemHeight: number;
   syncedIsPlaying?: boolean;   // ✅ play/pause sync from CoWatch partner
   onSyncPlayPause?: (playing: boolean) => void; // ✅ bubble play/pause up to CoWatch
+  // ✅ NEW (playback-position sync):
+  // canControl   — true if THIS device is allowed to drive the session
+  //                (host, or nobody's hosting yet). Only present at all
+  //                during an active cowatch session — undefined outside
+  //                one, so plain feed browsing is completely unaffected.
+  // syncedSeek   — the partner's most recent position broadcast, applied
+  //                below only when canControl is false (a follower should
+  //                never fight the host's position with its own drift).
+  // onSyncSeek   — bubble a manual scrub up to CoWatch (instant broadcast
+  //                + throttled DB write), same shape as onSyncPlayPause.
+  // onHeartbeat  — bubble periodic "still at Xms" pings up while hosting
+  //                and playing, so a follower's video can't silently drift
+  //                seconds away from the host's over a long clip without
+  //                either side ever pausing or scrubbing.
+  canControl?: boolean;
+  syncedSeek?: { ms: number; version: number };
+  onSyncSeek?: (ms: number) => void;
+  onHeartbeat?: (ms: number) => void;
 }) {
   const videoRef  = useRef<any>(null);
   const soundRef  = useRef<AudioPlayer | null>(null);
@@ -1528,6 +1578,31 @@ const FeedPostCard = memo(function FeedPostCard({
     if (!isCurrent || syncedIsPlaying === undefined) return;
     setIsPlaying(syncedIsPlaying);
   }, [syncedIsPlaying, isCurrent]);
+
+  // ✅ NEW (playback-position sync): apply the host's position to a
+  // follower's video. Guarded on `canControl === false` specifically (not
+  // just falsy) so this never fires outside an active session, where
+  // canControl is undefined and this device should just play normally.
+  // The `version` bump (not the raw ms) is the effect trigger — see
+  // syncedSeek's declaration in the parent for why a plain ms comparison
+  // isn't reliable here.
+  const lastAppliedSeekVersionRef = useRef(0);
+  useEffect(() => {
+    if (!isCurrent || canControl !== false || !syncedSeek) return;
+    if (syncedSeek.version === lastAppliedSeekVersionRef.current) return;
+    lastAppliedSeekVersionRef.current = syncedSeek.version;
+    // Small dead-zone: only actually seek if we've drifted more than ~1.2s
+    // from the host. Without this, a heartbeat landing 300ms off from our
+    // own onProgress tick would cause a visible micro-stutter every few
+    // seconds even when playback is already effectively in sync.
+    if (Math.abs(positionMs - syncedSeek.ms) > 1200 && videoRef.current) {
+      try {
+        videoRef.current.seek(syncedSeek.ms / 1000);
+        setPositionMs(syncedSeek.ms);
+      } catch (_) {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncedSeek, isCurrent, canControl]);
 
   // Animated watermark — moves to 4 corners like videos.tsx
   const wmX       = useRef(new Animated.Value(16)).current;
@@ -1767,13 +1842,23 @@ const FeedPostCard = memo(function FeedPostCard({
   // No separate status update handler needed
 
   const handleSeek = useCallback((ms: number) => {
+    // ✅ FIX (playback-position sync): previously ANY viewer could drag the
+    // seek bar and it would only ever affect their own device — never
+    // synced, and (for a follower) never even blocked, so scrubbing felt
+    // like it worked but silently desynced the two devices further. Now a
+    // follower's drag is a no-op on the video itself (their position will
+    // simply snap back next time the host's heartbeat/seek broadcast
+    // arrives), while a host's (or free-for-all) seek both applies locally
+    // AND bubbles up to broadcast to the partner instantly.
+    if (canControl === false) return;
     if (!videoRef.current) return;
     try {
       // react-native-video uses seconds, not milliseconds
       videoRef.current.seek(ms / 1000);
       setPositionMs(ms);
+      onSyncSeek?.(ms);
     } catch (_) {}
-  }, []);
+  }, [canControl, onSyncSeek]);
 
   const togglePlay = () => {
     const next = !isPlaying;
@@ -1832,6 +1917,15 @@ const FeedPostCard = memo(function FeedPostCard({
               onProgress={({ currentTime, seekableDuration }) => {
                 setPositionMs(currentTime * 1000);
                 if (seekableDuration) setDurationMs(seekableDuration * 1000);
+                // ✅ NEW (playback-position sync heartbeat): react-native-
+                // video fires onProgress roughly every 250ms, which is far
+                // too chatty to broadcast on every tick — onHeartbeat
+                // itself throttles to ~every 3s (see the parent's
+                // wiring), this just needs to offer it every tick so that
+                // throttle has fresh data to work with. Only ever passed
+                // down at all when canControl is true, so a follower's
+                // video progressing never fights the host's broadcasts.
+                if (canControl && isCurrent && isPlaying) onHeartbeat?.(currentTime * 1000);
               }}
               onEnd={() => { setIsPlaying(false); setShowEndScreen(true); }}
               onLoad={({ duration }) => { if (duration) setDurationMs(duration * 1000); }}
@@ -2469,6 +2563,24 @@ export default function CowatchScreen() {
   const isSyncingRef      = useRef(false);
   const syncPlayingRef    = useRef(false);          // ✅ tracks partner play/pause state
   const [syncedIsPlaying, setSyncedIsPlaying] = useState(false); // ✅ triggers re-render for FeedPostCard
+  // ✅ NEW (playback-position sync — "if A is at 01:26, B must be there
+  // too"): current_position was already defined in the DB row and the
+  // broadcast payload shape, but nothing ever actually READ it — every
+  // broadcast/write hard-coded current_position: 0, and handleRemoteSync
+  // never applied an incoming position to the video at all. Index and
+  // play/pause synced; the actual scrub location never did. syncedSeekRef
+  // carries {ms, version}: version increments on every incoming update so
+  // FeedPostCard's effect can fire even when the ms value repeats (e.g.
+  // two heartbeats landing on the same rounded second), which a plain ms
+  // comparison would miss.
+  const [syncedSeek, setSyncedSeek] = useState<{ ms: number; version: number }>({ ms: 0, version: 0 });
+  const lastHeartbeatSentRef = useRef(0); // throttles the host's outgoing position heartbeat
+  // ✅ NEW: the host's own live position, kept fresh by the video card's
+  // onHeartbeat/onSyncSeek callbacks below. Used so pause/resume/queue
+  // toggles broadcast the ACTUAL current position instead of hard-coding
+  // 0 (which used to snap both devices back to the start on every single
+  // pause) — reset to 0 explicitly wherever the post itself changes.
+  const positionMsRef = useRef(0);
   const chatFlatRef       = useRef<FlatList>(null);
   const feedTypeRef       = useRef<'index' | 'video'>('video');
   const postsRef          = useRef<FeedPost[]>([]);
@@ -2882,12 +2994,35 @@ export default function CowatchScreen() {
       syncChannelRef.current = subscribeCowatchSession(activeSession.id, handleRemoteSync);
       addSystemMessage(`Watch party started with ${otherName} 🎬`);
 
+      // ✅ FIX (bug #3): only signal an invite when THIS call actually
+      // created a brand-new session (matches the original !existingSessionId
+      // guard) — not when we're just joining a session someone else already
+      // started, which would otherwise "invite" them right back.
       if (!existingSessionId && conversationId) {
+        const inviterName = userProfile?.display_name || userProfile?.username || 'Someone';
+        // ✅ NEW: instant in-app banner for whoever has this chat open right
+        // now — see broadcastCowatchInvite above for why this was missing.
+        broadcastCowatchInvite(conversationId, {
+          inviterId: user.id,
+          inviterName,
+          // NOTE: this file consistently reads the current user's own photo
+          // as userProfile?.avatar_url elsewhere (see the Avatar components
+          // below) — matching that here, unlike chat/[id].tsx which reads
+          // userProfile?.photo_url for the same purpose. These two screens
+          // disagree on this field name; if invite avatars show up blank,
+          // check what useAuthStore()'s userProfile actually contains.
+          inviterPhoto: userProfile?.avatar_url || undefined,
+          sessionId: activeSession.id,
+          conversationId,
+        });
         try {
           const { data: convoData } = await supabase.from('conversations').select('user1_id, user2_id').eq('id', conversationId).single();
           if (convoData) {
             const inviteeId = convoData.user1_id === user.id ? convoData.user2_id : convoData.user1_id;
-            if (inviteeId) await notifyCowatchInvite(inviteeId, user.id, userProfile?.display_name || userProfile?.username || 'Someone', conversationId, activeSession.id);
+            // Push notification too, so it still reaches a backgrounded or
+            // fully-killed device that isn't sitting on the chat screen to
+            // receive the broadcast above.
+            if (inviteeId) await notifyCowatchInvite(inviteeId, user.id, inviterName, conversationId, activeSession.id);
           }
         } catch (notifyErr) { console.warn('notifyCowatchInvite failed:', notifyErr); }
       }
@@ -2904,6 +3039,7 @@ export default function CowatchScreen() {
       setCurrentIndex(prev => {
         if (prev !== newIndex && newIndex >= 0 && newIndex < postsRef.current.length) {
           feedRef.current?.scrollToIndex({ index: newIndex, animated: true });
+          positionMsRef.current = 0; // ✅ NEW: new post = starts at 0 (see positionMsRef's declaration) — matters if hosting changes hands later on this post
           return newIndex;
         }
         return prev;
@@ -2915,6 +3051,14 @@ export default function CowatchScreen() {
     if (typeof updatedSession.is_playing === 'boolean') {
       syncPlayingRef.current = updatedSession.is_playing;
       setSyncedIsPlaying(updatedSession.is_playing);
+    }
+
+    // ✅ NEW (playback-position sync): apply the partner's actual
+    // timestamp, not just play/pause + which post. This is what was
+    // silently missing before — current_position arrived in every
+    // broadcast/DB row but was never read here at all.
+    if (typeof updatedSession.current_position === 'number') {
+      setSyncedSeek(prev => ({ ms: updatedSession.current_position as number, version: prev.version + 1 }));
     }
 
     if (updatedSession.feed_type && updatedSession.feed_type !== feedTypeRef.current) {
@@ -3131,6 +3275,7 @@ export default function CowatchScreen() {
     globalAudioManager.stopCurrent();
     setCurrentIndex(nextIndex);
     feedRef.current?.scrollToIndex({ index: nextIndex, animated: true });
+    positionMsRef.current = 0; // ✅ NEW: new post = starts at 0, see comment on positionMsRef's declaration
     if (session) {
       isSyncingRef.current = true;
       // ✅ NEW: instant delivery to the partner over broadcast, while the
@@ -3150,8 +3295,14 @@ export default function CowatchScreen() {
     const nextPlaying = !syncedIsPlaying;
     setSyncedIsPlaying(nextPlaying);
     isSyncingRef.current = true;
-    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: nextPlaying, current_position: 0 });
-    syncFeedIndex(session.id, currentIndex, nextPlaying, 0).finally(() => {
+    // ✅ FIX (playback-position sync): this used to hard-code position
+    // back to 0 on every single pause/resume from the Queue tab — so
+    // pausing at 01:26 and hitting play again would snap the follower's
+    // video back to the start instead of resuming from where it actually
+    // was. positionMsRef tracks the host's live position (updated by the
+    // video card's onHeartbeat/onSyncSeek below), so this now preserves it.
+    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: nextPlaying, current_position: positionMsRef.current });
+    syncFeedIndex(session.id, currentIndex, nextPlaying, positionMsRef.current).finally(() => {
       setTimeout(() => { isSyncingRef.current = false; }, 600);
     });
   }, [session, syncedIsPlaying, currentIndex]);
@@ -3326,6 +3477,10 @@ export default function CowatchScreen() {
               globalAudioManager.stopCurrent();
               setCurrentIndex(idx);
               isSyncingRef.current = true;
+              // ✅ NEW: new post = starts at 0 for both — reset the
+              // tracked live position so a pause/resume on THIS post
+              // doesn't accidentally reuse the previous post's timestamp.
+              positionMsRef.current = 0;
               // ✅ NEW: this is the actual scroll handler — the hottest,
               // most latency-sensitive path in the whole sync system.
               // Broadcasting instantly here (DB write still happens in
@@ -3361,10 +3516,37 @@ export default function CowatchScreen() {
                   onSyncPlayPause={index === currentIndex && session && amIHost ? (playing: boolean) => {
                     // ✅ FIXED: user tapped play/pause — write to DB so partner syncs
                     isSyncingRef.current = true;
-                    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: playing, current_position: 0 });
-                    syncFeedIndex(session.id, currentIndex, playing, 0).finally(() => {
+                    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: playing, current_position: positionMsRef.current });
+                    syncFeedIndex(session.id, currentIndex, playing, positionMsRef.current).finally(() => {
                       setTimeout(() => { isSyncingRef.current = false; }, 600);
                     });
+                  } : undefined}
+                  // ✅ NEW (playback-position sync): canControl mirrors
+                  // amIHost, but only actually passed while a session
+                  // exists — undefined outside cowatch entirely, so a
+                  // normal solo feed card's seek bar behaves exactly as
+                  // it always did.
+                  canControl={index === currentIndex && session ? amIHost : undefined}
+                  syncedSeek={index === currentIndex ? syncedSeek : undefined}
+                  onSyncSeek={index === currentIndex && session && amIHost ? (ms: number) => {
+                    isSyncingRef.current = true;
+                    positionMsRef.current = ms;
+                    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: syncedIsPlaying, current_position: ms });
+                    syncFeedIndex(session.id, currentIndex, syncedIsPlaying, ms).finally(() => {
+                      setTimeout(() => { isSyncingRef.current = false; }, 600);
+                    });
+                  } : undefined}
+                  onHeartbeat={index === currentIndex && session && amIHost ? (ms: number) => {
+                    // Throttled to ~every 3s — broadcast only (no DB
+                    // write on every tick; a late-joiner or reconnecting
+                    // follower gets close enough from the DB row's last
+                    // real write, then the very next heartbeat corrects
+                    // the rest).
+                    const now = Date.now();
+                    if (now - lastHeartbeatSentRef.current < 3000) return;
+                    lastHeartbeatSentRef.current = now;
+                    positionMsRef.current = ms;
+                    broadcastCowatchSync(syncChannelRef.current, { current_post_index: currentIndex, is_playing: true, current_position: ms });
                   } : undefined}
                   onLike={handleLike}
                   onComment={setCommentPost}
