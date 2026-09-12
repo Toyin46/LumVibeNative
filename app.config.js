@@ -19,7 +19,7 @@ export default {
       "eas": {
         "projectId": "7c7127f1-b98d-4e09-b44b-68b0a05a434d"
       },
-      "livekitUrl": process.env.LIVEKIT_URL
+      "livekitUrl": "wss://lumvibe-fn3kjths.livekit.cloud" 
     },
         "android": {
       "package": "com.lumvibeapp2",
