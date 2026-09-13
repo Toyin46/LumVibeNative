@@ -154,16 +154,15 @@ async function registerCallPushToken(userId: string) {
 
     const projectId = (Constants.expoConfig?.extra as any)?.eas?.projectId;
     const tokenResp = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
-    // FIX: every other notification type (likes, comments, follows,
-    // messages — see lib/notifications.ts) reads the token from
-    // profiles.push_token, but this call-specific registration was only
-    // writing profiles.expo_push_token — a different column. Depending on
-    // which column your `send-call-push` Supabase Edge Function actually
-    // reads, that mismatch could mean call pushes silently never send.
-    // Writing to both removes the ambiguity without needing to touch the
-    // edge function itself.
-    await supabase.from('profiles').update({
-      expo_push_token: tokenResp.data,
+    // ✅ FIX (real root cause found): the `profiles` table this used to
+    // write to has ZERO rows — confirmed via a direct schema query. Every
+    // real user (display_name, photo_url, etc.) actually lives in
+    // `users`, which had no push_token column at all until now. Writing
+    // to `profiles` was a silent no-op the entire time: Supabase doesn't
+    // error on an UPDATE that matches 0 rows, it just does nothing.
+    // Requires: alter table public.users add column if not exists
+    // push_token text;
+    await supabase.from('users').update({
       push_token: tokenResp.data,
     }).eq('id', userId);
   } catch (e) {
@@ -787,7 +786,14 @@ interface MessageReaction {
 }
 interface Message {
   id: string; conversation_id: string; sender_id: string; created_at: string;
-  message_type: 'text' | 'voice' | 'image' | 'video' | 'gif' | 'sticker' | 'system' | 'call_log';
+  // ✅ FIX: TS2678 — 'cowatch_log' (added for fix #4, the inline "Watch
+  // Together" chat card) was used in the render switch below but never
+  // added to this union, so TypeScript rejected the comparison. No DB
+  // migration needed for this one specifically: 'call_log' cards are
+  // already rendering correctly in your screenshots, which proves
+  // messages.message_type accepts new string values fine (it's not a
+  // locked-down Postgres enum) — 'cowatch_log' will insert the same way.
+  message_type: 'text' | 'voice' | 'image' | 'video' | 'gif' | 'sticker' | 'system' | 'call_log' | 'cowatch_log';
   content?: string; media_url?: string; media_duration?: number;
   media_thumbnail?: string; shared_video_id?: string;
   shared_video_title?: string; shared_video_thumbnail?: string;
@@ -1490,6 +1496,31 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
               <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe, { fontWeight: '700' }]}>{label}</Text>
               <Text style={[styles.bubbleText, isMe ? { color: 'rgba(0,0,0,0.6)' } : { color: C.muted }, { fontSize: 12 }]}>
                 {subtitle}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        );
+      }
+
+      // ✅ NEW (fix #4 — cowatch should log inline like a call does): mirrors
+      // the 'call_log' case immediately above almost exactly. Inserted by
+      // cowatch.tsx's setupSession() the moment a NEW session is created
+      // (see insertCowatchLogMessage there) — joining an existing session
+      // someone else started does not insert a second one.
+      case 'cowatch_log': {
+        return (
+          <TouchableOpacity onLongPress={() => onLongPress(message)}
+            style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
+            <View style={{
+              width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center',
+              backgroundColor: isMe ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.08)',
+            }}>
+              <Ionicons name="film-outline" size={15} color={isMe ? '#000' : C.green} />
+            </View>
+            <View>
+              <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe, { fontWeight: '700' }]}>Watch Together</Text>
+              <Text style={[styles.bubbleText, isMe ? { color: 'rgba(0,0,0,0.6)' } : { color: C.muted }, { fontSize: 12 }]}>
+                {isMe ? 'You started a watch party' : 'Started a watch party'}
               </Text>
             </View>
           </TouchableOpacity>

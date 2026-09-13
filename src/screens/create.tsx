@@ -5197,20 +5197,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             effectIntensity: 1,
           };
 
-          if (addWatermark) {
-            const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
-            if (!logoAsset.downloaded) {
-              await logoAsset.downloadAsync();
-            }
-            const logoDestPath = `${FileSystem.cacheDirectory}watermark_logo.png`;
-            try {
-              await FileSystem.copyAsync({ from: logoAsset.localUri || logoAsset.uri, to: logoDestPath });
-              imgBakeOptions.watermarkPngPath = logoDestPath.replace('file://', '');
-              imgBakeOptions.watermarkUsername = imgUsername.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
-            } catch (copyErr) {
-              console.warn('Watermark logo copy failed (image path), continuing without watermark:', copyErr);
-            }
-          }
+          // ✅ MOVED: watermark baking for images now happens at download
+          // time in videos.tsx too, same as video — see that file. The
+          // `if (addWatermark)` block that used to populate
+          // imgBakeOptions.watermarkPngPath/watermarkUsername here has
+          // been removed; the FX-effect bake below is unaffected.
 
           if (imgFxEffect.glShaderEffect === 'hand_portal' && portalSceneUri) {
             try {
@@ -5577,56 +5568,26 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         }
         const filterDefForBake = FILTERS.find(f => f.id === selectedFilter) || null;
         const fxEffect = FX_EFFECTS.find(f => f.id === selectedFx);
-        // ✅ FIX: skip the effect bake entirely when the video was already
-        // captured with it composited in live — only watermark (handled
-        // separately above) would still be needed in that case.
-        const needsBake = addWatermark || (!!fxEffect && selectedFx !== 'fx_none' && !capturedWithLiveFx);
+        // ✅ MOVED: watermark baking now happens at download time in
+        // videos.tsx instead of here at upload time — see that file for
+        // the reasoning (removes the duplicate floating UI overlay that
+        // was showing on top of the permanently-baked one at the same
+        // time). Effects/FX baking below is completely untouched.
+        const needsBake = !!fxEffect && selectedFx !== 'fx_none' && !capturedWithLiveFx;
 
         let uriToUpload = mediaUri;
 
         if (needsBake) {
-          setUploadStage(addWatermark ? 'Baking watermark + effects into video...' : 'Baking effects into video...');
+          setUploadStage('Baking effects into video...');
           setUploadProgress(10);
           try {
             const bakeOptions: Record<string, any> = {};
 
-            if (addWatermark) {
-              const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
-              if (!logoAsset.downloaded) {
-                await logoAsset.downloadAsync();
-              }
-
-              // Bundled assets can resolve to a non-plain-filesystem URI that native
-              // Kotlin's BitmapFactory.decodeFile() can't read (it silently returns
-              // null instead of throwing). Copying to a known cache path guarantees
-              // a real file:// path every time, regardless of how the bundler
-              // resolved the original asset.
-              const logoDestPath = `${FileSystem.cacheDirectory}watermark_logo.png`;
-              let logoPath: string | undefined;
-              try {
-                await FileSystem.copyAsync({
-                  from: logoAsset.localUri || logoAsset.uri,
-                  to: logoDestPath,
-                });
-                logoPath = logoDestPath.replace('file://', '');
-              } catch (copyErr) {
-                console.warn('Watermark logo copy failed:', copyErr);
-              }
-
-              if (!logoPath) {
-                console.warn('Watermark skipped: could not resolve a readable logo file path', {
-                  uri: logoAsset.uri, localUri: logoAsset.localUri,
-                });
-                Alert.alert(
-                  'Watermark debug',
-                  `Could not resolve logo path.\nuri=${logoAsset.uri}\nlocalUri=${logoAsset.localUri}`
-                );
-              } else {
-                bakeOptions.watermarkPngPath = logoPath;
-                const safeUser = videoUsername.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
-                bakeOptions.watermarkUsername = safeUser;
-              }
-            }
+            // ✅ MOVED: the watermark PNG/username bakeOptions block that
+            // used to be here (behind `if (addWatermark)`) now runs at
+            // download time in videos.tsx instead. Nothing else in this
+            // bake pass changed — FX/shader options below are identical
+            // to before.
 
             if (fxEffect && selectedFx !== 'fx_none') {
               // ✅ FIX: skip re-applying the shader when the video was

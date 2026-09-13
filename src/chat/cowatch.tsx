@@ -943,6 +943,20 @@ function broadcastCowatchInvite(
   });
 }
 
+// ✅ NEW (fix #4 — cowatch should log inline like a call does): mirrors
+// insertCallLogMessage in chat/[id].tsx exactly. Fired once per NEW
+// session, same guard as broadcastCowatchInvite above (never for joining
+// an existing one).
+async function insertCowatchLogMessage(conversationId: string, senderId: string) {
+  try {
+    await supabase.from('messages').insert({
+      conversation_id: conversationId, sender_id: senderId,
+      message_type: 'cowatch_log',
+      content: JSON.stringify({ event: 'invite' }),
+    });
+  } catch (e) { console.warn('insertCowatchLogMessage error:', e); }
+}
+
 // NEW: claim or release "host" control of a session.
 // Pass null to release control back to free-for-all mode.
 async function setSessionHost(sessionId: string, hostId: string | null) {
@@ -3015,6 +3029,12 @@ export default function CowatchScreen() {
           sessionId: activeSession.id,
           conversationId,
         });
+        // ✅ NEW (fix #4): also log it inline in the DM conversation itself,
+        // same as a call — see the 'cowatch_log' case added in
+        // chat/[id].tsx. (Not to be confused with addSystemMessage above,
+        // which only posts into this Cowatch screen's own live chat
+        // overlay and never touches the real messages table.)
+        insertCowatchLogMessage(conversationId, user.id);
         try {
           const { data: convoData } = await supabase.from('conversations').select('user1_id, user2_id').eq('id', conversationId).single();
           if (convoData) {

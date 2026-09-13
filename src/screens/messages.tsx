@@ -450,6 +450,34 @@ const AV_COLORS = [
   { bg: '#2e1a1a', text: '#ff7043' }, { bg: '#1a2a1a', text: '#69f0ae' },
   { bg: '#2e1a2a', text: '#f06292' }, { bg: '#2a2a1a', text: '#f5c518' },
 ];
+// ✅ NEW (fix — raw JSON showing in the inbox preview): chat/[id].tsx's
+// call/cowatch log messages store machine-readable JSON in `content`
+// (e.g. {"callType":"video","outcome":"missed"}), and conversations.
+// last_message just mirrors that raw string — nothing between the DB and
+// this screen ever translated it into English before now, so the inbox
+// list showed the literal JSON text. This mirrors the exact same
+// parsing chat/[id].tsx's own 'call_log'/'cowatch_log' message renderer
+// already does, just condensed to a one-line preview instead of a full
+// card. Plain text messages (anything that isn't valid JSON in this
+// shape) pass through completely unchanged.
+function formatLastMessagePreview(raw?: string): string {
+  if (!raw) return 'Start a conversation 👋';
+  let parsed: any;
+  try { parsed = JSON.parse(raw); } catch (_) { return raw; } // not JSON — ordinary text message
+  if (parsed && typeof parsed === 'object' && parsed.callType) {
+    const isVideo = parsed.callType === 'video';
+    const outcome = parsed.outcome || 'completed';
+    const kind = isVideo ? 'Video call' : 'Voice call';
+    if (outcome === 'missed')   return `📞 Missed ${isVideo ? 'video ' : ''}call`;
+    if (outcome === 'declined') return `📞 ${kind} declined`;
+    return `📞 ${kind}`;
+  }
+  if (parsed && typeof parsed === 'object' && parsed.event === 'invite') {
+    return '🎬 Watch party invite';
+  }
+  return raw; // unrecognized JSON shape — show it as-is rather than guess
+}
+
 function getAvColor(str: string) {
   let hash = 0;
   for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
@@ -696,7 +724,7 @@ function ConvoItem({ convo, onPress }: { convo: Conversation; onPress: () => voi
         </View>
         <View style={styles.convoBottom}>
           <Text style={[styles.convoPreview, hasUnread && styles.convoPreviewUnread]} numberOfLines={1}>
-            {convo.last_message || 'Start a conversation 👋'}
+            {formatLastMessagePreview(convo.last_message)}
           </Text>
           {hasUnread
             ? <View style={styles.unreadBadge}>
@@ -796,7 +824,7 @@ function GroupCard({ group, onPress }: { group: Group; onPress: () => void }) {
           <Text style={styles.convoTime}>{group.member_count} members</Text>
         </View>
         <Text style={styles.convoPreview} numberOfLines={1}>
-          {group.last_message || group.description || 'No messages yet'}
+          {group.last_message ? formatLastMessagePreview(group.last_message) : (group.description || 'No messages yet')}
         </Text>
       </View>
       <Ionicons name="chevron-forward" size={16} color={C.muted2} />
