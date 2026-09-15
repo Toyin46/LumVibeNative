@@ -103,6 +103,29 @@ function navigateForPushData(
       // in chat/[id].tsx's registerCallPushToken) — don't navigate anywhere
       // if the person explicitly dismissed it rather than tapping to join.
       if (actionIdentifier === 'dismiss') break;
+      // ✅ FIX (fix #3 continued — cowatch parity with calls): only the
+      // explicit 'join' action button jumps straight into the Cowatch
+      // screen now. A plain tap on the notification body — which, same as
+      // calls, is effectively the ONLY thing that happens on Android when
+      // the app was backgrounded/killed, since action buttons don't render
+      // in that state — now lands on the chat screen with the real
+      // Join/Dismiss chooser banner instead of silently auto-joining a
+      // watch session with no confirmation shown at all.
+      if (actionIdentifier !== 'join' && data.conversationId) {
+        nav.navigate('Main', {
+          screen: 'Messages',
+          params: {
+            screen: 'ChatDM',
+            params: {
+              id: data.conversationId,
+              promptIncomingCowatch: true,
+              promptCowatchSessionId: data.sessionId,
+              promptCowatchInviterName: data.otherName || 'Someone',
+            },
+          },
+        });
+        break;
+      }
       if (data.conversationId && data.sessionId) {
         nav.navigate('Main', {
           screen: 'Messages',

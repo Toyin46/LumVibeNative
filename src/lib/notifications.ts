@@ -6,7 +6,11 @@
 //   2. Push notifications (sent via Expo Push API to device)
 //
 // HOW PUSH WORKS:
-//   • Each user's Expo push token is saved in profiles.push_token
+//   • Each user's Expo push token is saved in users.push_token
+//     (✅ FIX: was profiles.push_token — that table has zero real user
+//     rows, confirmed via a direct schema query. Every actual user lives
+//     in `users`, which needed the column added: see
+//     `alter table public.users add column if not exists push_token text;`)
 //   • When an event fires (like, comment, cowatch invite, etc.)
 //     we insert a row in `notifications` AND call Expo's push API
 //   • The push arrives on the device even when the app is closed
@@ -21,11 +25,11 @@ const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 // INTERNAL HELPERS
 // ─────────────────────────────────────────────────────────────
 
-/** Fetch the push token for a given user from their profile */
+/** Fetch the push token for a given user */
 async function getPushToken(userId: string): Promise<string | null> {
   try {
     const { data } = await supabase
-      .from('profiles')
+      .from('users')
       .select('push_token')
       .eq('id', userId)
       .single();
@@ -260,7 +264,7 @@ export async function notifyCowatchInvite(
         // is the high-importance channel chat/[id].tsx already creates
         // for incoming calls; reusing it is what actually makes this pop
         // up over other apps / the lock screen the same way a call does.
-        channelId: 'calls',
+        channelId: 'calls_v2', // ✅ FIX: renamed from 'calls' — see the comment on registerCallPushToken in chat/[id].tsx (Android permanently locks a channel's sound/importance the first time that ID is ever created on a device; the old 'calls' channel got stuck silent forever)
         // ✅ NEW: lets the notification carry real Join/Dismiss action
         // buttons on the banner itself, matching the 'cowatch_invite'
         // category chat/[id].tsx registers client-side (Android + iOS).

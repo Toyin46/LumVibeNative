@@ -76,15 +76,28 @@ const REACTIONS    = ['❤️','😂','🔥','😮','😢','👏','💀','🙌']
 async function registerCallPushToken(userId: string) {
   try {
     if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('calls', {
+      // ✅ FIX (notifications arriving silently, no ring/sound): Android
+      // PERMANENTLY LOCKS a notification channel's sound/importance/
+      // vibration the first time that channel ID is ever created on a
+      // device — no later code change to the same ID can touch it again,
+      // ever, short of the user manually deleting it in system settings
+      // or uninstalling the app. The old 'calls' channel got created at
+      // some point during testing without a working sound, and every
+      // device that ever ran that code is now stuck silent on it forever.
+      // Renaming to 'calls_v2' forces every device to create a brand-new
+      // channel with the settings below actually applied. This must stay
+      // in sync with the channelId used in send-call-push (edge function)
+      // and lib/notifications.ts's cowatch invite push — all three now
+      // say 'calls_v2'.
+      await Notifications.setNotificationChannelAsync('calls_v2', {
         name: 'Calls',
         importance: Notifications.AndroidImportance.MAX,
-        // FIX: passing the literal string 'default' here isn't Android's
-        // built-in system sound — expo-notifications treats it as a custom
-        // sound filename it should bundle, and throws when no such file is
-        // registered in the expo-notifications config plugin's `sounds`
-        // array. Omitting `sound` entirely just uses the OS default
-        // notification sound, which is what was actually wanted here.
+        // 'default' is the documented, correct value for "play the
+        // device's default notification sound" — safe to set explicitly
+        // on a channel (as opposed to some other place a bad value may
+        // have been passed before, causing the crash the removed comment
+        // here described).
+        sound: 'default',
         vibrationPattern: [0, 500, 250, 500],
         lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
       });
@@ -717,6 +730,39 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     setIncomingCall(null);
   }, [incomingCall, conversationId, logCallOnce]);
 
+  // ✅ NEW (fix — plain notification tap should show the chooser, not
+  // silently auto-answer): Android does not render the Decline/Answer
+  // action buttons on a notification delivered while the app is
+  // backgrounded/killed (a documented expo-notifications limitation, not
+  // something fixable from this side — see expo/expo#36282, #31503).
+  // That means, in practice, EVERY tap on a killed-app call notification
+  // arrives here with no action identifier at all — previously that was
+  // treated the same as "Answer", auto-joining LiveKit audio with zero UI
+  // reflecting it (you'd just start hearing sound while looking at the
+  // normal chat screen). This instead synthesizes the exact same
+  // incomingCall state the realtime in-app banner uses, so the person
+  // sees the real Answer/Decline choice once the app actually opens —
+  // just one tap later than the buttons themselves would have been.
+  const presentIncomingCallPrompt = useCallback((payload: IncomingCall) => {
+    setIncomingCall(payload);
+    if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
+    ringTimerRef.current = setTimeout(() => {
+      setIncomingCall(prev => (prev?.roomName === payload.roomName ? null : prev));
+    }, 30000);
+  }, []);
+
+  // ✅ NEW (fix #3 continued — cowatch invite parity): same idea as
+  // presentIncomingCallPrompt above, but for cowatch. Lets a push-notification
+  // tap show the real Join/Dismiss banner instead of requiring the chat
+  // screen to have already been open when the invite was sent.
+  const presentIncomingCowatchPrompt = useCallback((payload: IncomingCowatch) => {
+    setIncomingCowatch(payload);
+    if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
+    cowatchRingTimerRef.current = setTimeout(() => {
+      setIncomingCowatch(prev => (prev?.sessionId === payload.sessionId ? null : prev));
+    }, 30000);
+  }, []);
+
   // ✅ NEW (fix #3): dismiss an incoming cowatch invite without joining —
   // the "Dismiss" side of the banner. Accepting is just openCowatch(
   // incomingCowatch.sessionId) from the screen component (below), which
@@ -759,6 +805,8 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     toggleMute, toggleCamera, toggleSpeaker,
     // ✅ NEW (fix #3): incoming cowatch invite banner state + dismiss.
     incomingCowatch, dismissCowatchInvite,
+    // ✅ NEW: synthesize either prompt from route params (notification tap).
+    presentIncomingCallPrompt, presentIncomingCowatchPrompt,
     // ✅ NEW: exposed so ChatScreen's autoAnswerCall effect (notification-
     // tap auto-answer) can join a room directly, the same safe way
     // acceptCall does, without needing incomingCall state to already be
@@ -1592,10 +1640,12 @@ export default function ChatScreen() {
   // from wherever the conversation list lives.
   const route = useRoute<any>();
   const navigation = useNavigation<any>();
-  // ✅ NEW (fix #2 — "Call back" from a missed-call notification):
-  // autoStartCall/autoStartCallType, set by callPushNavigation.ts's
-  // navigateToStartCall when that action is tapped.
-  const { id, otherUserId, otherName, otherPhoto, autoAnswerCall, autoAnswerCallType, autoStartCall, autoStartCallType } = route.params || {};
+  // ✅ NEW (fix — plain notification tap → chooser, not silent auto-answer):
+  // set by callPushNavigation.ts's navigateToIncomingPrompt when a call
+  // notification is tapped WITHOUT an explicit Answer/Decline action
+  // (the common case on Android, since those buttons don't render on a
+  // backgrounded/killed app — see the comment on presentIncomingCallPrompt).
+  const { id, otherUserId, otherName, otherPhoto, autoAnswerCall, autoAnswerCallType, autoStartCall, autoStartCallType, promptIncomingCall, promptCallType, promptRoomName, promptIncomingCowatch, promptCowatchSessionId, promptCowatchInviterName } = route.params || {};
 
   // FIX: MainTabBar was always visible on this screen — it never told the
   // parent tab navigator to hide it. MainTabBar itself already knows how to
@@ -1656,6 +1706,7 @@ export default function ChatScreen() {
     setCallState,
     // ✅ NEW (fix #3): incoming cowatch invite.
     incomingCowatch, dismissCowatchInvite,
+    presentIncomingCallPrompt, presentIncomingCowatchPrompt,
   } = useCall(user?.id || '', displayName, id || null, otherUserId || null);
 
   // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
@@ -1699,6 +1750,40 @@ export default function ChatScreen() {
       startCall(id, autoStartCallType === 'video' ? 'video' : 'voice');
     }
   }, [autoStartCall, autoStartCallType, id, startCall]);
+
+  // ✅ NEW (fix — plain call notification tap shows the real chooser):
+  // synthesizes the exact same incomingCall banner the in-app realtime
+  // path uses, once, from route params instead of requiring the
+  // `call_signal` broadcast to have arrived while this screen was mounted.
+  const promptedCallRef = useRef(false);
+  useEffect(() => {
+    if (promptIncomingCall && !promptedCallRef.current && id && otherUserId) {
+      promptedCallRef.current = true;
+      presentIncomingCallPrompt({
+        callerId: otherUserId,
+        callerName: otherName || 'Someone',
+        callerPhoto: otherPhoto,
+        callType: promptCallType === 'video' ? 'video' : 'voice',
+        roomName: promptRoomName || `call_${id}`,
+      });
+    }
+  }, [promptIncomingCall, promptCallType, promptRoomName, id, otherUserId, otherName, otherPhoto, presentIncomingCallPrompt]);
+
+  // ✅ NEW (fix #3 — cowatch notification tap shows the real chooser):
+  // same idea, for a cowatch invite tapped from the notification tray.
+  const promptedCowatchRef = useRef(false);
+  useEffect(() => {
+    if (promptIncomingCowatch && !promptedCowatchRef.current && id && promptCowatchSessionId) {
+      promptedCowatchRef.current = true;
+      presentIncomingCowatchPrompt({
+        inviterId: otherUserId || '',
+        inviterName: promptCowatchInviterName || otherName || 'Someone',
+        inviterPhoto: otherPhoto,
+        sessionId: promptCowatchSessionId,
+        conversationId: id,
+      });
+    }
+  }, [promptIncomingCowatch, promptCowatchSessionId, promptCowatchInviterName, id, otherUserId, otherName, otherPhoto, presentIncomingCowatchPrompt]);
 
   const [streak, setStreak] = useState(0);
 

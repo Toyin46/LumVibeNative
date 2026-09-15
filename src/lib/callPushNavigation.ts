@@ -49,6 +49,32 @@ Notifications.setNotificationHandler({
   }),
 });
 
+// ✅ NEW (fix — plain tap should show the chooser, not auto-answer): lands
+// on the chat with enough info for chat/[id].tsx's presentIncomingCallPrompt
+// effect to synthesize the real Answer/Decline banner, instead of silently
+// joining LiveKit audio with no UI reflecting it. This is now the default
+// path for any tap that isn't the explicit 'answer' action — which, on
+// Android, is effectively every tap while the app was backgrounded/killed,
+// since those action buttons don't render in that state at all (see the
+// comment on presentIncomingCallPrompt in chat/[id].tsx for why).
+function navigateToIncomingPrompt(navRef: NavigationContainerRef<any>, data: any) {
+  if (data?.type !== 'incoming_call') return;
+  navRef.navigate('Main', {
+    screen: 'Messages',
+    params: {
+      screen: 'ChatDM',
+      params: {
+        id: data.conversationId,
+        otherUserId: data.callerId,
+        otherName: data.callerName,
+        promptIncomingCall: true,
+        promptCallType: data.callType,
+        promptRoomName: data.roomName,
+      },
+    },
+  });
+}
+
 function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
   if (data?.type !== 'incoming_call') return;
   // FIX: 'Messages' is a tab nested inside the root Stack's 'Main' screen
@@ -181,7 +207,13 @@ function handleCallResponse(navRef: NavigationContainerRef<any>, data: any, acti
   }
   if (actionIdentifier === 'decline') {
     navigateToChatOnly(navRef, data);
-  } else {
+  } else if (actionIdentifier === 'answer') {
+    // Only reachable when the platform actually rendered the action
+    // button (rare on Android in background/killed state — see above).
     navigateToCall(navRef, data);
+  } else {
+    // ✅ FIX: plain tap, no explicit action — this used to fall through to
+    // navigateToCall (auto-answer). Now shows the real chooser instead.
+    navigateToIncomingPrompt(navRef, data);
   }
 }
