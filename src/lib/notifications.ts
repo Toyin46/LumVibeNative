@@ -128,20 +128,24 @@ async function sendPushAndStore({
 // PUBLIC NOTIFICATION FUNCTIONS
 // ─────────────────────────────────────────────────────────────
 
-/** Like — deep-links to the post */
+/** Like — deep-links to the post.
+ * ✅ EXTENDED: coinAmount is optional, added so notificationHelpers.ts's
+ * "liked with coins attached" variant (its own type: 'coin') can delegate
+ * here instead of needing a second near-duplicate function. */
 export async function notifyPostLike(
   postOwnerId: string,
   likerId: string,
   likerUsername: string,
   postId: string,
+  coinAmount?: number,
 ) {
   if (postOwnerId === likerId) return;
   await sendPushAndStore({
     recipientUserId: postOwnerId,
     fromUserId:      likerId,
-    title:           `${likerUsername} liked your post`,
-    body:            'Tap to see your post',
-    type:            'like',
+    title:           coinAmount ? `${likerUsername} sent ${coinAmount} coins! 💰` : `${likerUsername} liked your post`,
+    body:            coinAmount ? 'They loved your post so much they sent coins!' : 'Tap to see your post',
+    type:            coinAmount ? 'coin' : 'like',
     postId,
     data: { screen: '/post/[id]', id: postId },
   });
@@ -184,6 +188,52 @@ export async function notifyFollow(
     body:            'Tap to see their profile',
     type:            'follow',
     data: { screen: '/user/[id]', id: followerId },
+  });
+}
+
+/** New post — deep-links straight to the post, same as like/comment.
+ * ✅ NEW: fixes "new post from someone you follow" not existing at all —
+ * confirmed missing by reading this file in full. Called once per
+ * follower from create.tsx right after a successful, immediately-published
+ * post (never for scheduled posts — those aren't live yet, and there's no
+ * scheduled job in this codebase to fire this later when they do go live). */
+export async function notifyNewPost(
+  followerId: string,
+  posterId: string,
+  posterUsername: string,
+  postId: string,
+) {
+  if (followerId === posterId) return;
+  await sendPushAndStore({
+    recipientUserId: followerId,
+    fromUserId:      posterId,
+    title:           `${posterUsername} just posted`,
+    body:            'Tap to check it out',
+    type:            'new_post',
+    postId,
+    data: { screen: '/post/[id]', id: postId },
+  });
+}
+
+/** Badge earned — deep-links to the Profile screen's badges section.
+ * ✅ NEW: profile.tsx's checkAndAwardBadges only ever inserted a row into
+ * the in-app `notifications` table directly — it never went through this
+ * file's push pipeline at all, confirmed by reading that function. That
+ * in-app insert is left completely alone (still happens exactly as
+ * before); this just ADDS the missing real push notification alongside it. */
+export async function notifyBadgeEarned(
+  userId: string,
+  badgeName: string,
+  badgeIcon: string,
+  reward: string,
+) {
+  await sendPushAndStore({
+    recipientUserId: userId,
+    fromUserId:      userId, // no "other user" involved — self/system achievement
+    title:           `Badge Earned! ${badgeIcon}`,
+    body:            `You earned "${badgeName}"! Reward: ${reward}`,
+    type:            'achievement',
+    data: { screen: '/profile', openBadgesModal: 'true' },
   });
 }
 
@@ -293,6 +343,9 @@ export async function notifyNewMessage(
   senderUsername: string,
   conversationId: string,
   messagePreview: string,
+  // ✅ EXTENDED: optional, defaulted — any existing caller that doesn't
+  // pass this still compiles and behaves exactly as before.
+  senderPhoto?: string,
 ) {
   if (recipientUserId === senderId) return;
   const preview = messagePreview.length > 60
@@ -304,6 +357,52 @@ export async function notifyNewMessage(
     title:      senderUsername,
     body:       preview,
     type:       'message',
-    data: { screen: '/chat/[id]', id: conversationId },
+    data: { screen: '/chat/[id]', id: conversationId, senderPhoto: senderPhoto || '' },
+  });
+}
+
+/** Mention — deep-links to the post the mention happened in.
+ * ✅ NEW: notificationHelpers.ts had this concept already but was
+ * sending it through the broken pushNotifications.ts pipeline. */
+export async function notifyMention(
+  mentionedUserId: string,
+  mentionerId: string,
+  mentionerUsername: string,
+  postId: string,
+  commentText: string,
+) {
+  if (mentionedUserId === mentionerId) return;
+  const preview = commentText.length > 50 ? commentText.slice(0, 47) + '…' : commentText;
+  await sendPushAndStore({
+    recipientUserId: mentionedUserId,
+    fromUserId:      mentionerId,
+    title:           `${mentionerUsername} mentioned you`,
+    body:            preview,
+    type:            'mention',
+    postId,
+    data: { screen: '/post/[id]', id: postId },
+  });
+}
+
+/** Marketplace order — deep-links to the seller's Orders list.
+ * ✅ NEW: same reason as notifyMention — existed conceptually, was going
+ * through the broken pipeline. Main → Market → Orders confirmed against
+ * MarketplaceStack.tsx/MainTabs.tsx (no orderId is available to this
+ * function today, so this links to the list rather than one specific
+ * order — pass an orderId through here later if you want the exact one). */
+export async function notifyMarketplaceOrder(
+  sellerId: string,
+  buyerId: string,
+  buyerUsername: string,
+  listingTitle: string,
+) {
+  if (sellerId === buyerId) return;
+  await sendPushAndStore({
+    recipientUserId: sellerId,
+    fromUserId:      buyerId,
+    title:           'New Order! 🛍️',
+    body:            `${buyerUsername} ordered "${listingTitle}"`,
+    type:            'marketplace',
+    data: { screen: 'Orders' },
   });
 } 

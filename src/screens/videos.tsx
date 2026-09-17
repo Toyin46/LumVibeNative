@@ -1935,13 +1935,17 @@ export default function VideosScreen() {
       const result = await Share.share({ message: `Check out this video by @${post.username} on LumVibe!\n\n${post.caption || ''}\n\n${deepLink}`, title: `Video by @${post.username}` });
       if (result.action === Share.sharedAction && post.user_id !== userId) {
         try { const { data: ownerData } = await supabase.from('users').select('points').eq('id', post.user_id).single(); if (ownerData) { const multipliers = await getOwnerBadgeMultipliers(post.user_id); await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.sharePoints }).eq('id', post.user_id); } } catch (e) {}
+        // ✅ NEW (weekly leaderboard): shares have no DB table to trigger
+        // from, so this is the client-side equivalent of the like/comment/
+        // post triggers in weekly_leaderboard.sql — same "share = 2 weekly
+        // points" default, easy to change here if you want a different value.
+        supabase.rpc('increment_weekly_points', { target_user_id: post.user_id, amount: 2 }).then(() => {}, (e: any) => console.warn('weekly share points error:', e));
       }
     } catch (e: any) { console.error('Share error:', e); }
   }, [userId]);
 
   const handleSaveMedia = useCallback(async (post: Post) => {
     if (!post.media_url) return;
-    const mediaUri = post.media_url;
     // Legacy posts from before this change may still have a real
     // pre-baked watermarked_url — honor that untouched. Everything
     // posted after this change relies on has_watermark + baking here
@@ -1979,7 +1983,7 @@ export default function VideosScreen() {
               // watermark into THIS copy only — the in-feed/original file
               // on the server is never touched or replaced.
               const cleanUri = `${cacheDir}clean_${outFileName}`;
-              const downloadResult = await FileSystem.downloadAsync(mediaUri, cleanUri);
+              const downloadResult = await FileSystem.downloadAsync(post.media_url!, cleanUri);
               if (downloadResult.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
 
               try {
@@ -2005,7 +2009,7 @@ export default function VideosScreen() {
               }
             } else {
               // No watermark wanted at all — plain download, as before.
-              const downloadResult = await FileSystem.downloadAsync(mediaUri, finalUri);
+              const downloadResult = await FileSystem.downloadAsync(post.media_url!, finalUri);
               if (downloadResult.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
             }
 

@@ -57,7 +57,7 @@ Notifications.setNotificationHandler({
 // Android, is effectively every tap while the app was backgrounded/killed,
 // since those action buttons don't render in that state at all (see the
 // comment on presentIncomingCallPrompt in chat/[id].tsx for why).
-function navigateToIncomingPrompt(navRef: NavigationContainerRef<any>, data: any) {
+export function navigateToIncomingPrompt(navRef: NavigationContainerRef<any>, data: any) {
   if (data?.type !== 'incoming_call') return;
   navRef.navigate('Main', {
     screen: 'Messages',
@@ -75,7 +75,7 @@ function navigateToIncomingPrompt(navRef: NavigationContainerRef<any>, data: any
   });
 }
 
-function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
+export function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
   if (data?.type !== 'incoming_call') return;
   // FIX: 'Messages' is a tab nested inside the root Stack's 'Main' screen
   // (see RootNavigator.tsx -> MainTabs.tsx), not a root-level screen name
@@ -113,7 +113,7 @@ function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
 // ✅ FIX (fix #2 — missed calls): also handles 'missed_call' pushes now,
 // so tapping the notification body (or its "Message" action) just opens
 // the chat, matching image 3's "Message" button.
-function navigateToChatOnly(navRef: NavigationContainerRef<any>, data: any) {
+export function navigateToChatOnly(navRef: NavigationContainerRef<any>, data: any) {
   if (data?.type !== 'incoming_call' && data?.type !== 'missed_call') return;
   navRef.navigate('Main', {
     screen: 'Messages',
@@ -134,7 +134,7 @@ function navigateToChatOnly(navRef: NavigationContainerRef<any>, data: any) {
 // autoStartCallType from route params and calls startCall() once on
 // mount — the outbound-call equivalent of the existing autoAnswerCall
 // effect there.
-function navigateToStartCall(navRef: NavigationContainerRef<any>, data: any) {
+export function navigateToStartCall(navRef: NavigationContainerRef<any>, data: any) {
   if (data?.type !== 'missed_call') return;
   navRef.navigate('Main', {
     screen: 'Messages',

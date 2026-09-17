@@ -43,7 +43,7 @@ import {
 import { Feather } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { generateReferralCode, processReferralReward } from '../utils/referralRewards';
-import { savePendingReferral } from '../utils/referralUtils';
+import { savePendingReferral, peekPendingReferralCode } from '../utils/referralUtils';
 import { useNavigation } from '@react-navigation/native';
 import * as Contacts from 'expo-contacts';
 
@@ -405,6 +405,21 @@ export default function SignupScreen() {
 
   const [showContactInvite,   setShowContactInvite]   = useState(false);
   const [newReferralCode,     setNewReferralCode]      = useState('');
+
+  // ✅ NEW: prefills the referral field for someone who arrived via a
+  // deep link (lumvibe.site/invite?ref=CODE) instead of typing a code by
+  // hand. Without this, that code only ever got applied if the account
+  // also needed email verification (the checkAndApplyPendingReferral
+  // path in login.tsx) — anyone who signs up with an immediate session
+  // would have had the deep-link code sit unused in AsyncStorage, since
+  // handleSignup below only ever reads this text field's state. A
+  // non-destructive peek (not the clearing checkAndApplyPendingReferral)
+  // on purpose — this only fills the box, it doesn't apply anything;
+  // handleSignup's existing logic still does the actual applying, exactly
+  // as if the person had typed the code in themselves.
+  React.useEffect(() => {
+    peekPendingReferralCode().then(code => { if (code) setReferralCode(code); });
+  }, []);
 
   const handleSignup = async () => {
     if (!email || !password || !username || !displayName) {

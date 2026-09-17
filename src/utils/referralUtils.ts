@@ -331,6 +331,25 @@ export const savePendingReferral = async (code: string): Promise<void> => {
   }
 };
 
+// ✅ NEW: non-destructive read, unlike checkAndApplyPendingReferral below
+// (which clears it after applying). This is for signup.tsx to prefill the
+// "Referral Code" text field for someone who arrived via a deep link
+// instead of typing a code in by hand — without this, that case fell
+// through a real gap: checkAndApplyPendingReferral only ever gets called
+// from login.tsx, on the *second* app open (after email verification).
+// Someone whose account doesn't need email verification finishes signup.tsx's
+// immediate-session path in one shot, which only ever reads the
+// `referralCode` text field state — never AsyncStorage — so a
+// deep-link-saved code would otherwise sit there completely unused.
+export const peekPendingReferralCode = async (): Promise<string | null> => {
+  try {
+    return await AsyncStorage.getItem(PENDING_REFERRAL_KEY);
+  } catch (e) {
+    console.error('peekPendingReferralCode error:', e);
+    return null;
+  }
+};
+
 /**
 * Save a pending post destination from a deep link URL.
 * Call this when the app receives a lumvibe.site/post/ID or /video/ID link.
@@ -403,6 +422,33 @@ export const getAndClearPendingPost = async (): Promise<{
     return null;
   } catch (e) {
     console.error('getAndClearPendingPost error:', e);
+    return null;
+  }
+};
+
+// ✅ NEW: same deferred pattern as savePendingPost/getAndClearPendingPost
+// above, for cowatch invite links (lumvibe.site/cowatch/<sessionId>).
+// Called from src/lib/useDeepLinks.ts's Linking listener.
+const PENDING_COWATCH_KEY = 'lumvibe_pending_cowatch';
+
+export const savePendingCowatch = async (sessionId: string): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(PENDING_COWATCH_KEY, sessionId);
+    console.log(`📌 Saved pending cowatch session: ${sessionId}`);
+  } catch (e) {
+    console.error('savePendingCowatch error:', e);
+  }
+};
+
+export const getAndClearPendingCowatch = async (): Promise<string | null> => {
+  try {
+    const sessionId = await AsyncStorage.getItem(PENDING_COWATCH_KEY);
+    if (!sessionId) return null;
+    await AsyncStorage.removeItem(PENDING_COWATCH_KEY);
+    console.log(`📌 Retrieved pending cowatch session: ${sessionId}`);
+    return sessionId;
+  } catch (e) {
+    console.error('getAndClearPendingCowatch error:', e);
     return null;
   }
 }; 

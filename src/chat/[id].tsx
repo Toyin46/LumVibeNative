@@ -175,8 +175,16 @@ async function registerCallPushToken(userId: string) {
     // error on an UPDATE that matches 0 rows, it just does nothing.
     // Requires: alter table public.users add column if not exists
     // push_token text;
+    // ✅ NEW (iOS/Android divergent call push): send-call-push needs to
+    // know which platform it's sending to, since Android gets a data-only
+    // message (for the notifee full-screen ring) and iOS gets a normal
+    // visible notification (no CallKit build exists for iOS yet — a
+    // silent data-only push would show NOTHING on iOS, which would be
+    // worse than what existed before). Requires: alter table public.users
+    // add column if not exists push_platform text;
     await supabase.from('users').update({
       push_token: tokenResp.data,
+      push_platform: Platform.OS,
     }).eq('id', userId);
   } catch (e) {
     console.error('registerCallPushToken error:', e);

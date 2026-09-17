@@ -15,6 +15,14 @@
 // A plain navigation.navigate('Cowatch', ...) from a sibling tab won't
 // find it — and the screen name must match this file exactly ('Cowatch',
 // not 'CoWatch'), since React Navigation route names are case-sensitive.
+//
+// ✅ NEW: sessionId added to Cowatch's params. cowatch.tsx already read
+// this off route.params (route.params cast with an inline type that
+// included it), but it was missing from this shared param list — this
+// just makes the type match what the screen already does at runtime.
+// It's what src/lib/useCowatchDeepLink.ts passes for someone joining via
+// a shared invite link (conversationId is '' in that case — see the
+// isExternalInvite branch in cowatch.tsx's setupSession).
 
 export type ChatStackParamList = {
   MessagesHome: undefined; // existing inbox screen (screens/messages.tsx)
@@ -24,7 +32,7 @@ export type ChatStackParamList = {
   NewCircle:    undefined;
   GroupChat:    { id: string };
   Circle:       { id: string };
-  Cowatch:      { conversationId: string; otherName: string; otherPhoto: string; isAiMatch?: string };
+  Cowatch:      { conversationId: string; otherName: string; otherPhoto: string; isAiMatch?: string; sessionId?: string };
   GroupInfo:    { id: string };
   CircleSettings: { id: string };
 }; 

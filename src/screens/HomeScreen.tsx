@@ -2058,6 +2058,9 @@ export default function HomeScreen() {
           const { data: ownerData } = await supabase.from('users').select('points').eq('id', post.user_id).single();
           if (ownerData) { const multipliers = await getOwnerBadgeMultipliers(post.user_id); await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.sharePoints }).eq('id', post.user_id); }
         } catch (e) {}
+        // ✅ NEW (weekly leaderboard): see the matching comment in
+        // videos.tsx's handleShare — same reasoning, same default value.
+        supabase.rpc('increment_weekly_points', { target_user_id: post.user_id, amount: 2 }).then(() => {}, (e: any) => console.warn('weekly share points error:', e));
       }
     } catch (e: any) { console.error('Share error:', e); }
   }, [userId]);

@@ -30,7 +30,12 @@ import type { NavigationContainerRef } from '@react-navigation/native';
 
 // Matches PushNotificationData in utils/pushNotifications.ts — the only
 // types actually ever sent via push right now.
-type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message' | 'cowatch_invite';
+type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'message' | 'cowatch_invite'
+  // ✅ FIX: TS2678 — these three were added as switch cases below but
+  // never added here, so TypeScript rejected comparing data.type against
+  // them. 'call'/'missed_call' are handled by callPushNavigation.ts
+  // separately, not this switch, so they're deliberately not added here.
+  | 'new_post' | 'achievement' | 'leaderboard_result';
 
 function navigateForPushData(
   navigationRef: React.RefObject<NavigationContainerRef<any> | null>,
@@ -145,11 +150,39 @@ function navigateForPushData(
     case 'comment':
     case 'coin':
     case 'mention':
+    // ✅ NEW: same PostDetail deep link as like/comment — a new-post
+    // notification is just as "go look at this post" as those are.
+    case 'new_post':
       // FIX (corrected): same camelCase correction as 'follow'/'message'
       // above — notificationHelpers.ts sends postId, not post_id.
       if (data.postId) {
         nav.navigate('PostDetail', { postId: data.postId });
       }
+      break;
+
+    // ✅ NEW: badge/achievement — Profile is a tab nested inside 'Main'
+    // (confirmed in MainTabs.tsx: <Tab.Screen name="Profile" .../>), same
+    // nesting pattern as ChatDM/Cowatch. openBadgesModal is read by a new
+    // effect in profile.tsx that opens the badges modal on mount, the
+    // same way chat/[id].tsx synthesizes its incoming-call prompt from
+    // route params.
+    case 'achievement':
+      nav.navigate('Main', {
+        screen: 'Profile',
+        params: { openBadgesModal: true },
+      });
+      break;
+
+    // ✅ NEW: weekly leaderboard result (sent by the finalize_weekly_leaderboard
+    // SQL function, not app code — see weekly_leaderboard.sql) — opens
+    // straight to the leaderboard modal so the person sees their rank
+    // immediately, same "land exactly where it matters" treatment as
+    // achievement/badge above.
+    case 'leaderboard_result':
+      nav.navigate('Main', {
+        screen: 'Profile',
+        params: { openLeaderboardModal: true },
+      });
       break;
 
     // Anything else (including 'call', or no type at all) is deliberately

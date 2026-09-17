@@ -3,7 +3,7 @@ import { NavigationContainer, DarkTheme, NavigationContainerRef } from '@react-n
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet } from 'react-native';
+import { StyleSheet, Platform } from 'react-native';
 // ✅ NEW: root cause of "Audio device module is not initialized" — LiveKit's
 // WebRTC globals were never registered. This has to run once, before any
 // screen touches LiveKit, so it lives here at the very top of the app
@@ -23,6 +23,19 @@ import { LanguageProvider } from './src/locales/LanguageContext';
 // straight in the right chat with the call auto-joined — see the file
 // for why this has to live here, at the app root, and not in chat/[id].tsx.
 import { useCallPushNavigation } from './src/lib/callPushNavigation';
+// ✅ NEW (native incoming-call UI): the notifee equivalent of the hook
+// above — reacts to Answer/tap on the full-screen ringing notification
+// (see src/lib/incomingCallNotifee.ts + src/lib/notifeeCallNavigation.ts).
+// Both hooks coexist safely: this one only ever acts on data.type ===
+// 'incoming_call' events coming specifically from notifee's own event
+// system, so it can't intercept or double-handle anything
+// useCallPushNavigation already deals with via expo-notifications.
+import { useNotifeeCallNavigation } from './src/lib/notifeeCallNavigation';
+// ✅ FIX: same modular-API correction as index.js — the default export
+// this used to import was removed in the installed version of
+// @react-native-firebase/messaging.
+import { getMessaging, onMessage } from '@react-native-firebase/messaging';
+import { displayIncomingCallNotifee } from './src/lib/incomingCallNotifee';
 // ✅ NEW: same idea, for the general notification types (follow/like/
 // comment/coin/mention) — tapping one of these, from inside the app,
 // backgrounded, or fully closed, now actually navigates to the relevant
@@ -59,7 +72,34 @@ export default function App() {
   const navigationRef = useRef<NavigationContainerRef<any>>(null);
   useCallPushNavigation(navigationRef);
   useNotificationPushNavigation(navigationRef);
+  // ✅ NEW: handles Answer/tap on the notifee full-screen call banner.
+  useNotifeeCallNavigation(navigationRef);
   useAuthDeepLink();
+
+  // ✅ NEW (native incoming-call UI — the foreground half): index.js's
+  // background handler only fires while the app is backgrounded/killed —
+  // RNFirebase routes a data message to THIS listener instead whenever
+  // the app is already open. Without this, a call arriving while someone
+  // is actively using the app (but not on that exact chat screen, where
+  // the realtime call_signal banner already handles it) would be
+  // silently missed entirely, since send-call-push now sends incoming
+  // calls as data-only messages specifically so they DON'T also trigger
+  // expo-notifications' own auto-display (which would otherwise show a
+  // second, non-ringing, button-less notification on top of this one).
+  useEffect(() => {
+    const messagingInstance = getMessaging();
+    const unsubscribe = onMessage(messagingInstance, async (remoteMessage) => {
+      const data = remoteMessage.data as any;
+      // ✅ FIX: same iOS guard as index.js's background handler — iOS's
+      // incoming-call push is a normal visible notification and displays
+      // itself; only Android's data-only variant needs this to draw
+      // anything at all.
+      if (data?.type === 'incoming_call' && Platform.OS === 'android') {
+        await displayIncomingCallNotifee(data);
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   return (
     <GestureHandlerRootView style={styles.root}>

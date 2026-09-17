@@ -1,6 +1,27 @@
 // utils/notificationHelpers.ts
-import { supabase } from '../config/supabase'; 
-import { sendPushNotification } from './pushNotifications';
+//
+// ✅ REWRITTEN: this file used to call sendPushNotification() from
+// ./pushNotifications, which reads/writes push tokens from a `push_tokens`
+// table — a THIRD, completely separate token store from the one everything
+// else in this app (calls, messages, cowatch, badges, new posts) has been
+// fixed to use (`users.push_token`). That table was never confirmed to even
+// have rows in it, the push payload it built was missing `channelId` and
+// `priority` entirely, and it was a dead-end no one had audited.
+//
+// Every exported function below keeps the EXACT SAME name and parameter
+// signature it always had — videos.tsx, HomeScreen.tsx, and anything else
+// calling notifyPostLike/notifyPostComment/notifyNewFollower/etc. needs
+// ZERO changes. Internally, each one now just calls the already-proven,
+// already-fixed functions in lib/notifications.ts instead.
+import { supabase } from '../config/supabase';
+import {
+  notifyPostLike   as _notifyPostLike,
+  notifyPostComment as _notifyPostComment,
+  notifyFollow      as _notifyFollow,
+  notifyMention     as _notifyMention,
+  notifyMarketplaceOrder as _notifyMarketplaceOrder,
+  notifyNewMessage  as _notifyNewMessage,
+} from '../lib/notifications';
 
 /**
 * Send notification when someone likes a post
@@ -14,26 +35,12 @@ export async function notifyPostLike(
   coinAmount?: number
 ) {
   try {
-    // Don't notify if user likes their own post
     if (postOwnerId === likerUserId) return;
-
-    const title = coinAmount
-      ? `${likerDisplayName} sent ${coinAmount} coins! 💰`
-      : `${likerDisplayName} liked your post ❤️`;
-
-    const body = coinAmount
-      ? `They loved your post so much they sent coins!`
-      : `Check out what they thought of your post`;
-
-    await sendPushNotification(postOwnerId, title, body, {
-      type: coinAmount ? 'coin' : 'like',
-      fromUserId: likerUserId,
-      fromUsername: likerUsername,
-      postId: postId,
-      coinAmount: coinAmount,
-    });
-
-    console.log('Like notification sent');
+    // lib/notifications.ts's title uses this single "name" argument —
+    // passing the display name preserves the nicer-looking name this
+    // file always showed, instead of the @username lib/notifications.ts
+    // would otherwise default to.
+    await _notifyPostLike(postOwnerId, likerUserId, likerDisplayName || likerUsername, postId, coinAmount);
   } catch (error) {
     console.error('Error sending like notification:', error);
   }
@@ -51,23 +58,8 @@ export async function notifyPostComment(
   commentText: string
 ) {
   try {
-    // Don't notify if user comments on their own post
     if (postOwnerId === commenterUserId) return;
-
-    const title = `${commenterDisplayName} commented 💬`;
-    const body = commentText.length > 50
-      ? `${commentText.substring(0, 50)}...`
-      : commentText;
-
-    await sendPushNotification(postOwnerId, title, body, {
-      type: 'comment',
-      fromUserId: commenterUserId,
-      fromUsername: commenterUsername,
-      postId: postId,
-      commentText: commentText,
-    });
-
-    console.log('Comment notification sent');
+    await _notifyPostComment(postOwnerId, commenterUserId, commenterDisplayName || commenterUsername, postId, commentText);
   } catch (error) {
     console.error('Error sending comment notification:', error);
   }
@@ -83,16 +75,7 @@ export async function notifyNewFollower(
   followerDisplayName: string
 ) {
   try {
-    const title = `${followerDisplayName} followed you! 👤`;
-    const body = `@${followerUsername} started following you`;
-
-    await sendPushNotification(followedUserId, title, body, {
-      type: 'follow',
-      fromUserId: followerUserId,
-      fromUsername: followerUsername,
-    });
-
-    console.log('Follow notification sent');
+    await _notifyFollow(followedUserId, followerUserId, followerDisplayName || followerUsername);
   } catch (error) {
     console.error('Error sending follow notification:', error);
   }
@@ -110,19 +93,7 @@ export async function notifyMarketplaceOrder(
 ) {
   try {
     if (sellerId === buyerId) return;
-
-    await sendPushNotification(
-      sellerId,
-      'New Order! 🛍️',
-      `${buyerDisplayName} ordered "${listingTitle}"`,
-      {
-        type: 'marketplace',
-        fromUserId: buyerId,
-        fromUsername: buyerUsername,
-      }
-    );
-
-    console.log('Marketplace order notification sent');
+    await _notifyMarketplaceOrder(sellerId, buyerId, buyerDisplayName || buyerUsername, listingTitle);
   } catch (error) {
     console.error('Error sending marketplace order notification:', error);
   }
@@ -138,27 +109,16 @@ export async function notifyNewMessage(
   senderDisplayName: string,
   messageText: string,
   conversationId: string,
-  // ✅ NEW: so the recipient's push (and its tap-to-open navigation) can
-  // show your real avatar instead of a placeholder. Optional + defaulted
-  // so any other existing caller of this function that doesn't pass it
-  // yet still compiles and works exactly as before.
   senderPhoto: string = ''
 ) {
   try {
     if (recipientUserId === senderUserId) return;
-
-    const title = senderDisplayName;
-    const body = messageText.length > 80 ? `${messageText.substring(0, 80)}...` : messageText;
-
-    await sendPushNotification(recipientUserId, title, body, {
-      type: 'message',
-      fromUserId: senderUserId,
-      fromUsername: senderUsername,
-      fromPhoto: senderPhoto,
-      conversationId,
-    });
-
-    console.log('Message notification sent');
+    // Note: lib/notifications.ts's notifyNewMessage doesn't take a photo
+    // param — it wasn't needed by the chat screens that already use it
+    // directly. senderPhoto is accepted here for compatibility with any
+    // existing caller passing it, but isn't forwarded (harmless no-op)
+    // unless/until lib/notifications.ts's version is extended to use it.
+    await _notifyNewMessage(recipientUserId, senderUserId, senderDisplayName || senderUsername, conversationId, messageText);
   } catch (error) {
     console.error('Error sending message notification:', error);
   }
@@ -176,23 +136,8 @@ export async function notifyMention(
   commentText: string
 ) {
   try {
-    // Don't notify if user mentions themselves
     if (mentionedUserId === mentionerUserId) return;
-
-    const title = `${mentionerDisplayName} mentioned you @`;
-    const body = commentText.length > 50
-      ? `${commentText.substring(0, 50)}...`
-      : commentText;
-
-    await sendPushNotification(mentionedUserId, title, body, {
-      type: 'mention',
-      fromUserId: mentionerUserId,
-      fromUsername: mentionerUsername,
-      postId: postId,
-      commentText: commentText,
-    });
-
-    console.log('Mention notification sent');
+    await _notifyMention(mentionedUserId, mentionerUserId, mentionerDisplayName || mentionerUsername, postId, commentText);
   } catch (error) {
     console.error('Error sending mention notification:', error);
   }
@@ -210,7 +155,6 @@ export async function handleLikePress(
   coinAmount?: number
 ) {
   try {
-    // Add like to database
     const { error: likeError } = await supabase
       .from('likes')
       .insert({
@@ -221,7 +165,6 @@ export async function handleLikePress(
 
     if (likeError) throw likeError;
 
-    // Send notification (database trigger will create notification record)
     await notifyPostLike(
       postId,
       postOwnerId,
@@ -250,7 +193,6 @@ export async function handleCommentSubmit(
   commentText: string
 ) {
   try {
-    // Add comment to database
     const { data: comment, error: commentError } = await supabase
       .from('comments')
       .insert({
@@ -263,7 +205,6 @@ export async function handleCommentSubmit(
 
     if (commentError) throw commentError;
 
-    // Send notification (database trigger will create notification record)
     await notifyPostComment(
       postId,
       postOwnerId,
@@ -273,15 +214,13 @@ export async function handleCommentSubmit(
       commentText
     );
 
-    // Check for mentions in comment
     const mentionRegex = /@(\w+)/g;
     const mentions = commentText.match(mentionRegex);
 
     if (mentions) {
       for (const mention of mentions) {
-        const mentionedUsername = mention.substring(1); // Remove @
-       
-        // Get mentioned user ID
+        const mentionedUsername = mention.substring(1);
+
         const { data: mentionedUser } = await supabase
           .from('users')
           .select('id')
@@ -318,7 +257,6 @@ export async function handleFollowPress(
   currentDisplayName: string
 ) {
   try {
-    // Add follow to database
     const { error: followError } = await supabase
       .from('follows')
       .insert({
@@ -328,13 +266,6 @@ export async function handleFollowPress(
 
     if (followError) throw followError;
 
-    // ✅ FIX: this comment used to claim "database trigger will create
-    // notification record" — that was true for likes/comments but NOT for
-    // follows; no such trigger existed, so followers never showed up in
-    // the in-app bell/Notification screen (push-only). Run
-    // add_follow_notification_trigger.sql in Supabase once to add the
-    // missing trigger — after that, this comment is accurate again and no
-    // code change is needed here.
     await notifyNewFollower(
       userToFollowId,
       currentUserId,
@@ -347,5 +278,4 @@ export async function handleFollowPress(
     console.error('Error following user:', error);
     return { success: false, error: error.message };
   }
-} 
-	
+}

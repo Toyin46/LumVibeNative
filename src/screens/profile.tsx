@@ -12,7 +12,11 @@ import { useTranslation } from '../locales/LanguageContext';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
 import { notifyNewFollower } from '../utils/notificationHelpers';
-import { useNavigation, CommonActions, useFocusEffect } from '@react-navigation/native';
+// ✅ FIX: this import was missing entirely — I added the notifyBadgeEarned()
+// call inside checkAndAwardBadges earlier but never added this line,
+// which is exactly why TypeScript couldn't find the name. My mistake.
+import { notifyBadgeEarned } from '../lib/notifications';
+import { useNavigation, useRoute, CommonActions, useFocusEffect } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -772,6 +776,11 @@ export default function ProfileScreen() {
   const { userProfile, user, logout, loadProfile } = useAuthStore();
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
+  // ✅ NEW: ProfileScreen never read route params at all before this —
+  // needed so a badge-earned notification tap can land here with the
+  // badges modal already open, instead of just dropping the person on
+  // their plain profile with no indication of why they were sent here.
+  const route = useRoute<any>();
   const [isOffline, setIsOffline] = useState(false);
   // ✅ POLISH FIX: replaces hardcoded paddingTop: 60 on this screen's headers.
   const insets = useSafeAreaInsets();
@@ -796,6 +805,26 @@ export default function ProfileScreen() {
   const [followingModalVisible,       setFollowingModalVisible]       = useState(false);
   const [leaderboardModalVisible,     setLeaderboardModalVisible]     = useState(false);
   const [badgesModalVisible,          setBadgesModalVisible]          = useState(false);
+  // ✅ NEW: opens the badges modal once, from a notification tap's route
+  // params (notificationPushNavigation.ts's 'achievement' case) — mirrors
+  // the same "synthesize state from route params" pattern already used
+  // for chat/[id].tsx's incoming-call prompt.
+  const openedBadgesFromNotifRef = useRef(false);
+  useEffect(() => {
+    if (route.params?.openBadgesModal && !openedBadgesFromNotifRef.current) {
+      openedBadgesFromNotifRef.current = true;
+      setBadgesModalVisible(true);
+    }
+  }, [route.params]);
+  // ✅ NEW: same pattern, for a weekly-leaderboard-result notification tap
+  // (see weekly_leaderboard.sql's finalize_weekly_leaderboard function).
+  const openedLeaderboardFromNotifRef = useRef(false);
+  useEffect(() => {
+    if (route.params?.openLeaderboardModal && !openedLeaderboardFromNotifRef.current) {
+      openedLeaderboardFromNotifRef.current = true;
+      setLeaderboardModalVisible(true);
+    }
+  }, [route.params]);
   const [inviteModalVisible,          setInviteModalVisible]          = useState(false);
   const [contactInviteModalVisible,   setContactInviteModalVisible]   = useState(false);
   const [profilePictureModalVisible,  setProfilePictureModalVisible]  = useState(false);
@@ -1147,6 +1176,15 @@ export default function ProfileScreen() {
                   is_read: false,
                 });
               } catch {}
+              // ✅ NEW: this in-app row above only ever showed up if the
+              // person happened to open the in-app notification center —
+              // confirmed by reading this function that it never sent an
+              // actual push. Badges now fire a real push through the same
+              // pipeline calls/likes/comments/follows use, so they show up
+              // even when the app is closed, same as everything else.
+              try {
+                await notifyBadgeEarned(user.id, info.name, info.icon, info.reward);
+              } catch (e) { console.warn('notifyBadgeEarned error:', e); }
             }
           } else {
             console.warn('Badge insert error:', badge.id, error.message);
