@@ -47,6 +47,11 @@ import { useNotificationPushNavigation } from './src/lib/notificationPushNavigat
 // link) when it opens the app — see authDeepLink.ts for the full picture
 // of what was missing and why the verification link used to freeze/crash.
 import { useAuthDeepLink } from './src/lib/authDeepLink';
+// ✅ NEW: fixes "the ring only shows if I'm already on the chat screen" —
+// see globalIncomingSignal.tsx for the full explanation. Needs the
+// current user's id to subscribe to their personal signal channel.
+import { useAuthStore } from './src/store/authStore';
+import { useGlobalIncomingSignal, GlobalIncomingBanner } from './src/lib/globalIncomingSignal';
 
 const navigationTheme = {
   ...DarkTheme,
@@ -76,16 +81,21 @@ export default function App() {
   useNotifeeCallNavigation(navigationRef);
   useAuthDeepLink();
 
+  // ✅ NEW: the actual global, any-screen ring — see globalIncomingSignal.tsx.
+  const { user } = useAuthStore();
+  const { incoming, dismiss } = useGlobalIncomingSignal(user?.id);
+
   // ✅ NEW (native incoming-call UI — the foreground half): index.js's
   // background handler only fires while the app is backgrounded/killed —
   // RNFirebase routes a data message to THIS listener instead whenever
   // the app is already open. Without this, a call arriving while someone
   // is actively using the app (but not on that exact chat screen, where
-  // the realtime call_signal banner already handles it) would be
-  // silently missed entirely, since send-call-push now sends incoming
-  // calls as data-only messages specifically so they DON'T also trigger
-  // expo-notifications' own auto-display (which would otherwise show a
-  // second, non-ringing, button-less notification on top of this one).
+  // the realtime call_signal banner already handles it) would only ever
+  // show the plain OS notification banner, not the full notifee ring.
+  // send-call-push sends BOTH title/body (a reliable fallback — see the
+  // comment there on the known expo-notifications/RNFirebase Android
+  // conflict) AND the same data payload, so this listener can upgrade to
+  // the full ring whenever it does get a chance to run.
   useEffect(() => {
     const messagingInstance = getMessaging();
     const unsubscribe = onMessage(messagingInstance, async (remoteMessage) => {
@@ -94,7 +104,8 @@ export default function App() {
       // incoming-call push is a normal visible notification and displays
       // itself; only Android's data-only variant needs this to draw
       // anything at all.
-      if (data?.type === 'incoming_call' && Platform.OS === 'android') {
+      // ✅ NEW (cowatch parity): 'cowatch_invite' rings the same way now.
+      if ((data?.type === 'incoming_call' || data?.type === 'cowatch_invite') && Platform.OS === 'android') {
         await displayIncomingCallNotifee(data);
       }
     });
@@ -109,6 +120,11 @@ export default function App() {
             <StatusBar style="light" />
             <RootNavigator />
           </NavigationContainer>
+          {/* ✅ NEW: renders above the navigator so it can appear over
+              ANY screen — Home, profile, marketplace, video feed, etc. —
+              not just the chat screen. Modal handles the actual
+              above-everything overlay natively. */}
+          <GlobalIncomingBanner incoming={incoming} dismiss={dismiss} navRef={navigationRef} />
         </LanguageProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

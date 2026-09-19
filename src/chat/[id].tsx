@@ -11,6 +11,11 @@ import {
 import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, createAudioPlayer } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
+// ✅ NEW: lets startCall also ring the callee's GLOBAL signal channel
+// (any screen, not just this exact chat screen) — see
+// globalIncomingSignal.tsx for the full picture. Purely additive
+// alongside the existing per-conversation broadcast right below.
+import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import ContextStoryBar from './components/ContextStoryBar';
@@ -194,6 +199,7 @@ async function registerCallPushToken(userId: string) {
 async function sendCallPush(payload: {
   calleeId: string; callerId: string; callerName: string;
   callType: 'voice' | 'video'; roomName: string; conversationId: string;
+  callerPhoto?: string;
 }) {
   try {
     await supabase.functions.invoke('send-call-push', { body: payload });
@@ -292,7 +298,7 @@ interface IncomingCowatch {
   conversationId: string;
 }
 
-function useCall(currentUserId: string, displayName: string, conversationId: string | null, otherUserId: string | null) {
+function useCall(currentUserId: string, displayName: string, conversationId: string | null, otherUserId: string | null, callerPhoto?: string) {
   const [callState,      setCallState]      = useState<CallState>(CALL_INITIAL);
   const [incomingCall,   setIncomingCall]   = useState<IncomingCall | null>(null);
   // ✅ NEW (fix #3): incoming cowatch invite banner state — lives here
@@ -619,12 +625,24 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       });
     } catch (e) { console.error('incoming_call broadcast error:', e); }
 
+    // ✅ NEW: also ring the callee's GLOBAL signal channel, so the banner
+    // shows up regardless of which screen they're currently on — not just
+    // when this exact chat screen happens to be mounted (which is all the
+    // per-conversation broadcast above can ever reach).
+    if (otherUserId) {
+      broadcastToUserChannel(otherUserId, 'incoming_call', {
+        callerId: currentUserId, callerName: displayName || 'Someone',
+        callerPhoto, callType, roomName, conversationId: convId,
+      });
+    }
+
     // ✅ NEW: also ring them via push, so it reaches backgrounded/killed
     // devices, not just an already-open chat screen.
     if (otherUserId) {
       sendCallPush({
         calleeId: otherUserId, callerId: currentUserId,
         callerName: displayName || 'Someone', callType, roomName, conversationId: convId,
+        callerPhoto,
       });
     }
 
@@ -646,6 +664,13 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
           type: 'broadcast', event: 'call_cancelled',
           payload: { roomName },
         }).catch(() => {});
+        // ✅ NEW: clears the GLOBAL banner too (see globalIncomingSignal.tsx)
+        // — without this, giving up on a call before anyone answers would
+        // leave the callee's any-screen banner ringing for the full 30s
+        // even though the caller already hung up.
+        if (otherUserId) {
+          broadcastToUserChannel(otherUserId, 'call_cancelled_global', { roomName });
+        }
         // ✅ NEW: only log "missed" if I'm the one who placed the call and
         // gave up before anyone answered — a callee backing out during the
         // brief connecting window right after accepting isn't a missed
@@ -1715,7 +1740,7 @@ export default function ChatScreen() {
     // ✅ NEW (fix #3): incoming cowatch invite.
     incomingCowatch, dismissCowatchInvite,
     presentIncomingCallPrompt, presentIncomingCowatchPrompt,
-  } = useCall(user?.id || '', displayName, id || null, otherUserId || null);
+  } = useCall(user?.id || '', displayName, id || null, otherUserId || null, userProfile?.photo_url || undefined);
 
   // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
   // the user tapped it, and the root navigator (see the app-entry snippet)

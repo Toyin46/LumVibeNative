@@ -65,9 +65,17 @@ export default {
       // arrives with the app killed — nothing currently working reads
       // from these two yet, so this step alone changes zero runtime
       // behavior. Requires a new EAS build (native config), not eas update.
+      // ✅ FIX: @notifee/react-native does NOT ship a config plugin at
+      // all (confirmed by the actual build error: "No app.plugin.js file
+      // found in @notifee/react-native... remove the entry from plugins
+      // in your app config"). This was my mistake — notifee is a plain
+      // auto-linked native module; listing it here made Expo try to
+      // import its main bundle AS IF it were a plugin, which crashed on
+      // a `typeof` syntax construct never meant to run in this context.
+      // The two Firebase packages below DO ship real config plugins
+      // (no such error was thrown for either of them) and stay as-is.
       "@react-native-firebase/app",
-      "@react-native-firebase/messaging",
-      "@notifee/react-native"
+      "@react-native-firebase/messaging"
     ]
   }
 };

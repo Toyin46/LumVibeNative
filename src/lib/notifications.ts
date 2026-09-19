@@ -60,6 +60,7 @@ async function sendPushAndStore({
   data,
   postId,
   commentId,
+  imageUrl,
 }: {
   recipientUserId: string;
   fromUserId: string;
@@ -69,6 +70,12 @@ async function sendPushAndStore({
   data: Record<string, string>;
   postId?: string;
   commentId?: string;
+  // ✅ NEW: the sending user's avatar — shows next to the notification on
+  // Android (a proper big-picture image, not just text), the way likes/
+  // comments/follows should visually identify who did it. Optional and
+  // additive — every existing call site that doesn't pass this keeps
+  // working exactly as before, just without an image.
+  imageUrl?: string;
 }): Promise<void> {
   // ── 1. Insert in-app notification row ───────────────────
   try {
@@ -91,7 +98,7 @@ async function sendPushAndStore({
 
   // ── 3. Send Expo push notification ─────────────────────
   try {
-    const message = {
+    const message: Record<string, any> = {
       to:    token,
       title,
       body,
@@ -109,11 +116,21 @@ async function sendPushAndStore({
       // Priority
       priority: 'high',
     };
+    // ✅ NEW: confirmed via Expo's own GitHub discussion (#27980) —
+    // richContent.image DOES work for a real image on Android, but ONLY
+    // when the request body is an array of messages, even for a single
+    // one. Sending it as a bare object (what this always did before)
+    // silently drops richContent — Expo's server only looks for it in
+    // the array form. That's exactly why the request below changed from
+    // JSON.stringify(message) to JSON.stringify([message]).
+    if (imageUrl) {
+      message.richContent = { image: imageUrl };
+    }
 
     const res = await fetch(EXPO_PUSH_URL, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(message),
+      body: JSON.stringify([message]),
     });
 
     if (!res.ok) {
@@ -138,6 +155,7 @@ export async function notifyPostLike(
   likerUsername: string,
   postId: string,
   coinAmount?: number,
+  likerAvatarUrl?: string,
 ) {
   if (postOwnerId === likerId) return;
   await sendPushAndStore({
@@ -147,6 +165,7 @@ export async function notifyPostLike(
     body:            coinAmount ? 'They loved your post so much they sent coins!' : 'Tap to see your post',
     type:            coinAmount ? 'coin' : 'like',
     postId,
+    imageUrl: likerAvatarUrl,
     data: { screen: '/post/[id]', id: postId },
   });
 }
@@ -160,6 +179,7 @@ export async function notifyPostComment(
   commentText: string,
   postMediaUrl?: string,
   commentId?: string,
+  commenterAvatarUrl?: string,
 ) {
   if (postOwnerId === commenterId) return;
   const preview = commentText.length > 50 ? commentText.slice(0, 47) + '…' : commentText;
@@ -171,6 +191,7 @@ export async function notifyPostComment(
     type:            'comment',
     postId,
     commentId,
+    imageUrl: commenterAvatarUrl,
     data: { screen: '/post/[id]', id: postId },
   });
 }
@@ -180,6 +201,7 @@ export async function notifyFollow(
   followedUserId: string,
   followerId: string,
   followerUsername: string,
+  followerAvatarUrl?: string,
 ) {
   await sendPushAndStore({
     recipientUserId: followedUserId,
@@ -187,6 +209,7 @@ export async function notifyFollow(
     title:           `${followerUsername} followed you`,
     body:            'Tap to see their profile',
     type:            'follow',
+    imageUrl: followerAvatarUrl,
     data: { screen: '/user/[id]', id: followerId },
   });
 }
@@ -202,6 +225,8 @@ export async function notifyNewPost(
   posterId: string,
   posterUsername: string,
   postId: string,
+  posterAvatarUrl?: string,
+  postThumbnailUrl?: string,
 ) {
   if (followerId === posterId) return;
   await sendPushAndStore({
@@ -211,6 +236,10 @@ export async function notifyNewPost(
     body:            'Tap to check it out',
     type:            'new_post',
     postId,
+    // Prefer the actual post's thumbnail (more relevant than a face for
+    // "check out this post") — falls back to the poster's avatar if no
+    // thumbnail was passed.
+    imageUrl: postThumbnailUrl || posterAvatarUrl,
     data: { screen: '/post/[id]', id: postId },
   });
 }
@@ -276,6 +305,7 @@ export async function notifyCowatchInvite(
   inviterUsername: string,
   conversationId: string,
   sessionId: string,
+  inviterPhoto?: string,
 ) {
   if (inviteeUserId === inviterUserId) return;
 
@@ -298,37 +328,53 @@ export async function notifyCowatchInvite(
   if (!token || !token.startsWith('ExponentPushToken')) return;
 
   try {
+    const message: Record<string, any> = {
+      to:       token,
+      title:    `🎬 ${inviterUsername} wants to watch together!`,
+      body:     'Tap to join the watch party',
+      sound:    'default',
+      priority: 'high',
+      // ✅ FIX (WhatsApp-style banner for cowatch, requested alongside
+      // calls): 'default' is a low-importance Android channel — on
+      // Android 8+ that's a quiet notification-tray entry, not a
+      // heads-up banner, regardless of priority/sound set here. 'calls'
+      // is the high-importance channel chat/[id].tsx already creates
+      // for incoming calls; reusing it is what actually makes this pop
+      // up over other apps / the lock screen the same way a call does.
+      channelId: 'calls_v2', // ✅ FIX: renamed from 'calls' — see the comment on registerCallPushToken in chat/[id].tsx (Android permanently locks a channel's sound/importance the first time that ID is ever created on a device; the old 'calls' channel got stuck silent forever)
+      // ✅ NEW: lets the notification carry real Join/Dismiss action
+      // buttons on the banner itself, matching the 'cowatch_invite'
+      // category chat/[id].tsx registers client-side (Android + iOS).
+      categoryIdentifier: 'cowatch_invite',
+      // Deep-link payload — read in your notification response handler.
+      // ✅ FIX (cowatch parity): added inviterId/inviterName/inviterPhoto
+      // to match the shape src/lib/incomingCallNotifee.ts's
+      // IncomingCowatchNotifeeData expects (needed for the notifee
+      // ringing screen extension) — otherName/from_user_id kept exactly
+      // as they were for the existing notificationPushNavigation.ts path,
+      // so nothing already reading those breaks.
+      data: {
+        type:           'cowatch_invite',
+        screen:         '/chat/cowatch',
+        conversationId,
+        sessionId,
+        otherName:      inviterUsername,
+        from_user_id:   inviterUserId,
+        inviterId:      inviterUserId,
+        inviterName:    inviterUsername,
+        inviterPhoto:   inviterPhoto || '',
+      },
+    };
+    // ✅ NEW: avatar support (see sendPushAndStore's richContent comment
+    // for why this specifically needs the array-wrapped body form).
+    if (inviterPhoto) {
+      message.richContent = { image: inviterPhoto };
+    }
+
     const res = await fetch(EXPO_PUSH_URL, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        to:       token,
-        title:    `🎬 ${inviterUsername} wants to watch together!`,
-        body:     'Tap to join the watch party',
-        sound:    'default',
-        priority: 'high',
-        // ✅ FIX (WhatsApp-style banner for cowatch, requested alongside
-        // calls): 'default' is a low-importance Android channel — on
-        // Android 8+ that's a quiet notification-tray entry, not a
-        // heads-up banner, regardless of priority/sound set here. 'calls'
-        // is the high-importance channel chat/[id].tsx already creates
-        // for incoming calls; reusing it is what actually makes this pop
-        // up over other apps / the lock screen the same way a call does.
-        channelId: 'calls_v2', // ✅ FIX: renamed from 'calls' — see the comment on registerCallPushToken in chat/[id].tsx (Android permanently locks a channel's sound/importance the first time that ID is ever created on a device; the old 'calls' channel got stuck silent forever)
-        // ✅ NEW: lets the notification carry real Join/Dismiss action
-        // buttons on the banner itself, matching the 'cowatch_invite'
-        // category chat/[id].tsx registers client-side (Android + iOS).
-        categoryIdentifier: 'cowatch_invite',
-        // Deep-link payload — read in your notification response handler
-        data: {
-          type:           'cowatch_invite',
-          screen:         '/chat/cowatch',
-          conversationId,
-          sessionId,
-          otherName:      inviterUsername,
-          from_user_id:   inviterUserId,
-        },
-      }),
+      body: JSON.stringify([message]),
     });
     if (!res.ok) console.warn('Expo push (cowatch) error:', await res.text());
   } catch (e) {

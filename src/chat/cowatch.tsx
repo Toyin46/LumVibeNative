@@ -62,6 +62,9 @@ import NetInfo from '@react-native-community/netinfo';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 // FIX 2: Correct relative paths for bare workflow
 import { supabase } from '../config/supabase';
+// ✅ NEW: rings the invitee's GLOBAL signal channel (any screen, not just
+// this exact chat screen) — see globalIncomingSignal.tsx.
+import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
 import { useAuthStore } from '../store/authStore';
 import { notifyCowatchInvite } from '../lib/notifications';
 
@@ -3042,7 +3045,16 @@ export default function CowatchScreen() {
             // Push notification too, so it still reaches a backgrounded or
             // fully-killed device that isn't sitting on the chat screen to
             // receive the broadcast above.
-            if (inviteeId) await notifyCowatchInvite(inviteeId, user.id, inviterName, conversationId, activeSession.id);
+            if (inviteeId) {
+              await notifyCowatchInvite(inviteeId, user.id, inviterName, conversationId, activeSession.id, userProfile?.avatar_url || undefined);
+              // ✅ NEW: rings the invitee's GLOBAL signal channel too —
+              // any screen, not just this exact chat screen.
+              broadcastToUserChannel(inviteeId, 'cowatch_invite', {
+                inviterId: user.id, inviterName,
+                inviterPhoto: userProfile?.avatar_url || undefined,
+                sessionId: activeSession.id, conversationId,
+              });
+            }
           }
         } catch (notifyErr) { console.warn('notifyCowatchInvite failed:', notifyErr); }
       }

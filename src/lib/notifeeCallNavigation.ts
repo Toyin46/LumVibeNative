@@ -30,6 +30,42 @@ function handleNotifeeCallEvent(
   data: any,
   pressActionId: string | undefined,
 ) {
+  if (data?.type === 'cowatch_invite') {
+    // ✅ NEW (cowatch parity): mirrors notificationPushNavigation.ts's
+    // 'cowatch_invite' case exactly (kept as a small, self-contained
+    // duplicate here rather than refactoring that file's switch
+    // structure, to avoid any risk to its already-working push-tap path).
+    if (pressActionId === 'join') {
+      navRef.navigate('Main', {
+        screen: 'Messages',
+        params: {
+          screen: 'Cowatch',
+          params: {
+            conversationId: data.conversationId,
+            sessionId: data.sessionId,
+            otherName: data.inviterName || 'Someone',
+          },
+        },
+      });
+    } else {
+      // Plain tap on the body/full-screen banner — show the real
+      // Join/Dismiss chooser, same as the push-tap path.
+      navRef.navigate('Main', {
+        screen: 'Messages',
+        params: {
+          screen: 'ChatDM',
+          params: {
+            id: data.conversationId,
+            promptIncomingCowatch: true,
+            promptCowatchSessionId: data.sessionId,
+            promptCowatchInviterName: data.inviterName || 'Someone',
+          },
+        },
+      });
+    }
+    return;
+  }
+
   if (data?.type !== 'incoming_call') return;
   if (pressActionId === 'answer') {
     // notifee's Answer button reliably renders and works even with the

@@ -35,22 +35,35 @@ setBackgroundMessageHandler(messagingInstance, async (remoteMessage) => {
   // notification on top of it. Android still has no title/body on this
   // message type at all, so it depends entirely on this handler to show
   // anything.
-  if (data && data.type === 'incoming_call' && Platform.OS === 'android') {
+  // ✅ NEW (cowatch parity): 'cowatch_invite' now goes through the exact
+  // same ringing treatment as 'incoming_call' — see
+  // incomingCallNotifee.ts's displayIncomingCallNotifee, which branches
+  // internally on the type.
+  if (data && (data.type === 'incoming_call' || data.type === 'cowatch_invite') && Platform.OS === 'android') {
     await displayIncomingCallNotifee(data);
   }
 });
 
-// Handles the "Decline" button specifically — see incomingCallNotifee.ts's
-// comment on why this action has no launchActivity: this lets Decline
-// genuinely decline (broadcast + log the call) WITHOUT ever opening the
-// app at all, which the old expo-notifications-only setup could never do
-// from a killed state.
+// Handles the "Decline"/"Dismiss" buttons specifically — see
+// incomingCallNotifee.ts's comment on why these actions have no
+// launchActivity: this lets them genuinely decline/dismiss (broadcast +
+// log for a call; just cancel for a cowatch invite) WITHOUT ever opening
+// the app at all, which the old expo-notifications-only setup could
+// never do from a killed state.
 notifee.onBackgroundEvent(async ({ type, detail }) => {
   if (type !== EventType.ACTION_PRESS) return;
   const data = detail.notification && detail.notification.data;
-  if (!data || data.type !== 'incoming_call') return;
+  if (!data || (data.type !== 'incoming_call' && data.type !== 'cowatch_invite')) return;
 
-  await cancelIncomingCallNotifee(data.roomName);
+  const isCowatch = data.type === 'cowatch_invite';
+  await cancelIncomingCallNotifee(isCowatch ? data.sessionId : data.roomName, isCowatch);
+
+  // ✅ NEW (cowatch parity): "Dismiss" on a cowatch invite needs no
+  // broadcast at all — the existing in-app dismissCowatchInvite() also
+  // does nothing but clear local state, so cancelling the notification
+  // here is the complete, correct equivalent. Only a call's "Decline"
+  // needs the broadcast+log below.
+  if (isCowatch) return;
 
   if (detail.pressAction && detail.pressAction.id === 'decline') {
     try {
