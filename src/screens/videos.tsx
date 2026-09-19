@@ -1676,7 +1676,8 @@ export default function VideosScreen() {
           // push notification, which nothing here did before.
           notifyPostLike(
             post.id, post.user_id, userId,
-            userProfile?.username || '', userProfile?.display_name || 'Someone'
+            userProfile?.username || '', userProfile?.display_name || 'Someone',
+            undefined, userProfile?.avatar_url || undefined
           ).catch(e => console.warn('Push notify (like) failed:', e));
         }
       }
@@ -1826,7 +1827,8 @@ export default function VideosScreen() {
         // now sends the actual push notification.
         notifyPostComment(
           selectedPost.id, selectedPost.user_id, userId,
-          userProfile?.username || '', userProfile?.display_name || 'Someone', trimmedText
+          userProfile?.username || '', userProfile?.display_name || 'Someone', trimmedText,
+          userProfile?.avatar_url || undefined
         ).catch(e => console.warn('Push notify (comment) failed:', e));
       }
       setCommentText(''); setReplyingTo(null);

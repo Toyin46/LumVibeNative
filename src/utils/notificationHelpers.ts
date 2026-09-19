@@ -32,7 +32,8 @@ export async function notifyPostLike(
   likerUserId: string,
   likerUsername: string,
   likerDisplayName: string,
-  coinAmount?: number
+  coinAmount?: number,
+  likerAvatarUrl?: string,
 ) {
   try {
     if (postOwnerId === likerUserId) return;
@@ -40,7 +41,9 @@ export async function notifyPostLike(
     // passing the display name preserves the nicer-looking name this
     // file always showed, instead of the @username lib/notifications.ts
     // would otherwise default to.
-    await _notifyPostLike(postOwnerId, likerUserId, likerDisplayName || likerUsername, postId, coinAmount);
+    // ✅ NEW: avatar now flows through to a real Android large-icon photo
+    // on the notification — same round-photo pattern WhatsApp uses.
+    await _notifyPostLike(postOwnerId, likerUserId, likerDisplayName || likerUsername, postId, coinAmount, likerAvatarUrl);
   } catch (error) {
     console.error('Error sending like notification:', error);
   }
@@ -55,11 +58,12 @@ export async function notifyPostComment(
   commenterUserId: string,
   commenterUsername: string,
   commenterDisplayName: string,
-  commentText: string
+  commentText: string,
+  commenterAvatarUrl?: string,
 ) {
   try {
     if (postOwnerId === commenterUserId) return;
-    await _notifyPostComment(postOwnerId, commenterUserId, commenterDisplayName || commenterUsername, postId, commentText);
+    await _notifyPostComment(postOwnerId, commenterUserId, commenterDisplayName || commenterUsername, postId, commentText, undefined, undefined, commenterAvatarUrl);
   } catch (error) {
     console.error('Error sending comment notification:', error);
   }
@@ -72,10 +76,11 @@ export async function notifyNewFollower(
   followedUserId: string,
   followerUserId: string,
   followerUsername: string,
-  followerDisplayName: string
+  followerDisplayName: string,
+  followerAvatarUrl?: string,
 ) {
   try {
-    await _notifyFollow(followedUserId, followerUserId, followerDisplayName || followerUsername);
+    await _notifyFollow(followedUserId, followerUserId, followerDisplayName || followerUsername, followerAvatarUrl);
   } catch (error) {
     console.error('Error sending follow notification:', error);
   }

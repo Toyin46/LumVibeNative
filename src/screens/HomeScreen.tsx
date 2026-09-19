@@ -1834,7 +1834,8 @@ export default function HomeScreen() {
           // instead, which nothing here ever did before.
           notifyPostLike(
             post.id, post.user_id, userId,
-            userProfile?.username || '', userProfile?.display_name || 'Someone'
+            userProfile?.username || '', userProfile?.display_name || 'Someone',
+            undefined, userProfile?.avatar_url || undefined
           ).catch(e => console.warn('Push notify (like) failed:', e));
         }
       }
@@ -2017,7 +2018,8 @@ export default function HomeScreen() {
         // unlike likes/follows above), it just never triggered a push.
         notifyPostComment(
           selectedPost.id, selectedPost.user_id, userId,
-          userProfile?.username || '', userProfile?.display_name || 'Someone', trimmedText
+          userProfile?.username || '', userProfile?.display_name || 'Someone', trimmedText,
+          userProfile?.avatar_url || undefined
         ).catch(e => console.warn('Push notify (comment) failed:', e));
       }
       setCommentText(''); setReplyingTo(null);

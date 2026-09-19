@@ -1482,7 +1482,8 @@ export default function ProfileScreen() {
         // this never sent an actual push notification though. Nothing here
         // did before.
         notifyNewFollower(
-          userId, user.id, userProfile?.username || '', userProfile?.display_name || 'Someone'
+          userId, user.id, userProfile?.username || '', userProfile?.display_name || 'Someone',
+          userProfile?.avatar_url || undefined
         ).catch(e => console.warn('Push notify (follow) failed:', e));
       }
       Promise.all([loadUserStats(), loadFollowers(), loadFollowing()]);
