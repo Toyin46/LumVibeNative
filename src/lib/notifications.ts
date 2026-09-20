@@ -39,6 +39,24 @@ async function getPushToken(userId: string): Promise<string | null> {
   }
 }
 
+// ✅ NEW: needed specifically for notifyCowatchInvite's Android/iOS split
+// below — every other notification type in this file is a plain visible
+// notification on every platform, so they never needed to know the
+// platform. Cowatch (like calls) needs a real ring on Android, which
+// requires a pure data-only message there specifically.
+async function getPushTokenAndPlatform(userId: string): Promise<{ token: string | null; platform: string | null }> {
+  try {
+    const { data } = await supabase
+      .from('users')
+      .select('push_token, push_platform')
+      .eq('id', userId)
+      .single();
+    return { token: data?.push_token || null, platform: data?.push_platform || null };
+  } catch {
+    return { token: null, platform: null };
+  }
+}
+
 /**
 * Send an Expo push notification to a device.
 * Also inserts a row in the notifications table for in-app display.
@@ -323,51 +341,60 @@ export async function notifyCowatchInvite(
     console.warn('cowatch invite notification insert error:', e);
   }
 
-  // Fetch invitee's push token
-  const token = await getPushToken(inviteeUserId);
+  // ✅ FIX: this always sent a plain title+body message, on every
+  // platform — meaning it had EXACTLY the same problem calls did before
+  // today's fix: Android displays a "notification message" (one with
+  // both title/body AND data) directly via the OS when the app is
+  // killed, without ever running app code — so index.js's background
+  // handler (and therefore notifee's ringing screen) never got a chance
+  // to fire. This is why cowatch invites never rang or showed
+  // Join/Dismiss, ever. Now platform-aware, same reasoning as
+  // send-call-push's isIOS/Android split.
+  const { token, platform } = await getPushTokenAndPlatform(inviteeUserId);
   if (!token || !token.startsWith('ExponentPushToken')) return;
+  const isIOS = platform === 'ios';
 
   try {
-    const message: Record<string, any> = {
-      to:       token,
-      title:    `🎬 ${inviterUsername} wants to watch together!`,
-      body:     'Tap to join the watch party',
-      sound:    'default',
-      priority: 'high',
-      // ✅ FIX (WhatsApp-style banner for cowatch, requested alongside
-      // calls): 'default' is a low-importance Android channel — on
-      // Android 8+ that's a quiet notification-tray entry, not a
-      // heads-up banner, regardless of priority/sound set here. 'calls'
-      // is the high-importance channel chat/[id].tsx already creates
-      // for incoming calls; reusing it is what actually makes this pop
-      // up over other apps / the lock screen the same way a call does.
-      channelId: 'calls_v2', // ✅ FIX: renamed from 'calls' — see the comment on registerCallPushToken in chat/[id].tsx (Android permanently locks a channel's sound/importance the first time that ID is ever created on a device; the old 'calls' channel got stuck silent forever)
-      // ✅ NEW: lets the notification carry real Join/Dismiss action
-      // buttons on the banner itself, matching the 'cowatch_invite'
-      // category chat/[id].tsx registers client-side (Android + iOS).
-      categoryIdentifier: 'cowatch_invite',
-      // Deep-link payload — read in your notification response handler.
-      // ✅ FIX (cowatch parity): added inviterId/inviterName/inviterPhoto
-      // to match the shape src/lib/incomingCallNotifee.ts's
-      // IncomingCowatchNotifeeData expects (needed for the notifee
-      // ringing screen extension) — otherName/from_user_id kept exactly
-      // as they were for the existing notificationPushNavigation.ts path,
-      // so nothing already reading those breaks.
-      data: {
-        type:           'cowatch_invite',
-        screen:         '/chat/cowatch',
-        conversationId,
-        sessionId,
-        otherName:      inviterUsername,
-        from_user_id:   inviterUserId,
-        inviterId:      inviterUserId,
-        inviterName:    inviterUsername,
-        inviterPhoto:   inviterPhoto || '',
-      },
-    };
-    // ✅ NEW: avatar support (see sendPushAndStore's richContent comment
-    // for why this specifically needs the array-wrapped body form).
-    if (inviterPhoto) {
+    const message: Record<string, any> = isIOS
+      ? {
+          // iOS: no CallKit build exists for this project (same
+          // reasoning as calls) — a real, visible notification is the
+          // honest, correct fallback here.
+          to: token,
+          title: `🎬 ${inviterUsername} wants to watch together!`,
+          body: 'Tap to join the watch party',
+          sound: 'default',
+          priority: 'high',
+          categoryIdentifier: 'cowatch_invite',
+          data: {
+            type: 'cowatch_invite',
+            conversationId, sessionId,
+            otherName: inviterUsername,
+            from_user_id: inviterUserId,
+            inviterId: inviterUserId,
+            inviterName: inviterUsername,
+            inviterPhoto: inviterPhoto || '',
+          },
+        }
+      : {
+          // Android: pure data-only, so index.js's setBackgroundMessageHandler
+          // actually fires — even (especially) while the app is killed —
+          // and can show the real full-screen, ringing Join/Dismiss
+          // banner via src/lib/incomingCallNotifee.ts.
+          to: token,
+          priority: 'high',
+          data: {
+            type: 'cowatch_invite',
+            conversationId, sessionId,
+            otherName: inviterUsername,
+            from_user_id: inviterUserId,
+            inviterId: inviterUserId,
+            inviterName: inviterUsername,
+            inviterPhoto: inviterPhoto || '',
+          },
+        };
+    // richContent only makes sense on a message with a title (iOS here).
+    if (inviterPhoto && message.title) {
       message.richContent = { image: inviterPhoto };
     }
 
