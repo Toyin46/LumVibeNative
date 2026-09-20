@@ -16,10 +16,11 @@ import { useSyncExternalStore } from 'react';
 import { AppState, Platform, Vibration } from 'react-native';
 import type { NavigationContainerRef } from '@react-navigation/native';
 import { supabase } from '../config/supabase';
+import { sendBroadcastOnce } from './realtimeSend';
 import { RingPayload } from './ringPayload';
 import { cancelRingNotification, displayIncomingCallNotifee } from './incomingCallNotifee';
 
-const RING_MS = 30000;
+const RING_MS = 90000; // rings for 1 min 30 s, then stops by itself
 const HANDLED_TTL_UNIQUE_MS = 120000; // id includes a per-call id: safe to remember for long
 const HANDLED_TTL_LEGACY_MS = 15000;  // old clients without callId: keep short
 
@@ -73,6 +74,15 @@ function startRing(kind: 'call' | 'cowatch') {
       : require('../assets/sounds/ringtone.mp3.wav');
     player = createAudioPlayer(source);
     player.loop = true;
+    // The ringtones are ~11 s long. `loop` alone is not reliable on every
+    // phone, so also restart by hand the moment it finishes.
+    try {
+      player.addListener('playbackStatusUpdate', (status: any) => {
+        if (status?.didJustFinish && player) {
+          try { player.seekTo(0); player.play(); } catch (_) {}
+        }
+      });
+    } catch (_) {}
     player.play();
   } catch (e) {
     console.warn('[ring] in-app ringtone failed:', e);
@@ -237,18 +247,7 @@ export async function declineIncoming(p: RingPayload) {
   resolveIncoming(p, 'declined');
   if (p.type !== 'incoming_call' || !p.roomName || !p.conversationId) return;
   try {
-    const channel = supabase.channel(`call_signal:${p.conversationId}`, {
-      config: { broadcast: { self: false } },
-    });
-    channel.subscribe((status: string) => {
-      if (status === 'SUBSCRIBED') {
-        channel.send({
-          type: 'broadcast', event: 'call_declined', payload: { roomName: p.roomName },
-        }).finally(() => { supabase.removeChannel(channel); });
-      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-        supabase.removeChannel(channel);
-      }
-    });
+    sendBroadcastOnce(`call_signal:${p.conversationId}`, 'call_declined', { roomName: p.roomName });
     await supabase.from('messages').insert({
       conversation_id: p.conversationId,
       sender_id: p.fromId,
@@ -265,7 +264,9 @@ export async function declineIncoming(p: RingPayload) {
 // (the app may not be mounted yet, so they wait in a queue)
 // ─────────────────────────────────────────────────────────────
 // 'chat' = just open the conversation (the lock-screen "Message" button)
-export interface RingAction { action: 'answer' | 'join' | 'open' | 'chat'; payload: RingPayload }
+// 'peek' = the phone was locked and Android launched the app through the ring's
+// full-screen action: show the screen but do NOT stop/duplicate the ring.
+export interface RingAction { action: 'answer' | 'join' | 'open' | 'chat' | 'peek'; payload: RingPayload }
 const actionQueue: RingAction[] = [];
 const actionSeen = new Map<string, number>();
 const actionListeners = new Set<() => void>();
@@ -283,6 +284,7 @@ function runAction(a: RingAction) {
   if (a.action === 'answer') answerIncoming(a.payload);
   else if (a.action === 'join') joinIncomingCowatch(a.payload);
   else if (a.action === 'chat') goChat(a.payload);
+  else if (a.action === 'peek') showIncoming(a.payload, { expanded: true, ring: false, force: true });
   else showIncoming(a.payload, { expanded: true, force: true });
 }
 

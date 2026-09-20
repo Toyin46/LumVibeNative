@@ -78,7 +78,7 @@ function LockScreenCall(props: any) {
         const shown = await notifee.getDisplayedNotifications();
         stillRinging = shown.some((n: any) => n.id === id || n.notification?.id === id);
       } catch (_) {}
-      if (!stillRinging || Date.now() - startedAt > 40000) {
+      if (!stillRinging || Date.now() - startedAt > 100000) {
         doneRef.current = true;
         closeThisScreen();
       }

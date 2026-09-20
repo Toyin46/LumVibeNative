@@ -376,19 +376,19 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
   // belongs to the shared ring state in src/lib/incomingRing.ts, so it rings on
   // every screen, exactly once.
 
-  // Caller's ringback tone — plays while waiting for the other side to
-  // answer (isConnecting, nobody's joined the room yet).
+  // Caller's ringback tone ("tun ... tun") — plays ONLY on the caller's phone,
+  // from the moment the call is placed until the other person answers, declines
+  // or the 90 s ring-out below ends it.
+  // ✅ CHANGED: it used to fall back to the RECEIVER's ringtone file, so the
+  // caller heard the full ringtone too. It now uses its own short "tun tun"
+  // tone (src/assets/sounds/ringback.wav) and never the ringtone. It also used
+  // to stop as soon as the connection to the room finished (isConnecting), i.e.
+  // before the other person had answered — it now runs until they do.
   useEffect(() => {
-    if (callState.isInCall && callState.isConnecting && !callState.remoteConnected) {
+    if (callState.isInCall && !callState.remoteConnected && isCallerRef.current) {
       if (!ringbackPlayerRef.current) {
         try {
-          // ✅ CHANGED: there is no ringback.mp3 in src/assets/sounds (only the two
-          // ringtones), so the caller heard nothing while waiting. Use ringback.mp3
-          // if you add one later, otherwise the call ringtone.
-          let ringbackSource: any;
-          try { ringbackSource = require('../assets/sounds/ringback.mp3'); }
-          catch (_) { ringbackSource = require('../assets/sounds/ringtone.mp3.wav'); }
-          const player = createAudioPlayer(ringbackSource);
+          const player = createAudioPlayer(require('../assets/sounds/ringback.wav'));
           player.loop = true;
           player.play();
           ringbackPlayerRef.current = player;
@@ -398,7 +398,7 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       stopRingback();
     }
     return stopRingback;
-  }, [callState.isInCall, callState.isConnecting, callState.remoteConnected, stopRingback]);
+  }, [callState.isInCall, callState.remoteConnected, stopRingback]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -711,6 +711,17 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
   useEffect(() => {
     endCallRef.current = endCall;
   }, [endCall]);
+
+  // ✅ NEW: the caller no longer rings forever. If nobody answers within
+  // 1 min 30 s the call ends by itself — exactly like pressing hang-up before
+  // an answer: it is logged as "No answer", the other phone stops ringing, and
+  // they get a "Missed call" notification.
+  const CALL_RING_TIMEOUT_MS = 90000;
+  useEffect(() => {
+    if (!(callState.isInCall && !callState.remoteConnected && isCallerRef.current)) return;
+    const t = setTimeout(() => { endCallRef.current?.(); }, CALL_RING_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [callState.isInCall, callState.remoteConnected]);
 
   // ✅ NEW: accept an incoming call — joins the same LiveKit room the
   // caller created (deterministic room name from the conversation id).

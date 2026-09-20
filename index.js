@@ -54,7 +54,18 @@ import { AppRegistry } from 'react-native';
 import IncomingCallLockScreen from './src/lib/IncomingCallLockScreen';
 AppRegistry.registerComponent('lumvibe-incoming-call', () => IncomingCallLockScreen);
 
+import React from 'react';
 import { registerRootComponent } from "expo";
-import App from './App'
 
-registerRootComponent(App);
+// ✅ CHANGED: the app screen is loaded only when a screen is actually drawn.
+// When a call push wakes a CLOSED phone (especially a locked one) only the
+// ringing code above needs to run, and loading the whole app first (every
+// screen, LiveKit, …) delayed the ring by seconds on slower phones — long
+// enough for the phone to fall back asleep before it rang. Normal app start-up
+// is unchanged (App loads at the first render, exactly as before).
+function Root(props) {
+  const App = require('./App').default;
+  return React.createElement(App, props);
+}
+
+registerRootComponent(Root);

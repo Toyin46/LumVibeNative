@@ -341,6 +341,26 @@ export async function notifyCowatchInvite(
     console.warn('cowatch invite notification insert error:', e);
   }
 
+  // ✅ NEW (ringing rework): send the ring from the SERVER, like calls do
+  // (supabase/functions/send-cowatch-push). Calls prove that path works: the
+  // server reads the other person's push token with full access and sends the
+  // data-only Android message / visible iOS message itself. If the function is
+  // not deployed or fails, the original phone-side code below still runs.
+  try {
+    const { data: fnData, error: fnError } = await supabase.functions.invoke('send-cowatch-push', {
+      body: {
+        type: 'cowatch_invite',
+        inviteeId: inviteeUserId, inviterId: inviterUserId,
+        inviterName: inviterUsername, inviterPhoto: inviterPhoto || '',
+        conversationId, sessionId,
+      },
+    });
+    if (!fnError && fnData?.sent) return;
+    console.warn('[ring] send-cowatch-push did not send, using fallback:', fnError || fnData);
+  } catch (e) {
+    console.warn('[ring] send-cowatch-push error, using fallback:', e);
+  }
+
   // ✅ FIX: this always sent a plain title+body message, on every
   // platform — meaning it had EXACTLY the same problem calls did before
   // today's fix: Android displays a "notification message" (one with
@@ -386,7 +406,7 @@ export async function notifyCowatchInvite(
           // ✅ NEW: expire the ring after 45 s — otherwise an invite sent while
           // the phone was offline would ring minutes later for a session that
           // is long over.
-          ttl: 45,
+          ttl: 90,
           data: {
             type: 'cowatch_invite',
             conversationId, sessionId,
@@ -425,6 +445,12 @@ export async function notifyCowatchCancelled(
   sessionId: string,
 ) {
   try {
+    const { data: fnData, error: fnError } = await supabase.functions.invoke('send-cowatch-push', {
+      body: { type: 'cowatch_cancelled', inviteeId: inviteeUserId, conversationId, sessionId },
+    });
+    if (!fnError && fnData?.sent) return;
+  } catch (_) {}
+  try {
     const { token, platform } = await getPushTokenAndPlatform(inviteeUserId);
     if (!token || !token.startsWith('ExponentPushToken') || platform === 'ios') return;
     await fetch(EXPO_PUSH_URL, {
@@ -433,7 +459,7 @@ export async function notifyCowatchCancelled(
       body: JSON.stringify([{
         to: token,
         priority: 'high',
-        ttl: 45,
+        ttl: 90,
         data: { type: 'cowatch_cancelled', conversationId, sessionId },
       }]),
     });

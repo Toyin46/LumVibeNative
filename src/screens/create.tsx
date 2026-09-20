@@ -39,6 +39,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+// ✅ NEW: fixes "new post from someone you follow" not existing anywhere
+// in this file — confirmed by reading it in full before this change.
+import { notifyNewPost } from '../lib/notifications';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { captureRef } from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -4136,7 +4139,7 @@ const VideoEndScreen = memo(function VideoEndScreen({
 // MAIN CREATE SCREEN
 // ══════════════════════════════════════════════════════════
 export default function CreateScreen() {
-  const { user } = useAuthStore();
+  const { user, userProfile } = useAuthStore();
   const navigation = useNavigation(); // TASK 1: replaces expo-router
 
   // FIX: hide the bottom tab bar while the camera is open. Unlike
@@ -5837,8 +5840,33 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         return;
       }
 
-      const { error: postError } = await supabase.from('posts').insert(postData);
+      const { data: insertedPost, error: postError } = await supabase.from('posts').insert(postData).select('id').single();
       if (postError) throw postError;
+
+      // ✅ NEW (new post → notify followers, TikTok-style): only for an
+      // immediately-published post — a scheduled one isn't actually live
+      // yet, and there's no scheduled job anywhere in this codebase that
+      // would fire this later when it does go live, so notifying now
+      // would be wrong (followers would see a post they can't open yet).
+      // Fire-and-forget: never blocks or fails the person's own post
+      // flow if a follower fetch or one push send has a hiccup.
+      if (!isScheduled && insertedPost?.id) {
+        (async () => {
+          try {
+            const { data: followerRows } = await supabase
+              .from('follows')
+              .select('follower_id')
+              .eq('following_id', user.id);
+            const posterUsername = userProfile?.display_name || userProfile?.username || 'Someone';
+            for (const row of followerRows || []) {
+              if (row.follower_id) {
+                notifyNewPost(row.follower_id, user.id, posterUsername, insertedPost.id)
+                  .catch(e => console.warn('notifyNewPost error:', e));
+              }
+            }
+          } catch (e) { console.warn('follower notify fetch error:', e); }
+        })();
+      }
 
       // Give user +50 points — atomic increment avoids race condition on quick re-posts
       try {

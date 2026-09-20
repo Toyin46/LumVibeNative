@@ -57,7 +57,17 @@ export async function handleRingNotificationEvent(event: Event): Promise<void> {
 
   const payload = parseRingData(detail.notification?.data);
   if (!payload) return;
-  const actionId = detail.pressAction?.id;
+  // A launch through the notification's FULL-SCREEN action (phone locked) has
+  // no real "tap" behind it. The old code treated it as a tap: it cancelled the
+  // notification (= the ringing stopped a few seconds after the app booted) and
+  // started a second, silent in-app ring. That is why a locked phone did not
+  // ring properly. A missing action id is treated the same way.
+  const actionId = detail.pressAction?.id ?? 'fullscreen';
+
+  if (actionId === 'fullscreen') {
+    enqueueRingAction({ action: 'peek', payload });   // show the screen, keep ringing
+    return;
+  }
 
   if (actionId === 'decline') {
     // No app launch — declines silently from the notification.

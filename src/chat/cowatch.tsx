@@ -67,6 +67,7 @@ import { supabase } from '../config/supabase';
 import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
 import { useAuthStore } from '../store/authStore';
 import { notifyCowatchInvite, notifyCowatchCancelled } from '../lib/notifications';
+import { sendBroadcastOnce } from '../lib/realtimeSend';
 
 // ✅ NEW: how long the app may stay in the background during a watch party
 // before the session is ended. Long enough for a permission dialog, a phone
@@ -940,16 +941,9 @@ function broadcastCowatchInvite(
   conversationId: string,
   payload: { inviterId: string; inviterName: string; inviterPhoto?: string; sessionId: string; conversationId: string }
 ) {
-  const channel = supabase.channel(`call_signal:${conversationId}`, { config: { broadcast: { self: false } } });
-  channel.subscribe((status: string) => {
-    if (status === 'SUBSCRIBED') {
-      channel.send({ type: 'broadcast', event: 'cowatch_invite', payload })
-        .catch((e: any) => console.warn('broadcastCowatchInvite failed:', e))
-        .finally(() => { supabase.removeChannel(channel); });
-    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-      supabase.removeChannel(channel);
-    }
-  });
+  // ✅ CHANGED: sends on the chat screen's already-open channel when there is
+  // one (see realtimeSend.ts) instead of re-subscribing to it and then closing it.
+  sendBroadcastOnce(`call_signal:${conversationId}`, 'cowatch_invite', payload);
 }
 
 // ✅ NEW (ringing rework): the person who started the watch party left before
@@ -958,16 +952,7 @@ function broadcastCowatchInvite(
 // channel, and the push that stops the closed-app notification.
 function cancelCowatchInvite(inviteeId: string, conversationId: string, sessionId: string) {
   broadcastToUserChannel(inviteeId, 'cowatch_cancelled', { sessionId, conversationId });
-  const ch = supabase.channel(`call_signal:${conversationId}`, { config: { broadcast: { self: false } } });
-  ch.subscribe((status: string) => {
-    if (status === 'SUBSCRIBED') {
-      ch.send({ type: 'broadcast', event: 'cowatch_cancelled', payload: { sessionId } })
-        .catch(() => {})
-        .finally(() => { supabase.removeChannel(ch); });
-    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-      supabase.removeChannel(ch);
-    }
-  });
+  sendBroadcastOnce(`call_signal:${conversationId}`, 'cowatch_cancelled', { sessionId });
   notifyCowatchCancelled(inviteeId, conversationId, sessionId).catch(() => {});
 }
 
@@ -3112,18 +3097,28 @@ export default function CowatchScreen() {
           const { data: convoData } = await supabase.from('conversations').select('user1_id, user2_id').eq('id', conversationId).single();
           if (convoData) {
             const inviteeId = convoData.user1_id === user.id ? convoData.user2_id : convoData.user1_id;
-            // Push notification too, so it still reaches a backgrounded or
-            // fully-killed device that isn't sitting on the chat screen to
-            // receive the broadcast above.
             if (inviteeId) {
-              await notifyCowatchInvite(inviteeId, user.id, inviterName, conversationId, activeSession.id, (userProfile as any)?.avatar_url || (userProfile as any)?.photo_url || undefined);
-              // ✅ NEW: rings the invitee's GLOBAL signal channel too —
-              // any screen, not just this exact chat screen.
-              broadcastToUserChannel(inviteeId, 'cowatch_invite', {
+              // ✅ CHANGED (ringing rework): the instant in-app ring goes out FIRST.
+              // It used to wait behind `await notifyCowatchInvite(...)` — a
+              // database insert, a token lookup and a network call to Expo — so on a
+              // slow connection (or if any step of that failed) the other person's
+              // banner arrived late or never, and by then the invite could already
+              // have been cancelled.
+              const invitePayload = {
                 inviterId: user.id, inviterName,
                 inviterPhoto: (userProfile as any)?.avatar_url || (userProfile as any)?.photo_url || undefined,
                 sessionId: activeSession.id, conversationId,
-              });
+              };
+              console.log('[ring] cowatch invite -> user channel', inviteeId, activeSession.id);
+              broadcastToUserChannel(inviteeId, 'cowatch_invite', invitePayload);
+              // Push (killed / locked / background phones) — now sent by the
+              // send-cowatch-push edge function, and never blocks the ring above.
+              notifyCowatchInvite(
+                inviteeId, user.id, inviterName, conversationId, activeSession.id,
+                invitePayload.inviterPhoto,
+              ).catch((e: any) => console.warn('[ring] cowatch push failed:', e));
+            } else {
+              console.warn('[ring] cowatch invite: could not work out who to invite');
             }
           }
         } catch (notifyErr) { console.warn('notifyCowatchInvite failed:', notifyErr); }
