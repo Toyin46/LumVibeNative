@@ -35,7 +35,15 @@ import { useNotifeeCallNavigation } from './src/lib/notifeeCallNavigation';
 // this used to import was removed in the installed version of
 // @react-native-firebase/messaging.
 import { getMessaging, onMessage } from '@react-native-firebase/messaging';
-import { displayIncomingCallNotifee } from './src/lib/incomingCallNotifee';
+import * as Notifications from 'expo-notifications';
+// ✅ NEW (ringing rework): one shared in-app ring state + the push/notification
+// entry points — see src/lib/incomingRing.ts and src/lib/ringBackground.ts.
+import { ensureIncomingCallChannel } from './src/lib/incomingCallNotifee';
+import { setRingNavRef, initIncomingRing } from './src/lib/incomingRing';
+import { handleForegroundPush } from './src/lib/ringBackground';
+// ✅ NEW: asks once (only on phones that need it — Infinix/Tecno/Xiaomi/Oppo/…) to
+// allow background running, so calls ring when the app is closed.
+import { promptReliableRingingOnce } from './src/lib/ringReliability';
 // ✅ NEW: same idea, for the general notification types (follow/like/
 // comment/coin/mention) — tapping one of these, from inside the app,
 // backgrounded, or fully closed, now actually navigates to the relevant
@@ -83,33 +91,43 @@ export default function App() {
 
   // ✅ NEW: the actual global, any-screen ring — see globalIncomingSignal.tsx.
   const { user } = useAuthStore();
-  const { incoming, dismiss } = useGlobalIncomingSignal(user?.id);
+  useGlobalIncomingSignal(user?.id);
 
-  // ✅ NEW (native incoming-call UI — the foreground half): index.js's
-  // background handler only fires while the app is backgrounded/killed —
-  // RNFirebase routes a data message to THIS listener instead whenever
-  // the app is already open. Without this, a call arriving while someone
-  // is actively using the app (but not on that exact chat screen, where
-  // the realtime call_signal banner already handles it) would only ever
-  // show the plain OS notification banner, not the full notifee ring.
-  // send-call-push sends BOTH title/body (a reliable fallback — see the
-  // comment there on the known expo-notifications/RNFirebase Android
-  // conflict) AND the same data payload, so this listener can upgrade to
-  // the full ring whenever it does get a chance to run.
+  // ✅ NEW (ringing rework): everything that rings shares ONE state
+  // (src/lib/incomingRing.ts). App-level wiring, done once:
+  //   • give it the navigation ref (Answer / Join navigate through it)
+  //   • hand a still-ringing call over to the system notification if the
+  //     person leaves the app while it rings
+  //   • create the ringing notification channel up front (Android locks a
+  //     channel's sound forever at first creation, so it must exist and be
+  //     right before the first call ever arrives)
   useEffect(() => {
-    const messagingInstance = getMessaging();
-    const unsubscribe = onMessage(messagingInstance, async (remoteMessage) => {
-      const data = remoteMessage.data as any;
-      // ✅ FIX: same iOS guard as index.js's background handler — iOS's
-      // incoming-call push is a normal visible notification and displays
-      // itself; only Android's data-only variant needs this to draw
-      // anything at all.
-      // ✅ NEW (cowatch parity): 'cowatch_invite' rings the same way now.
-      if ((data?.type === 'incoming_call' || data?.type === 'cowatch_invite') && Platform.OS === 'android') {
-        await displayIncomingCallNotifee(data);
-      }
+    setRingNavRef(navigationRef);
+    initIncomingRing();
+    if (Platform.OS === 'android') ensureIncomingCallChannel().catch(() => {});
+  }, []);
+
+  // ✅ NEW: after login, once, explain + open the phone's background-running
+  // settings. Delayed so it never fights the notification-permission dialog.
+  useEffect(() => {
+    if (!user?.id || Platform.OS !== 'android') return;
+    const t = setTimeout(() => { promptReliableRingingOnce().catch(() => {}); }, 8000);
+    return () => clearTimeout(t);
+  }, [user?.id]);
+
+  // ✅ NEW: push arriving while the app is OPEN -> in-app banner + ringtone
+  // (image 6) instead of a system notification. Two listeners because which
+  // library receives the message depends on which Android messaging service
+  // wins in your build (RNFirebase vs expo-notifications) — both feed the
+  // same de-duplicating state, so it never rings twice.
+  useEffect(() => {
+    const unsubFirebase = onMessage(getMessaging(), async (remoteMessage) => {
+      handleForegroundPush(remoteMessage);
     });
-    return unsubscribe;
+    const expoSub = Notifications.addNotificationReceivedListener((notification) => {
+      handleForegroundPush(notification);
+    });
+    return () => { unsubFirebase(); expoSub.remove(); };
   }, []);
 
   return (
@@ -124,7 +142,7 @@ export default function App() {
               ANY screen — Home, profile, marketplace, video feed, etc. —
               not just the chat screen. Modal handles the actual
               above-everything overlay natively. */}
-          <GlobalIncomingBanner incoming={incoming} dismiss={dismiss} navRef={navigationRef} />
+          <GlobalIncomingBanner />
         </LanguageProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

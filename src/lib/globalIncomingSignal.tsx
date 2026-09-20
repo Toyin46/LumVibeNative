@@ -1,63 +1,42 @@
-// src/lib/globalIncomingSignal.tsx
+// src/lib/globalIncomingSignal.tsx   (REPLACES the old file)
 //
-// ✅ NEW: fixes "I have to already be on the chat screen for the ring to
-// show" — chat/[id].tsx's useCall() hook only subscribes to
-// `call_signal:${conversationId}` while THAT screen is mounted, so a call
-// arriving while someone is watching a video, on their profile, in
-// marketplace, etc. produced nothing in-app at all (they only had the
-// native push/notifee layer to rely on, which is a separate, heavier
-// path). This adds a SECOND, app-level signal: a per-USER channel
-// (not per-conversation) that's subscribed to for as long as the app is
-// open, regardless of which screen is showing — rendered as an overlay
-// from App.tsx, above the navigator, so it can appear over anything.
+// In-app half of the ringing experience (the app is OPEN):
 //
-// Deliberately does NOT duplicate any call-connection logic. Accepting
-// just navigates into the real chat screen with the exact same
-// autoAnswerCall route params callPushNavigation.ts already uses —
-// chat/[id].tsx's existing, proven LiveKit join code takes it from there.
-// This file only ever shows a banner and hands off; it never touches
-// LiveKit directly.
-import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { View, Text, TouchableOpacity, Modal, Image, StyleSheet } from 'react-native';
-import { NavigationContainerRef } from '@react-navigation/native';
-import { Ionicons } from '@expo/vector-icons';
+//   • useGlobalIncomingSignal(userId)  listens on the per-user realtime channel
+//   • <GlobalIncomingBanner />         renders, above every screen:
+//        – "image 6": a small heads-up banner at the top of the screen
+//          [avatar] Name / Incoming voice call   Decline  Answer
+//          (video call: Decline / Video, watch invite: Decline / Join)
+//        – "image 3": tap the banner (or open from a notification) and it
+//          becomes the full-screen call screen:
+//          Decline · Swipe up to accept · Message
+//     both ring (ringtone + vibration) until answered / declined / 30 s.
+//
+// All state lives in incomingRing.ts, so this can never double-show, and
+// chat/[id].tsx no longer pops its own second modal + second ringtone.
+
+import React, { useEffect, useRef } from 'react';
+import {
+  View, Text, TouchableOpacity, Modal, StyleSheet,
+  Animated, StatusBar,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../config/supabase';
-import { navigateToCall } from './callPushNavigation';
+import { parseRingData, RingPayload } from './ringPayload';
+import {
+  useIncoming, showIncoming, cancelIncomingByTarget, setExpanded,
+  answerIncoming, joinIncomingCowatch, declineIncoming, messageIncoming,
+} from './incomingRing';
+import { ringBodyText, ringAcceptLabel } from './incomingCallNotifee';
+// ✅ NEW: the full-screen view is shared with the lock-screen screen.
+import { IncomingCallView, Avatar } from './IncomingCallView';
 
-interface GlobalIncomingCall {
-  kind: 'call';
-  callerId: string;
-  callerName: string;
-  callerPhoto?: string;
-  callType: 'voice' | 'video';
-  roomName: string;
-  conversationId: string;
-}
+const GREEN = '#00e676';
 
-interface GlobalIncomingCowatch {
-  kind: 'cowatch';
-  inviterId: string;
-  inviterName: string;
-  inviterPhoto?: string;
-  sessionId: string;
-  conversationId: string;
-}
-
-type GlobalIncoming = GlobalIncomingCall | GlobalIncomingCowatch;
-
-/**
- * Subscribes to this user's personal signal channel for as long as the
- * app is mounted — independent of which screen is currently showing.
- * Broadcasting to `call_signal_user:${userId}` (from chat/[id].tsx's
- * startCall and cowatch.tsx's broadcastCowatchInvite) is what reaches
- * this, alongside — not instead of — the existing per-conversation
- * channels those files already use for the "already on that exact
- * screen" case.
- */
+// ─────────────────────────────────────────────────────────────
+// realtime: per-USER channel, alive as long as the app is open
+// ─────────────────────────────────────────────────────────────
 export function useGlobalIncomingSignal(currentUserId: string | null | undefined) {
-  const [incoming, setIncoming] = useState<GlobalIncoming | null>(null);
-  const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   useEffect(() => {
     if (!currentUserId) return;
     const channel = supabase.channel(`call_signal_user:${currentUserId}`, {
@@ -65,48 +44,25 @@ export function useGlobalIncomingSignal(currentUserId: string | null | undefined
     });
     channel
       .on('broadcast', { event: 'incoming_call' }, ({ payload }: any) => {
-        setIncoming({
-          kind: 'call',
-          callerId: payload.callerId,
-          callerName: payload.callerName || 'Someone',
-          callerPhoto: payload.callerPhoto,
-          callType: payload.callType === 'video' ? 'video' : 'voice',
-          roomName: payload.roomName,
-          conversationId: payload.conversationId,
-        });
-        if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
-        ringTimerRef.current = setTimeout(() => setIncoming(null), 30000);
+        const p = parseRingData({ type: 'incoming_call', ...payload });
+        if (p) showIncoming(p);
       })
       .on('broadcast', { event: 'call_cancelled_global' }, ({ payload }: any) => {
-        setIncoming(prev => (prev?.kind === 'call' && prev.roomName === payload?.roomName ? null : prev));
+        cancelIncomingByTarget({ roomName: payload?.roomName });
       })
       .on('broadcast', { event: 'cowatch_invite' }, ({ payload }: any) => {
-        setIncoming({
-          kind: 'cowatch',
-          inviterId: payload.inviterId,
-          inviterName: payload.inviterName || 'Someone',
-          inviterPhoto: payload.inviterPhoto,
-          sessionId: payload.sessionId,
-          conversationId: payload.conversationId,
-        });
-        if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
-        ringTimerRef.current = setTimeout(() => setIncoming(null), 30000);
+        const p = parseRingData({ type: 'cowatch_invite', ...payload });
+        if (p) showIncoming(p);
+      })
+      .on('broadcast', { event: 'cowatch_cancelled' }, ({ payload }: any) => {
+        cancelIncomingByTarget({ sessionId: payload?.sessionId });
       })
       .subscribe();
-
-    return () => {
-      if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [currentUserId]);
-
-  return { incoming, dismiss: () => setIncoming(null) };
 }
 
-// ✅ NEW: fire-and-forget helper — same one-shot subscribe→send→remove
-// pattern already used elsewhere in this codebase (e.g. cowatch.tsx's
-// broadcastCowatchInvite) for a channel that only needs to deliver a
-// single message, not stay open.
+/** fire-and-forget one-shot broadcast to someone's user channel */
 export function broadcastToUserChannel(userId: string, event: string, payload: any) {
   const channel = supabase.channel(`call_signal_user:${userId}`, {
     config: { broadcast: { self: false } },
@@ -122,134 +78,95 @@ export function broadcastToUserChannel(userId: string, event: string, payload: a
   });
 }
 
-/**
- * The actual overlay UI. Rendered once from App.tsx, above the
- * navigator, so it can appear regardless of which screen is active.
- * Deliberately minimal and self-contained — does not import or depend on
- * chat/[id].tsx's styles, so nothing there can be affected by this.
- */
-export function GlobalIncomingBanner({
-  incoming,
-  dismiss,
-  navRef,
-}: {
-  incoming: GlobalIncoming | null;
-  dismiss: () => void;
-  navRef: React.RefObject<NavigationContainerRef<any> | null>;
-}) {
-  const declineCall = useCallback(async (call: GlobalIncomingCall) => {
-    dismiss();
-    try {
-      // Same broadcast shape chat/[id].tsx's declineCall and index.js's
-      // background decline handler already use — the caller's screen (if
-      // open) reacts to this exactly the same as any other decline.
-      const channel = supabase.channel(`call_signal:${call.conversationId}`, {
-        config: { broadcast: { self: false } },
-      });
-      channel.subscribe((status: string) => {
-        if (status === 'SUBSCRIBED') {
-          channel.send({
-            type: 'broadcast', event: 'call_declined',
-            payload: { roomName: call.roomName },
-          }).finally(() => { supabase.removeChannel(channel); });
-        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-          supabase.removeChannel(channel);
-        }
-      });
-      await supabase.from('messages').insert({
-        conversation_id: call.conversationId,
-        sender_id: call.callerId,
-        message_type: 'call_log',
-        content: JSON.stringify({ callType: call.callType, outcome: 'declined' }),
-      });
-    } catch (e) { console.warn('global decline error:', e); }
-  }, [dismiss]);
+// ─────────────────────────────────────────────────────────────
+// shared bits
+// ─────────────────────────────────────────────────────────────
+function onAccept(p: RingPayload) {
+  if (p.type === 'cowatch_invite') joinIncomingCowatch(p);
+  else answerIncoming(p);
+}
 
-  const acceptCall = useCallback((call: GlobalIncomingCall) => {
-    dismiss();
-    if (!navRef.current?.isReady()) return;
-    // Reuses the EXACT same navigation shape (and thus the exact same,
-    // already-working autoAnswerCall handling in chat/[id].tsx) that a
-    // tapped push notification's "Answer" action uses — this banner is
-    // just a faster way to reach the same place.
-    navigateToCall(navRef.current, {
-      type: 'incoming_call',
-      conversationId: call.conversationId,
-      callerId: call.callerId,
-      callerName: call.callerName,
-      callType: call.callType,
-      roomName: call.roomName,
-    });
-  }, [dismiss, navRef]);
+// ─────────────────────────────────────────────────────────────
+// "image 6" — heads-up banner at the top
+// ─────────────────────────────────────────────────────────────
+function IncomingBanner({ p }: { p: RingPayload }) {
+  const insets = useSafeAreaInsets();
+  const slide = useRef(new Animated.Value(-180)).current;
 
-  const dismissCowatch = useCallback(() => { dismiss(); }, [dismiss]);
-
-  const joinCowatch = useCallback((cw: GlobalIncomingCowatch) => {
-    dismiss();
-    if (!navRef.current?.isReady()) return;
-    navRef.current.navigate('Main', {
-      screen: 'Messages',
-      params: {
-        screen: 'Cowatch',
-        params: {
-          conversationId: cw.conversationId,
-          sessionId: cw.sessionId,
-          otherName: cw.inviterName,
-        },
-      },
-    });
-  }, [dismiss, navRef]);
-
-  if (!incoming) return null;
-
-  const isCall = incoming.kind === 'call';
-  const name = isCall ? incoming.callerName : incoming.inviterName;
-  const photo = isCall ? incoming.callerPhoto : incoming.inviterPhoto;
-  const subtitle = isCall
-    ? `Incoming ${incoming.callType === 'video' ? 'video' : 'voice'} call…`
-    : 'Wants to watch together…';
+  useEffect(() => {
+    Animated.spring(slide, { toValue: 0, useNativeDriver: true, bounciness: 6, speed: 14 }).start();
+  }, [slide]);
 
   return (
-    <Modal visible transparent animationType="fade" statusBarTranslucent>
-      <View style={styles.overlay}>
-        <View style={styles.card}>
-          {photo
-            ? <Image source={{ uri: photo }} style={styles.avatar} />
-            : <View style={[styles.avatar, styles.avatarPlaceholder]}>
-                <Text style={styles.avatarInitial}>{(name || 'U')[0].toUpperCase()}</Text>
-              </View>}
-          <Text style={styles.name}>{name}</Text>
-          <Text style={styles.subtitle}>{subtitle}</Text>
-          <View style={styles.actions}>
-            <TouchableOpacity
-              style={[styles.btn, styles.declineBtn]}
-              onPress={() => isCall ? declineCall(incoming) : dismissCowatch()}
-            >
-              <Ionicons name="close" size={26} color="#fff" />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.btn, styles.acceptBtn]}
-              onPress={() => isCall ? acceptCall(incoming) : joinCowatch(incoming)}
-            >
-              <Ionicons name={isCall ? (incoming.callType === 'video' ? 'videocam' : 'call') : 'play'} size={24} color="#000" />
-            </TouchableOpacity>
+    <Animated.View
+      pointerEvents="box-none"
+      style={[styles.bannerWrap, { top: insets.top + 8, transform: [{ translateY: slide }] }]}
+    >
+      <TouchableOpacity activeOpacity={0.92} style={styles.banner} onPress={() => setExpanded(true)}>
+        <View style={styles.bannerRow}>
+          <Avatar uri={p.fromPhoto} name={p.fromName} size={44} />
+          <View style={styles.bannerTextCol}>
+            <View style={styles.bannerTitleRow}>
+              <Text style={styles.bannerName} numberOfLines={1}>{p.fromName}</Text>
+              <Text style={styles.bannerApp}>LumVibe · now</Text>
+            </View>
+            <Text style={styles.bannerBody} numberOfLines={1}>{ringBodyText(p)}</Text>
           </View>
         </View>
-      </View>
+        <View style={styles.bannerActions}>
+          <TouchableOpacity hitSlop={{ top: 10, bottom: 10, left: 10, right: 20 }} onPress={() => declineIncoming(p)}>
+            <Text style={styles.bannerBtn}>Decline</Text>
+          </TouchableOpacity>
+          <TouchableOpacity hitSlop={{ top: 10, bottom: 10, left: 20, right: 20 }} onPress={() => onAccept(p)}>
+            <Text style={styles.bannerBtn}>{ringAcceptLabel(p)}</Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// "image 3" — full-screen call screen (app open)
+// ─────────────────────────────────────────────────────────────
+function IncomingFullScreen({ p }: { p: RingPayload }) {
+  return (
+    <Modal visible transparent={false} animationType="slide" statusBarTranslucent onRequestClose={() => setExpanded(false)}>
+      <StatusBar barStyle="light-content" backgroundColor="#0b141a" />
+      <IncomingCallView
+        p={p}
+        onAccept={() => onAccept(p)}
+        onDecline={() => declineIncoming(p)}
+        onMessage={() => messageIncoming(p)}
+      />
     </Modal>
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// mounted once in App.tsx, above the navigator
+// ─────────────────────────────────────────────────────────────
+export function GlobalIncomingBanner() {
+  const incoming = useIncoming();
+  if (!incoming) return null;
+  return incoming.expanded
+    ? <IncomingFullScreen key={incoming.payload.id} p={incoming.payload} />
+    : <IncomingBanner key={incoming.payload.id} p={incoming.payload} />;
+}
+
 const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', alignItems: 'center', justifyContent: 'center' },
-  card: { width: '80%', backgroundColor: '#1a1a1a', borderRadius: 24, padding: 28, alignItems: 'center' },
-  avatar: { width: 88, height: 88, borderRadius: 44, marginBottom: 16, borderWidth: 2, borderColor: '#22c55e' },
-  avatarPlaceholder: { backgroundColor: '#22c55e33', alignItems: 'center', justifyContent: 'center' },
-  avatarInitial: { fontSize: 32, fontWeight: '700', color: '#22c55e' },
-  name: { fontSize: 20, fontWeight: '700', color: '#fff', marginBottom: 4 },
-  subtitle: { fontSize: 14, color: '#999', marginBottom: 24 },
-  actions: { flexDirection: 'row', gap: 40 },
-  btn: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
-  declineBtn: { backgroundColor: '#ef4444' },
-  acceptBtn: { backgroundColor: '#22c55e' },
+  // banner (image 6)
+  bannerWrap: { position: 'absolute', left: 10, right: 10, zIndex: 9999, elevation: 40 },
+  banner: {
+    backgroundColor: '#2a2a2c', borderRadius: 26, paddingHorizontal: 18, paddingTop: 14, paddingBottom: 12,
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 12, shadowOffset: { width: 0, height: 6 },
+  },
+  bannerRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  bannerTextCol: { flex: 1 },
+  bannerTitleRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+  bannerName: { color: '#fff', fontSize: 17, fontWeight: '700', flexShrink: 1 },
+  bannerApp: { color: '#9a9a9f', fontSize: 12 },
+  bannerBody: { color: '#e6e6e8', fontSize: 15, marginTop: 2 },
+  bannerActions: { flexDirection: 'row', gap: 40, marginTop: 14, paddingLeft: 2 },
+  bannerBtn: { color: GREEN, fontSize: 16, fontWeight: '700' },
 });

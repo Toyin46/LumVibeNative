@@ -383,6 +383,10 @@ export async function notifyCowatchInvite(
           // banner via src/lib/incomingCallNotifee.ts.
           to: token,
           priority: 'high',
+          // ✅ NEW: expire the ring after 45 s — otherwise an invite sent while
+          // the phone was offline would ring minutes later for a session that
+          // is long over.
+          ttl: 45,
           data: {
             type: 'cowatch_invite',
             conversationId, sessionId,
@@ -406,6 +410,35 @@ export async function notifyCowatchInvite(
     if (!res.ok) console.warn('Expo push (cowatch) error:', await res.text());
   } catch (e) {
     console.warn('sendPush cowatch error:', e);
+  }
+}
+
+/**
+* ✅ NEW: the inviter left the watch party before the invitee joined — stop the
+* ringing notification on the invitee's phone (Android, data-only push). The
+* in-app banner is cleared separately through the realtime 'cowatch_cancelled'
+* broadcast (see cowatch.tsx).
+*/
+export async function notifyCowatchCancelled(
+  inviteeUserId: string,
+  conversationId: string,
+  sessionId: string,
+) {
+  try {
+    const { token, platform } = await getPushTokenAndPlatform(inviteeUserId);
+    if (!token || !token.startsWith('ExponentPushToken') || platform === 'ios') return;
+    await fetch(EXPO_PUSH_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify([{
+        to: token,
+        priority: 'high',
+        ttl: 45,
+        data: { type: 'cowatch_cancelled', conversationId, sessionId },
+      }]),
+    });
+  } catch (e) {
+    console.warn('notifyCowatchCancelled error:', e);
   }
 }
 

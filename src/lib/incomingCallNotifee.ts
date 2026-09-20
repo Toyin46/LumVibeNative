@@ -1,184 +1,244 @@
-// lib/incomingCallNotifee.ts
+// src/lib/incomingCallNotifee.ts   (REPLACES the old file)
 //
-// The ONE place that actually builds and shows the native, full-screen,
-// looping-ring notification — for BOTH incoming calls and cowatch invites
-// (extended to cowatch on request: "make cowatch work exactly like video
-// and voice call"). Called from two places:
-//   • index.js's setBackgroundMessageHandler — when the app is
-//     backgrounded or fully killed.
-//   • App.tsx's onMessage — when the app is already open (foreground), so
-//     the experience is consistent everywhere instead of only working
-//     when the app happens to be closed.
+// Builds the system notification that rings when the app is CLOSED or in the
+// BACKGROUND — the "image 1" look:
+//   • caller's round profile photo on the left, LumVibe logo badge on it
+//   • caller name as the title, "Incoming voice call" under it
+//   • [Decline] [Answer]      (video call: [Decline] [Video])
+//   • Watch Together invite:  [Decline] [Join]
+//   • loops a real ringtone (res/raw/ringtone.mp3) until answered / declined /
+//     cancelled / 30 s pass
 //
-// IMPORTANT — division of responsibility, so nothing already working
-// gets duplicated or fought over:
-//   • This notification's ONLY job is to make Android actually RING
-//     (loop a sound), show Answer/Decline (or Join/Dismiss for cowatch)
-//     on a full-screen banner, and wake the device — the thing
-//     expo-notifications categorically cannot do in the background
-//     (documented Android limitation, see our earlier conversation).
-//   • What happens when a button/the notification body is tapped is
-//     handled by lib/notifeeCallNavigation.ts, which translates a notifee
-//     event into the EXACT SAME route params (autoAnswerCall /
-//     promptIncomingCall / promptIncomingCowatch) that chat/[id].tsx
-//     already knows how to handle — no new UI, no new call/cowatch logic,
-//     reusing everything already built and proven.
-//   • The realtime call_signal / cowatch_invite banners inside
-//     chat/[id].tsx are completely untouched and still fire instantly for
-//     anyone already on that exact chat screen — this is purely an
-//     ADDITIONAL layer for "not on that screen / app backgrounded / app
-//     killed / foregrounded but on a different screen".
+// What each tap does is handled in ringBackground.ts:
+//   Decline        -> declines without opening the app
+//   Answer / Join  -> opens the app and connects (call joins the room,
+//                     cowatch opens the shared feed)
+//   tap on body    -> opens the app on the full-screen "image 3" screen
+//                     (Decline / Swipe up to accept / Message)
+
 import notifee, {
+    Notification,
     AndroidImportance,
     AndroidVisibility,
     AndroidCategory,
+    AndroidStyle,
   } from '@notifee/react-native';
+  import * as Notifications from 'expo-notifications';
+  import { RingPayload, ringNotificationId } from './ringPayload';
   
-  export const INCOMING_CALL_CHANNEL_ID = 'incoming_call_v1';
+  // TWO channels, one per sound (a channel's sound can't change per message):
+  //   calls          -> ringtone.mp3.wav        (voice + video)
+  //   watch invites  -> cowatch ringtone.mp3
+  // New ids on purpose: Android locks a channel's sound/importance forever the
+  // first time it is created on a device, so the old 'incoming_call_v1/v2'
+  // (default chime) can never be fixed in place.
+  //
+  // The sound files are copied into android/app/src/main/res/raw by
+  // plugins/withRingSounds.js under safe names (Android resource names can't
+  // contain spaces, capitals or extra dots, and "ringtone.mp3.wav" has one):
+  //   src/assets/sounds/ringtone.mp3.wav      -> res/raw/call_ringtone.wav
+  //   src/assets/sounds/cowatch ringtone.mp3  -> res/raw/cowatch_ringtone.mp3
+  interface RingChannel { id: string; name: string; resName: string; file: string }
+  export const CALL_CHANNEL: RingChannel = {
+    id: 'incoming_call_v3', name: 'Incoming calls', resName: 'call_ringtone', file: 'call_ringtone.wav',
+  };
+  export const COWATCH_CHANNEL: RingChannel = {
+    id: 'incoming_cowatch_v1', name: 'Watch Together invites', resName: 'cowatch_ringtone', file: 'cowatch_ringtone.mp3',
+  };
+  export const INCOMING_CALL_CHANNEL_ID = CALL_CHANNEL.id;
   
-  // ✅ Separate, NEW channel id — deliberately not reusing 'calls_v2'.
-  // Remember: Android permanently locks a channel's sound/importance the
-  // first time it's ever created on a device (this is exactly the bug we
-  // fixed earlier by renaming 'calls' to 'calls_v2'). Since THIS channel
-  // needs a different, more aggressive config (loopSound, CALL category)
-  // than the plain 'calls_v2' notification channel, it needs its own,
-  // never-before-used id so nothing it does can collide with or corrupt
-  // the existing, already-working 'calls_v2' channel. Cowatch invites reuse
-  // this SAME channel — there's nothing call-specific about the channel
-  // itself, it's just "high-urgency, looping, full-screen" as a category.
-  async function ensureIncomingCallChannel(): Promise<string> {
-    return notifee.createChannel({
-      id: INCOMING_CALL_CHANNEL_ID,
-      name: 'Incoming Calls & Invites',
-      importance: AndroidImportance.HIGH,
-      sound: 'default',
-      vibration: true,
-      vibrationPattern: [0, 1000, 500, 1000, 500, 1000],
-      visibility: AndroidVisibility.PUBLIC,
-      bypassDnd: true,
-    });
-  }
+  // White-on-transparent logo in res/drawable — the "LumVibe logo at the
+  // bottom of the photo". The expo-notifications plugin `icon` option creates
+  // it as `notification_icon` (from src/assets/images/notification-icon.png).
+  const SMALL_ICON = 'notification_icon';
+  const BRAND_COLOR = '#00e676';
   
-  export interface IncomingCallNotifeeData {
-    type: 'incoming_call';
-    conversationId: string;
-    callerId: string;
-    callerName: string;
-    callerPhoto?: string;
-    callType: 'voice' | 'video';
-    roomName: string;
-  }
+  // Name registered in index.js with AppRegistry. When the phone is LOCKED (or
+  // the screen is off) Android launches this full-screen screen over the lock
+  // screen instead of the app (see IncomingCallLockScreen.tsx).
+  export const LOCKSCREEN_COMPONENT = 'lumvibe-incoming-call';
   
-  // ✅ NEW: cowatch's equivalent shape — mirrors IncomingCallNotifeeData's
-  // fields under cowatch's own naming (inviter instead of caller, sessionId
-  // instead of roomName) so it slots into the exact same display/navigation
-  // machinery without pretending a cowatch invite IS a call.
-  export interface IncomingCowatchNotifeeData {
-    type: 'cowatch_invite';
-    conversationId: string;
-    inviterId: string;
-    inviterName: string;
-    inviterPhoto?: string;
-    sessionId: string;
-  }
+  const RING_TIMEOUT_MS = 30000;
+  const VIBRATION = [0, 1000, 700, 1000, 700, 1000];
   
-  type NotifeeRingData = IncomingCallNotifeeData | IncomingCowatchNotifeeData;
+  const channelPromises: Record<string, Promise<string>> = {};
   
   /**
-   * Displays the actual full-screen, ringing notification — for a call OR a
-   * cowatch invite. Safe to call from a headless/background context
-   * (index.js) or a live one (App.tsx) — doesn't depend on any React state,
-   * navigation, or component tree.
+   * Creates one ringing channel (once). Expo's channel API is used because it is
+   * the only one that can set the audio USAGE to NOTIFICATION_RINGTONE, so the
+   * sound follows the phone's *ringtone* volume like a real call. notifee's own
+   * createChannel is the fallback. Called for both channels at app start
+   * (App.tsx), so on a real ring the channel already exists.
    */
-  export async function displayIncomingCallNotifee(data: NotifeeRingData) {
-    const channelId = await ensureIncomingCallChannel();
-    const isCowatch = data.type === 'cowatch_invite';
+  function ensureChannel(ch: RingChannel): Promise<string> {
+    const existing: Promise<string> | undefined = channelPromises[ch.id];
+    if (existing) return existing;
+    const promise = (async () => {
+      try {
+        if (await notifee.getChannel(ch.id)) return ch.id;
+      } catch (_) {}
   
-    const title = isCowatch
-      ? 'Watch Together'
-      : `Incoming ${(data as IncomingCallNotifeeData).callType === 'video' ? 'video' : 'voice'} call`;
-    const body = isCowatch
-      ? `${(data as IncomingCowatchNotifeeData).inviterName || 'Someone'} wants to watch together…`
-      : `${(data as IncomingCallNotifeeData).callerName || 'Someone'} is calling…`;
-    // ✅ NEW: caller/inviter avatar — shows as the notification's large
-    // icon (a round photo, the same visual language WhatsApp uses) on
-    // Android. Purely cosmetic if absent — falls back to the app icon.
-    const photo = isCowatch
-      ? (data as IncomingCowatchNotifeeData).inviterPhoto
-      : (data as IncomingCallNotifeeData).callerPhoto;
-    // Using the roomName/sessionId as the notification id means a second,
-    // later push for the SAME call/invite (e.g. a duplicate delivery)
-    // replaces the existing one instead of stacking a second banner.
-    const notificationId = isCowatch
-      ? `cowatch_${(data as IncomingCowatchNotifeeData).sessionId}`
-      : `call_${(data as IncomingCallNotifeeData).roomName}`;
+      try {
+        await Notifications.setNotificationChannelAsync(ch.id, {
+          name: ch.name,
+          importance: Notifications.AndroidImportance.MAX,
+          sound: ch.file,
+          vibrationPattern: VIBRATION,
+          enableVibrate: true,
+          lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+          bypassDnd: true,
+          showBadge: false,
+          audioAttributes: {
+            usage: Notifications.AndroidAudioUsage.NOTIFICATION_RINGTONE,
+            contentType: Notifications.AndroidAudioContentType.SONIFICATION,
+          },
+        });
+      } catch (e) {
+        console.warn('[ring] expo channel create failed, falling back to notifee:', e);
+      }
   
-    await notifee.displayNotification({
-      id: notificationId,
-      title,
+      try {
+        if (!(await notifee.getChannel(ch.id))) {
+          await notifee.createChannel({
+            id: ch.id,
+            name: ch.name,
+            importance: AndroidImportance.HIGH,
+            sound: ch.resName,
+            vibration: true,
+            vibrationPattern: VIBRATION,
+            visibility: AndroidVisibility.PUBLIC,
+            bypassDnd: true,
+          });
+        }
+      } catch (e) {
+        console.warn('[ring] notifee channel create failed:', e);
+      }
+      return ch.id;
+    })();
+    channelPromises[ch.id] = promise;
+    // If something threw, allow a later retry instead of caching the failure.
+    promise.catch(() => { delete channelPromises[ch.id]; });
+    return promise;
+  }
+  
+  /** Creates both channels. Called at app start. */
+  export async function ensureIncomingCallChannel(): Promise<string> {
+    await ensureChannel(COWATCH_CHANNEL);
+    return ensureChannel(CALL_CHANNEL);
+  }
+  
+  export function ringBodyText(p: RingPayload): string {
+    if (p.type === 'cowatch_invite') return '🎬 Wants to watch together';
+    return p.callType === 'video' ? '📹 Incoming video call' : 'Incoming voice call';
+  }
+  
+  export function ringAcceptLabel(p: RingPayload): string {
+    if (p.type === 'cowatch_invite') return 'Join';
+    return p.callType === 'video' ? 'Video' : 'Answer';
+  }
+  
+  /**
+   * Shows the ringing notification. Works from a headless context (app killed)
+   * — it depends on no React state and no navigation.
+   */
+  export async function displayIncomingCallNotifee(p: RingPayload): Promise<void> {
+    const isCowatch = p.type === 'cowatch_invite';
+    const channelId = await ensureChannel(isCowatch ? COWATCH_CHANNEL : CALL_CHANNEL);
+    const body = ringBodyText(p);
+    const name = p.fromName || 'Someone';
+  
+    const build = (withSmallIcon: boolean, withStyle: boolean, withLockScreen: boolean): Notification => ({
+      id: ringNotificationId(p),
+      title: name,
       body,
-      data: data as any,
+      data: {
+        type: p.type, id: p.id, conversationId: p.conversationId,
+        fromId: p.fromId, fromName: name, fromPhoto: p.fromPhoto || '',
+        ...(p.callType ? { callType: p.callType } : {}),
+        ...(p.roomName ? { roomName: p.roomName } : {}),
+        ...(p.sessionId ? { sessionId: p.sessionId } : {}),
+      } as Record<string, string>,
       android: {
         channelId,
+        ...(withSmallIcon ? { smallIcon: SMALL_ICON } : {}),
+        color: BRAND_COLOR,
         category: isCowatch ? AndroidCategory.SOCIAL : AndroidCategory.CALL,
         importance: AndroidImportance.HIGH,
         visibility: AndroidVisibility.PUBLIC,
-        ...(photo ? { largeIcon: photo } : {}),
-        // This is what makes it actually RING instead of chiming once —
-        // loops the channel's sound continuously until answered, declined,
-        // or it times out below. This is the single biggest reason this
-        // whole native layer exists.
+        // Round caller photo. (Conversation-style notifications also get the
+        // app-logo badge on the avatar on Android 11+.)
+        ...(p.fromPhoto ? { largeIcon: p.fromPhoto, circularLargeIcon: true } : {}),
+        // Same layout WhatsApp shows: name on top, "Incoming voice call" under.
+        ...(withStyle
+          ? {
+              style: {
+                type: AndroidStyle.MESSAGING,
+                person: { name, ...(p.fromPhoto ? { icon: p.fromPhoto } : {}) },
+                messages: [{ text: body, timestamp: Date.now() }],
+              },
+            }
+          : {}),
+        // Keep ringing (sound loops) until it is answered/declined/cancelled.
         loopSound: true,
         ongoing: true,
         autoCancel: false,
-        // The actual "pop up over the lock screen, wake the device" part —
-        // requires USE_FULL_SCREEN_INTENT (added in app.config.js) and
-        // launches the app's normal entry point, same as any other tap.
-        fullScreenAction: {
-          id: 'default',
-          launchActivity: 'default',
-        },
-        pressAction: {
-          id: 'default',
-          launchActivity: 'default',
-        },
-        actions: isCowatch
-          ? [
-              {
-                title: 'Dismiss',
-                pressAction: { id: 'dismiss' }, // no launchActivity — never opens the app, matches the in-app Dismiss behavior exactly
-              },
-              {
-                title: 'Join',
-                pressAction: { id: 'join', launchActivity: 'default' },
-              },
-            ]
-          : [
-              {
-                title: 'Decline',
-                pressAction: { id: 'decline' }, // no launchActivity — handled entirely in the background, app never opens
-              },
-              {
-                title: 'Answer',
-                pressAction: { id: 'answer', launchActivity: 'default' },
-              },
-            ],
-        // Auto-clear after 30s — matches the existing ring timeout already
-        // used elsewhere (chat/[id].tsx's incoming-call banner, cowatch
-        // invite banner) for a consistent "give up after 30s" feel.
-        timeoutAfter: 30000,
+        onlyAlertOnce: false,
+        showTimestamp: true,
+        timestamp: Date.now(),
+        timeoutAfter: RING_TIMEOUT_MS,
+        // Phone locked / screen off: Android shows the full-screen call screen
+        // (Decline / Swipe up to accept / Message) OVER the lock screen and
+        // turns the display on. Phone in use: it stays a heads-up banner.
+        fullScreenAction: withLockScreen
+          ? { id: 'open', mainComponent: LOCKSCREEN_COMPONENT }
+          : { id: 'open', launchActivity: 'default' },
+        // Tap on the banner itself -> app opens on the image-3 screen.
+        pressAction: { id: 'open', launchActivity: 'default' },
+        actions: [
+          {
+            title: 'Decline',
+            // No launchActivity: declining never opens the app.
+            pressAction: { id: 'decline' },
+          },
+          {
+            title: `<p style="color:${BRAND_COLOR};"><b>${ringAcceptLabel(p)}</b></p>`,
+            pressAction: { id: 'accept', launchActivity: 'default' },
+          },
+        ],
       },
     });
+  
+    // Three attempts, most complete first, so a problem with one nice-to-have
+    // (lock-screen component, logo icon, conversation style) can never stop the
+    // phone from ringing at all.
+    const attempts: Array<[boolean, boolean, boolean]> = [
+      [true, true, true],    // logo icon + conversation style + lock-screen screen
+      [true, true, false],   // same, lock screen opens the app instead
+      [false, false, false], // bare minimum
+    ];
+    for (const [icon, style, lock] of attempts) {
+      try {
+        await notifee.displayNotification(build(icon, style, lock));
+        return;
+      } catch (e) {
+        console.warn('[ring] displayNotification attempt failed, trying simpler one:', e);
+      }
+    }
   }
   
-  /** Cancels the ringing notification — called once a call/invite is
-   * answered, declined, or ends some other way, so it doesn't keep ringing
-   * after the fact. Safe to call even if there's nothing currently
-   * displayed. Pass the roomName for a call, or the sessionId for a
-   * cowatch invite. */
-  export async function cancelIncomingCallNotifee(roomNameOrSessionId: string, isCowatch = false) {
+  /** Stops the ring for a call / invite. Safe if nothing is showing. */
+  export async function cancelRingNotification(t: { type: string; roomName?: string; sessionId?: string }) {
     try {
-      await notifee.cancelNotification(isCowatch ? `cowatch_${roomNameOrSessionId}` : `call_${roomNameOrSessionId}`);
+      await notifee.cancelNotification(ringNotificationId(t));
     } catch (_) {}
+  }
+  
+  /** Back-compat with the old signature. */
+  export async function cancelIncomingCallNotifee(roomNameOrSessionId: string, isCowatch = false) {
+    await cancelRingNotification(
+      isCowatch
+        ? { type: 'cowatch_invite', sessionId: roomNameOrSessionId }
+        : { type: 'incoming_call', roomName: roomNameOrSessionId },
+    );
   }
   

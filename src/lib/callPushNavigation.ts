@@ -34,19 +34,27 @@
 import { useEffect, useRef } from 'react';
 import * as Notifications from 'expo-notifications';
 import type { NavigationContainerRef } from '@react-navigation/native';
+// ✅ NEW (ringing rework): a plain tap on a call / watch invite now opens the
+// shared full-screen screen (Decline / Swipe up to accept / Message).
+import { parseRingData } from './ringPayload';
+import { showIncoming } from './incomingRing';
 
 // Show the notification banner/sound even while the app is in the
 // foreground (Expo suppresses foreground notifications by default).
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    // FIX: shouldShowAlert was replaced by shouldShowBanner/shouldShowList
-    // in current expo-notifications versions — TS now requires both
-    // (NotificationBehavior no longer has shouldShowAlert at all).
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
+  handleNotification: async (notification) => {
+    // ✅ CHANGED: a call / watch invite arriving while the app is open is
+    // shown by the in-app banner (with its own ringtone) — don't ALSO show a
+    // system banner or play the default notification sound on top of it.
+    const t = (notification.request.content.data as any)?.type;
+    const ringing = t === 'incoming_call' || t === 'cowatch_invite';
+    return {
+      shouldShowBanner: !ringing,
+      shouldShowList: !ringing,
+      shouldPlaySound: !ringing,
+      shouldSetBadge: false,
+    };
+  },
 });
 
 // ✅ NEW (fix — plain tap should show the chooser, not auto-answer): lands
@@ -57,22 +65,12 @@ Notifications.setNotificationHandler({
 // Android, is effectively every tap while the app was backgrounded/killed,
 // since those action buttons don't render in that state at all (see the
 // comment on presentIncomingCallPrompt in chat/[id].tsx for why).
-export function navigateToIncomingPrompt(navRef: NavigationContainerRef<any>, data: any) {
-  if (data?.type !== 'incoming_call') return;
-  navRef.navigate('Main', {
-    screen: 'Messages',
-    params: {
-      screen: 'ChatDM',
-      params: {
-        id: data.conversationId,
-        otherUserId: data.callerId,
-        otherName: data.callerName,
-        promptIncomingCall: true,
-        promptCallType: data.callType,
-        promptRoomName: data.roomName,
-      },
-    },
-  });
+export function navigateToIncomingPrompt(_navRef: NavigationContainerRef<any>, data: any) {
+  // ✅ CHANGED: used to navigate into the chat and show the chat screen's own
+  // modal. That modal is gone (it caused the double popup + double ring); the
+  // shared full-screen incoming screen is shown instead, from any screen.
+  const p = parseRingData(data);
+  if (p) showIncoming(p, { expanded: true, force: true });
 }
 
 export function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
@@ -99,8 +97,11 @@ export function navigateToCall(navRef: NavigationContainerRef<any>, data: any) {
         // this just forwards them.
         otherUserId: data.callerId,
         otherName:   data.callerName,
+        otherPhoto:  data.callerPhoto || undefined,
         autoAnswerCall: true,
         autoAnswerCallType: data.callType,
+        // ✅ NEW: lets the same chat answer a second call later (see chat/[id].tsx)
+        autoAnswerNonce: Date.now(),
       },
     },
   });

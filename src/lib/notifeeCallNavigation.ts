@@ -1,113 +1,42 @@
-// lib/notifeeCallNavigation.ts
+// src/lib/notifeeCallNavigation.ts   (REPLACES the old file)
 //
-// Same job as callPushNavigation.ts, same navigation targets (imported
-// directly from there — no duplicated logic), but reacting to notifee's
-// event system instead of expo-notifications' — because the full-screen,
-// looping-ring call notification is built with notifee (see
-// lib/incomingCallNotifee.ts), and notifee has its own separate API for
-// "what did the user do with this notification".
-//
-// Cold start (app was fully killed): notifee.getInitialNotification()
-// Warm (app already running):        notifee.onForegroundEvent()
-//
-// 'decline' is deliberately NOT handled here at all — it has no
-// launchActivity (see incomingCallNotifee.ts), so pressing it never
-// brings the app to the foreground or cold-starts it in the first place;
-// it's handled entirely inside index.js's notifee.onBackgroundEvent,
-// which can broadcast the decline and log the call WITHOUT ever opening
-// the app — a genuine improvement over the expo-notifications path,
-// where "Decline" from a killed app previously did nothing at all.
+// Reacts to taps on the ringing notification while the app is running or
+// was just opened by the tap (cold start). The real logic lives in
+// ringBackground.ts so the background handler in index.js uses the very
+// same code. Fixes vs the old version:
+//   • Decline pressed while the app was open used to open the chat instead
+//     of declining (onForegroundEvent never handled it)
+//   • on a cold start the tap was dropped when the navigator was not ready
+//     yet — actions now wait in a queue until 'Main' exists
+//   • the ringing notification was never cancelled after Answer
+
 import { useEffect, useRef } from 'react';
-import { NavigationContainerRef } from '@react-navigation/native';
 import notifee, { EventType } from '@notifee/react-native';
-import {
-  navigateToCall,
-  navigateToIncomingPrompt,
-} from './callPushNavigation';
+import { handleRingNotificationEvent } from './ringBackground';
+import { startRingActionRunner } from './incomingRing';
 
-function handleNotifeeCallEvent(
-  navRef: NavigationContainerRef<any>,
-  data: any,
-  pressActionId: string | undefined,
-) {
-  if (data?.type === 'cowatch_invite') {
-    // ✅ NEW (cowatch parity): mirrors notificationPushNavigation.ts's
-    // 'cowatch_invite' case exactly (kept as a small, self-contained
-    // duplicate here rather than refactoring that file's switch
-    // structure, to avoid any risk to its already-working push-tap path).
-    if (pressActionId === 'join') {
-      navRef.navigate('Main', {
-        screen: 'Messages',
-        params: {
-          screen: 'Cowatch',
-          params: {
-            conversationId: data.conversationId,
-            sessionId: data.sessionId,
-            otherName: data.inviterName || 'Someone',
-          },
-        },
-      });
-    } else {
-      // Plain tap on the body/full-screen banner — show the real
-      // Join/Dismiss chooser, same as the push-tap path.
-      navRef.navigate('Main', {
-        screen: 'Messages',
-        params: {
-          screen: 'ChatDM',
-          params: {
-            id: data.conversationId,
-            promptIncomingCowatch: true,
-            promptCowatchSessionId: data.sessionId,
-            promptCowatchInviterName: data.inviterName || 'Someone',
-          },
-        },
-      });
-    }
-    return;
-  }
-
-  if (data?.type !== 'incoming_call') return;
-  if (pressActionId === 'answer') {
-    // notifee's Answer button reliably renders and works even with the
-    // app fully killed (unlike expo-notifications' categories) — so
-    // unlike the plain-push path, honoring a real auto-answer here is
-    // safe and matches what a person actually pressed.
-    navigateToCall(navRef, data);
-  } else {
-    // Plain tap on the body, or the full-screen banner itself was tapped
-    // — show the real chooser, same as everywhere else in the app.
-    navigateToIncomingPrompt(navRef, data);
-  }
-}
-
-export function useNotifeeCallNavigation(
-  navRef: React.RefObject<NavigationContainerRef<any> | null>,
-) {
+export function useNotifeeCallNavigation(_navRef?: unknown) {
   const handledColdStart = useRef(false);
 
   useEffect(() => {
+    // drain anything queued by the background handler before we mounted
+    const stopRunner = startRingActionRunner();
+
     if (!handledColdStart.current) {
       handledColdStart.current = true;
       notifee.getInitialNotification().then((initial) => {
-        if (!initial || !navRef.current?.isReady()) return;
-        handleNotifeeCallEvent(
-          navRef.current,
-          initial.notification.data,
-          initial.pressAction?.id,
-        );
+        if (!initial) return;
+        handleRingNotificationEvent({
+          type: EventType.PRESS, // the pressAction id (accept / decline / open) decides what happens
+          detail: { notification: initial.notification, pressAction: initial.pressAction },
+        } as any).catch(() => {});
       }).catch(() => {});
     }
 
-    const unsubscribe = notifee.onForegroundEvent(({ type, detail }) => {
-      if (type !== EventType.PRESS && type !== EventType.ACTION_PRESS) return;
-      if (!navRef.current?.isReady()) return;
-      handleNotifeeCallEvent(
-        navRef.current,
-        detail.notification?.data,
-        detail.pressAction?.id,
-      );
+    const unsubscribe = notifee.onForegroundEvent((event) => {
+      handleRingNotificationEvent(event).catch(() => {});
     });
 
-    return () => unsubscribe();
-  }, [navRef]);
+    return () => { unsubscribe(); stopRunner(); };
+  }, []);
 }

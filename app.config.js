@@ -1,3 +1,14 @@
+import fs from 'fs';
+
+// ✅ NEW (ringing rework): the small white LumVibe logo used as the badge on the
+// caller's photo in the ringing notification. Only wired in if the file exists,
+// so the build never breaks without it.
+const NOTIF_ICON = './src/assets/images/notification-icon.png'; // 96x96, WHITE logo on transparent
+const notificationsPlugin = ['expo-notifications', {
+  color: '#00e676',
+  ...(fs.existsSync(NOTIF_ICON) ? { icon: NOTIF_ICON } : {}),
+}];
+
 export default {
   "expo": {
     "name": "LumVibeNative",
@@ -42,7 +53,8 @@ export default {
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_PHONE_CALL",
         "android.permission.WAKE_LOCK",
-        "android.permission.VIBRATE"
+        "android.permission.VIBRATE",
+        "android.permission.POST_NOTIFICATIONS"
       ]
     },
     "plugins": [
@@ -53,7 +65,12 @@ export default {
       "expo-web-browser",
       ["@livekit/react-native-expo-plugin", { "android": { "audioType": "communication" } }],
       "@config-plugins/react-native-webrtc",
-      "expo-notifications",
+      // ✅ CHANGED: was the bare "expo-notifications". Now also creates the small
+      // LumVibe logo used as the badge on the caller photo.
+      notificationsPlugin,
+      // ✅ NEW: copies the two ringtones into res/raw under Android-safe names
+      // ("ringtone.mp3.wav" -> calls, "cowatch ringtone.mp3" -> watch invites).
+      "./plugins/withRingSounds",
       "expo-iap",
       // ✅ NEW (native incoming-call UI, step 1 of 2 — plugins only, no
       // behavior change yet): these are purely additive to your native

@@ -16,6 +16,12 @@ import * as Notifications from 'expo-notifications';
 // globalIncomingSignal.tsx for the full picture. Purely additive
 // alongside the existing per-conversation broadcast right below.
 import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
+// ✅ NEW (ringing rework): this screen no longer draws its own incoming-call /
+// watch-invite modal or plays its own ringtone (that popped a SECOND modal and
+// a SECOND ring on top of the global one — visible behind the modal in the
+// Home screenshot). It forwards to the one shared ring state instead.
+import { showIncoming, cancelIncomingByTarget } from '../lib/incomingRing';
+import { parseRingData } from '../lib/ringPayload';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import ContextStoryBar from './components/ContextStoryBar';
@@ -200,6 +206,7 @@ async function sendCallPush(payload: {
   calleeId: string; callerId: string; callerName: string;
   callType: 'voice' | 'video'; roomName: string; conversationId: string;
   callerPhoto?: string;
+  callId?: string; // ✅ NEW: same id as the realtime broadcast -> receiver never rings twice
 }) {
   try {
     await supabase.functions.invoke('send-call-push', { body: payload });
@@ -364,20 +371,10 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     }
   }, []);
 
-  // Callee's actual ringtone — plays while an incoming call is showing.
-  useEffect(() => {
-    if (incomingCall) {
-      try {
-        const player = createAudioPlayer(require('../assets/sounds/ringtone.mp3'));
-        player.loop = true;
-        player.play();
-        ringtonePlayerRef.current = player;
-      } catch (e) { console.warn('[LumVibe] ringtone playback failed:', e); }
-    } else {
-      stopRingtone();
-    }
-    return stopRingtone;
-  }, [incomingCall, stopRingtone]);
+  // ✅ REMOVED (ringing rework): the callee's ringtone used to play from HERE,
+  // only while this chat screen was mounted. The ringtone (and vibration) now
+  // belongs to the shared ring state in src/lib/incomingRing.ts, so it rings on
+  // every screen, exactly once.
 
   // Caller's ringback tone — plays while waiting for the other side to
   // answer (isConnecting, nobody's joined the room yet).
@@ -385,7 +382,13 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     if (callState.isInCall && callState.isConnecting && !callState.remoteConnected) {
       if (!ringbackPlayerRef.current) {
         try {
-          const player = createAudioPlayer(require('../assets/sounds/ringback.mp3'));
+          // ✅ CHANGED: there is no ringback.mp3 in src/assets/sounds (only the two
+          // ringtones), so the caller heard nothing while waiting. Use ringback.mp3
+          // if you add one later, otherwise the call ringtone.
+          let ringbackSource: any;
+          try { ringbackSource = require('../assets/sounds/ringback.mp3'); }
+          catch (_) { ringbackSource = require('../assets/sounds/ringtone.mp3.wav'); }
+          const player = createAudioPlayer(ringbackSource);
           player.loop = true;
           player.play();
           ringbackPlayerRef.current = player;
@@ -417,22 +420,10 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     channel
       .on('broadcast', { event: 'incoming_call' }, ({ payload }: any) => {
         if (!mountedRef.current || payload?.callerId === currentUserId) return;
-        setIncomingCall(payload);
-        if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
-        ringTimerRef.current = setTimeout(() => {
-          // ✅ NEW: nobody answered within the ring window — log a missed
-          // call, but only if this exact call is still the one showing
-          // (guards against a stale timer firing after accept/decline/
-          // cancel already resolved it, which would otherwise log a
-          // "missed" call that was actually answered or declined).
-          setIncomingCall(prev => {
-            if (prev?.roomName === payload.roomName) {
-              logCallOnce(payload.roomName, payload.callType, 'missed');
-              return null;
-            }
-            return prev;
-          });
-        }, 30000); // auto-dismiss the ring after 30s if nobody answers
+        // ✅ CHANGED: forward to the shared ring state (de-duplicated against
+        // the per-user channel + the push, which carry the same callId).
+        const p = parseRingData({ type: 'incoming_call', ...payload, conversationId });
+        if (p) showIncoming(p);
       })
       .on('broadcast', { event: 'call_cancelled' }, ({ payload }: any) => {
         // ✅ FIX: clear the pending ring-timeout too — otherwise, if the
@@ -441,6 +432,7 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
         // for a call that's already been logged by the caller's own hangup.
         if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
         setIncomingCall(prev => (prev?.roomName === payload?.roomName ? null : prev));
+        cancelIncomingByTarget({ roomName: payload?.roomName });
       })
       .on('broadcast', { event: 'call_declined' }, ({ payload }: any) => {
         if (!mountedRef.current) return;
@@ -470,15 +462,11 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       // what was missing.
       .on('broadcast', { event: 'cowatch_invite' }, ({ payload }: any) => {
         if (!mountedRef.current || payload?.inviterId === currentUserId) return;
-        setIncomingCowatch(payload);
-        if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
-        cowatchRingTimerRef.current = setTimeout(() => {
-          setIncomingCowatch(prev => (prev?.sessionId === payload.sessionId ? null : prev));
-        }, 30000); // auto-dismiss, same window as an unanswered call
+        const p = parseRingData({ type: 'cowatch_invite', ...payload, conversationId });
+        if (p) showIncoming(p);
       })
       .on('broadcast', { event: 'cowatch_cancelled' }, ({ payload }: any) => {
-        if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
-        setIncomingCowatch(prev => (prev?.sessionId === payload?.sessionId ? null : prev));
+        cancelIncomingByTarget({ sessionId: payload?.sessionId });
       })
       .subscribe();
     signalRef.current = channel;
@@ -609,6 +597,10 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     }
 
     const roomName = `call_${convId}`;
+    // ✅ NEW: one id per call attempt, sent on ALL THREE channels below
+    // (per-conversation broadcast, per-user broadcast, push) so the callee's
+    // phone recognises them as the same call and rings only once.
+    const callId = `${roomName}_${Date.now()}`;
     isCallerRef.current = true;
     setCallState(prev => ({
       ...prev, isInCall: true, callType,
@@ -621,7 +613,10 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     try {
       await signalRef.current?.send({
         type: 'broadcast', event: 'incoming_call',
-        payload: { callerId: currentUserId, callerName: displayName || 'Someone', callType, roomName },
+        payload: {
+          callerId: currentUserId, callerName: displayName || 'Someone', callerPhoto,
+          callType, roomName, conversationId: convId, callId,
+        },
       });
     } catch (e) { console.error('incoming_call broadcast error:', e); }
 
@@ -632,7 +627,7 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
     if (otherUserId) {
       broadcastToUserChannel(otherUserId, 'incoming_call', {
         callerId: currentUserId, callerName: displayName || 'Someone',
-        callerPhoto, callType, roomName, conversationId: convId,
+        callerPhoto, callType, roomName, conversationId: convId, callId,
       });
     }
 
@@ -642,7 +637,7 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       sendCallPush({
         calleeId: otherUserId, callerId: currentUserId,
         callerName: displayName || 'Someone', callType, roomName, conversationId: convId,
-        callerPhoto,
+        callerPhoto, callId,
       });
     }
 
@@ -777,24 +772,16 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
   // sees the real Answer/Decline choice once the app actually opens —
   // just one tap later than the buttons themselves would have been.
   const presentIncomingCallPrompt = useCallback((payload: IncomingCall) => {
-    setIncomingCall(payload);
-    if (ringTimerRef.current) clearTimeout(ringTimerRef.current);
-    ringTimerRef.current = setTimeout(() => {
-      setIncomingCall(prev => (prev?.roomName === payload.roomName ? null : prev));
-    }, 30000);
-  }, []);
+    // ✅ CHANGED: opens the shared full-screen incoming screen instead of this
+    // chat's own modal.
+    const p = parseRingData({ type: 'incoming_call', ...payload, conversationId: conversationId || '' });
+    if (p) showIncoming(p, { expanded: true, force: true });
+  }, [conversationId]);
 
-  // ✅ NEW (fix #3 continued — cowatch invite parity): same idea as
-  // presentIncomingCallPrompt above, but for cowatch. Lets a push-notification
-  // tap show the real Join/Dismiss banner instead of requiring the chat
-  // screen to have already been open when the invite was sent.
   const presentIncomingCowatchPrompt = useCallback((payload: IncomingCowatch) => {
-    setIncomingCowatch(payload);
-    if (cowatchRingTimerRef.current) clearTimeout(cowatchRingTimerRef.current);
-    cowatchRingTimerRef.current = setTimeout(() => {
-      setIncomingCowatch(prev => (prev?.sessionId === payload.sessionId ? null : prev));
-    }, 30000);
-  }, []);
+    const p = parseRingData({ type: 'cowatch_invite', ...payload, conversationId: conversationId || '' });
+    if (p) showIncoming(p, { expanded: true, force: true });
+  }, [conversationId]);
 
   // ✅ NEW (fix #3): dismiss an incoming cowatch invite without joining —
   // the "Dismiss" side of the banner. Accepting is just openCowatch(
@@ -1678,7 +1665,7 @@ export default function ChatScreen() {
   // notification is tapped WITHOUT an explicit Answer/Decline action
   // (the common case on Android, since those buttons don't render on a
   // backgrounded/killed app — see the comment on presentIncomingCallPrompt).
-  const { id, otherUserId, otherName, otherPhoto, autoAnswerCall, autoAnswerCallType, autoStartCall, autoStartCallType, promptIncomingCall, promptCallType, promptRoomName, promptIncomingCowatch, promptCowatchSessionId, promptCowatchInviterName } = route.params || {};
+  const { id, otherUserId, otherName, otherPhoto, autoAnswerCall, autoAnswerCallType, autoAnswerNonce, autoStartCall, autoStartCallType, promptIncomingCall, promptCallType, promptRoomName, promptIncomingCowatch, promptCowatchSessionId, promptCowatchInviterName } = route.params || {};
 
   // FIX: MainTabBar was always visible on this screen — it never told the
   // parent tab navigator to hide it. MainTabBar itself already knows how to
@@ -1740,7 +1727,7 @@ export default function ChatScreen() {
     // ✅ NEW (fix #3): incoming cowatch invite.
     incomingCowatch, dismissCowatchInvite,
     presentIncomingCallPrompt, presentIncomingCowatchPrompt,
-  } = useCall(user?.id || '', displayName, id || null, otherUserId || null, userProfile?.photo_url || undefined);
+  } = useCall(user?.id || '', displayName, id || null, otherUserId || null, (userProfile as any)?.avatar_url || userProfile?.photo_url || undefined);
 
   // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
   // the user tapped it, and the root navigator (see the app-entry snippet)
@@ -1757,18 +1744,39 @@ export default function ChatScreen() {
   // instead, deriving the same deterministic room name startCall() itself
   // uses (`call_${conversationId}`), never re-signaling a call that's
   // already ringing.
-  const autoAnsweredRef = useRef(false);
+  // ✅ CHANGED (ringing rework): two fixes to the Answer path.
+  //  1) it never asked for the microphone/camera permission — on a fresh
+  //     install (or after the app was killed) you could "answer" and join the
+  //     room with NO mic, so nobody could talk. It asks first now, exactly
+  //     like acceptCall() does.
+  //  2) it only worked ONCE per screen (autoAnsweredRef stayed true), so
+  //     answering a second call in the same chat did nothing. It is now keyed
+  //     on a fresh nonce sent with every Answer.
+  const lastAnswerKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (autoAnswerCall && !autoAnsweredRef.current && id) {
-      autoAnsweredRef.current = true;
-      const callType = autoAnswerCallType === 'video' ? 'video' : 'voice';
+    if (!autoAnswerCall || !id) return;
+    const key = String(autoAnswerNonce ?? 'once');
+    if (lastAnswerKeyRef.current === key) return;
+    lastAnswerKeyRef.current = key;
+    const callType = autoAnswerCallType === 'video' ? 'video' : 'voice';
+    (async () => {
+      if (Platform.OS === 'android') {
+        const perms = callType === 'video'
+          ? [PermissionsAndroid.PERMISSIONS.CAMERA, PermissionsAndroid.PERMISSIONS.RECORD_AUDIO]
+          : [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+        const results = await PermissionsAndroid.requestMultiple(perms);
+        if (perms.some(p => results[p] !== PermissionsAndroid.RESULTS.GRANTED)) {
+          setCallState(prev => ({ ...prev, permDenied: true }));
+          return;
+        }
+      }
       setCallState(prev => ({
         ...prev, isInCall: true, callType,
         isConnecting: true, remoteConnected: false, permDenied: false,
       }));
       joinLiveKitRoom(`call_${id}`, callType);
-    }
-  }, [autoAnswerCall, autoAnswerCallType, id, joinLiveKitRoom]);
+    })();
+  }, [autoAnswerCall, autoAnswerCallType, autoAnswerNonce, id, joinLiveKitRoom]);
 
   // ✅ NEW (fix #2 — "Call back" action): unlike autoAnswerCall above
   // (which joins a room someone ELSE already opened), calling back means
@@ -1976,7 +1984,11 @@ export default function ChatScreen() {
       conversationId: id,
       otherName: otherName || '',
       otherPhoto: otherPhoto || '',
-      ...(sessionId ? { existingSessionId: sessionId } : {}),
+      // ✅ FIX: cowatch.tsx reads this param as `sessionId`. It was passed as
+      // `existingSessionId`, which cowatch.tsx ignores — so a JOINER thought it
+      // had created the session and invited the inviter right back (the
+      // duplicate "Started a watch party" bubbles in your chat screenshot).
+      ...(sessionId ? { sessionId } : {}),
     });
   }, [navigation, id, otherName, otherPhoto]);
 
@@ -2289,63 +2301,10 @@ export default function ChatScreen() {
         onToggleCamera={toggleCamera}
       />
 
-      {/* ✅ NEW: Incoming call banner — shown when the other participant
-          starts a call while this chat is open. */}
-      <Modal visible={!!incomingCall} transparent animationType="fade" statusBarTranslucent>
-        <View style={styles.incomingOverlay}>
-          <View style={styles.incomingCard}>
-            {incomingCall?.callerPhoto
-              ? <Image source={{ uri: incomingCall.callerPhoto }} style={styles.incomingAvatar} />
-              : <View style={[styles.incomingAvatar, styles.incomingAvatarPlaceholder]}>
-                  <Text style={styles.incomingAvatarInitial}>{(incomingCall?.callerName || 'U')[0].toUpperCase()}</Text>
-                </View>}
-            <Text style={styles.incomingName}>{incomingCall?.callerName || 'Someone'}</Text>
-            <Text style={styles.incomingSubtitle}>
-              Incoming {incomingCall?.callType === 'video' ? 'video' : 'voice'} call…
-            </Text>
-            <View style={styles.incomingActions}>
-              <TouchableOpacity style={[styles.incomingBtn, styles.incomingDecline]} onPress={declineCall}>
-                <Ionicons name="call" size={24} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.incomingBtn, styles.incomingAccept]} onPress={acceptCall}>
-                <Ionicons name={incomingCall?.callType === 'video' ? 'videocam' : 'call'} size={24} color="#000" />
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* ✅ NEW (fix #3): Incoming cowatch invite banner — shown the instant
-          the other person starts a watch-together session while this chat
-          is open, same as the incoming call banner above. */}
-      <Modal visible={!!incomingCowatch} transparent animationType="fade" statusBarTranslucent>
-        <View style={styles.incomingOverlay}>
-          <View style={styles.incomingCard}>
-            {incomingCowatch?.inviterPhoto
-              ? <Image source={{ uri: incomingCowatch.inviterPhoto }} style={styles.incomingAvatar} />
-              : <View style={[styles.incomingAvatar, styles.incomingAvatarPlaceholder]}>
-                  <Text style={styles.incomingAvatarInitial}>{(incomingCowatch?.inviterName || 'U')[0].toUpperCase()}</Text>
-                </View>}
-            <Text style={styles.incomingName}>{incomingCowatch?.inviterName || 'Someone'}</Text>
-            <Text style={styles.incomingSubtitle}>Wants to watch together…</Text>
-            <View style={styles.incomingActions}>
-              <TouchableOpacity style={[styles.incomingBtn, styles.incomingDecline]} onPress={dismissCowatchInvite}>
-                <Ionicons name="close" size={26} color="#fff" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.incomingBtn, styles.incomingAccept]}
-                onPress={() => {
-                  const sessionId = incomingCowatch?.sessionId;
-                  dismissCowatchInvite();
-                  if (sessionId) openCowatch(sessionId);
-                }}
-              >
-                <Ionicons name="play" size={24} color="#000" />
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* ✅ REMOVED (ringing rework): the incoming-call and watch-invite modals
+          that used to live here. They popped up on top of the global banner
+          (two popups, two ringtones) and were the reason the ring looked
+          different on every screen. See globalIncomingSignal.tsx. */}
     </SafeAreaView>
   );
 }

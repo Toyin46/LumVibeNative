@@ -66,7 +66,13 @@ import { supabase } from '../config/supabase';
 // this exact chat screen) — see globalIncomingSignal.tsx.
 import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
 import { useAuthStore } from '../store/authStore';
-import { notifyCowatchInvite } from '../lib/notifications';
+import { notifyCowatchInvite, notifyCowatchCancelled } from '../lib/notifications';
+
+// ✅ NEW: how long the app may stay in the background during a watch party
+// before the session is ended. Long enough for a permission dialog, a phone
+// call or a quick look at another app; short enough not to leave a dead
+// session (and an unanswered ring) behind.
+const COWATCH_BACKGROUND_GRACE_MS = 120000;
 
 // ── FIX 4: LIVEKIT — replaces Agora completely ──────────────────────────────
 // Install: npm install @livekit/react-native @livekit/react-native-webrtc
@@ -944,6 +950,25 @@ function broadcastCowatchInvite(
       supabase.removeChannel(channel);
     }
   });
+}
+
+// ✅ NEW (ringing rework): the person who started the watch party left before
+// the other person joined — stop the ring on their phone. Three paths, like the
+// invite itself: their any-screen banner (per-user channel), the chat-screen
+// channel, and the push that stops the closed-app notification.
+function cancelCowatchInvite(inviteeId: string, conversationId: string, sessionId: string) {
+  broadcastToUserChannel(inviteeId, 'cowatch_cancelled', { sessionId, conversationId });
+  const ch = supabase.channel(`call_signal:${conversationId}`, { config: { broadcast: { self: false } } });
+  ch.subscribe((status: string) => {
+    if (status === 'SUBSCRIBED') {
+      ch.send({ type: 'broadcast', event: 'cowatch_cancelled', payload: { sessionId } })
+        .catch(() => {})
+        .finally(() => { supabase.removeChannel(ch); });
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      supabase.removeChannel(ch);
+    }
+  });
+  notifyCowatchCancelled(inviteeId, conversationId, sessionId).catch(() => {});
 }
 
 // ✅ NEW (fix #4 — cowatch should log inline like a call does): mirrors
@@ -2661,6 +2686,12 @@ export default function CowatchScreen() {
   const sessionRef       = useRef<CowatchSession | null>(null);
   const aiMatchQueueIdRef = useRef<string | null>(null);
   const sessionEndedRef  = useRef(false); // guards against double end_session writes
+  // ✅ NEW: cleanupCowatchState has empty deps, so it reads what it needs to
+  // cancel an unanswered invite from a ref.
+  const inviteCancelRef  = useRef<{ userId?: string; otherUserId?: string | null; conversationId?: string }>({});
+  useEffect(() => {
+    inviteCancelRef.current = { userId: user?.id, otherUserId, conversationId };
+  }, [user?.id, otherUserId, conversationId]);
   useEffect(() => { sessionRef.current = session; }, [session]);
   useEffect(() => { aiMatchQueueIdRef.current = aiMatchQueueId; }, [aiMatchQueueId]);
 
@@ -2681,7 +2712,14 @@ export default function CowatchScreen() {
     if (sessionEndedRef.current) return;
     sessionEndedRef.current = true;
     if (sessionRef.current) {
-      endCowatchSession(sessionRef.current.id).catch(() => {});
+      const ending = sessionRef.current;
+      endCowatchSession(ending.id).catch(() => {});
+      // ✅ NEW: if I'm the one who started it, make sure the other person's
+      // phone stops ringing (harmless if they already joined).
+      const info = inviteCancelRef.current;
+      if (info.userId && ending.started_by === info.userId && info.otherUserId && info.conversationId) {
+        cancelCowatchInvite(info.otherUserId, info.conversationId, ending.id);
+      }
     } else if (aiMatchQueueIdRef.current) {
       // Only abandon the queue row if we never actually got matched —
       // otherwise this would overwrite a valid 'matched' row back to
@@ -2715,14 +2753,33 @@ export default function CowatchScreen() {
       setupSession();
     }
 
-    // FIX (orphaned sessions): if the app is backgrounded mid-cowatch
-    // (phone call, switching apps, locking the phone) end the session
-    // the same way the End Call button would. Without this, a session
-    // stayed is_active:true in the DB until someone came back and
-    // pressed End Call — or never did.
+    // FIX (orphaned sessions): a session must not stay is_active forever if
+    // someone leaves the app. ✅ CHANGED (invites): it used to end THE INSTANT
+    // the app went to the background — which also happens for a second when
+    // Android shows the camera/microphone permission dialog, when someone
+    // pulls down the notification shade, answers a phone call, or glances at
+    // another app. For the person who sent the invite that killed the session
+    // before the other person could join ("Watch party ended"). Now there is a
+    // grace period: it only ends if the app stays away for COWATCH_BACKGROUND_GRACE_MS.
+    let backgroundedAt = 0;
+    let backgroundTimer: ReturnType<typeof setTimeout> | null = null;
+    const leaveCowatchAfterGrace = () => {
+      cleanupCowatchState();
+      try { navigation.goBack(); } catch (_) {}
+    };
     const appStateSub = AppState.addEventListener('change', (next: AppStateStatus) => {
       if (next === 'background' || next === 'inactive') {
-        cleanupCowatchState();
+        if (!backgroundedAt) backgroundedAt = Date.now();
+        if (!backgroundTimer) {
+          backgroundTimer = setTimeout(() => { backgroundTimer = null; leaveCowatchAfterGrace(); }, COWATCH_BACKGROUND_GRACE_MS);
+        }
+      } else if (next === 'active') {
+        const away = backgroundedAt ? Date.now() - backgroundedAt : 0;
+        backgroundedAt = 0;
+        if (backgroundTimer) { clearTimeout(backgroundTimer); backgroundTimer = null; }
+        // Android can freeze timers while the app is away — if we were gone
+        // longer than the grace period, end it now that we're back.
+        if (away >= COWATCH_BACKGROUND_GRACE_MS) leaveCowatchAfterGrace();
       }
     });
 
@@ -2738,6 +2795,7 @@ export default function CowatchScreen() {
       // back button, not just the explicit End Call button.
       cleanupCowatchState();
       appStateSub.remove();
+      if (backgroundTimer) clearTimeout(backgroundTimer);
     };
   }, []);
 
@@ -2996,11 +3054,23 @@ export default function CowatchScreen() {
       // they were no longer even subscribed to the same channel. Now we
       // always look for an active session first and only start a new one
       // if none exists, regardless of how this screen was entered.
+      // ✅ NEW: remember whether THIS call created the session. Only a creator
+      // sends an invite — joiners (and anyone who just re-opens Co-Watch while
+      // one is active) must never invite the other person back.
+      let createdNew = false;
       activeSession = await getActiveCowatchSession(conversationId);
       if (activeSession) {
         setOtherUserActive(true);
+      } else if (existingSessionId) {
+        // ✅ NEW: they tapped Join on an invite whose watch party is already
+        // over (inviter left). Used to silently start a NEW session and ring
+        // the inviter back.
+        Alert.alert('Watch party ended', `${otherName || 'They'} already left this watch party.`);
+        navigation.goBack();
+        return;
       } else {
         activeSession = await startCowatchSession(conversationId, user.id, feedType);
+        createdNew = true;
       }
       if (!activeSession) { Alert.alert('Error', 'Could not start co-watch session.'); navigation.goBack(); return; }
       setSession(activeSession);
@@ -3015,7 +3085,7 @@ export default function CowatchScreen() {
       // created a brand-new session (matches the original !existingSessionId
       // guard) — not when we're just joining a session someone else already
       // started, which would otherwise "invite" them right back.
-      if (!existingSessionId && conversationId) {
+      if (createdNew && conversationId) {
         const inviterName = userProfile?.display_name || userProfile?.username || 'Someone';
         // ✅ NEW: instant in-app banner for whoever has this chat open right
         // now — see broadcastCowatchInvite above for why this was missing.
@@ -3028,7 +3098,7 @@ export default function CowatchScreen() {
           // userProfile?.photo_url for the same purpose. These two screens
           // disagree on this field name; if invite avatars show up blank,
           // check what useAuthStore()'s userProfile actually contains.
-          inviterPhoto: userProfile?.avatar_url || undefined,
+          inviterPhoto: (userProfile as any)?.avatar_url || (userProfile as any)?.photo_url || undefined,
           sessionId: activeSession.id,
           conversationId,
         });
@@ -3046,12 +3116,12 @@ export default function CowatchScreen() {
             // fully-killed device that isn't sitting on the chat screen to
             // receive the broadcast above.
             if (inviteeId) {
-              await notifyCowatchInvite(inviteeId, user.id, inviterName, conversationId, activeSession.id, userProfile?.avatar_url || undefined);
+              await notifyCowatchInvite(inviteeId, user.id, inviterName, conversationId, activeSession.id, (userProfile as any)?.avatar_url || (userProfile as any)?.photo_url || undefined);
               // ✅ NEW: rings the invitee's GLOBAL signal channel too —
               // any screen, not just this exact chat screen.
               broadcastToUserChannel(inviteeId, 'cowatch_invite', {
                 inviterId: user.id, inviterName,
-                inviterPhoto: userProfile?.avatar_url || undefined,
+                inviterPhoto: (userProfile as any)?.avatar_url || (userProfile as any)?.photo_url || undefined,
                 sessionId: activeSession.id, conversationId,
               });
             }
