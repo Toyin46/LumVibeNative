@@ -39,6 +39,21 @@ export interface CancelPayload {
 
 const RING_TYPES = new Set(['incoming_call', 'cowatch_invite']);
 const CANCEL_TYPES = new Set(['call_cancelled', 'cowatch_cancelled']);
+const CHAT_TYPES = new Set(['chat_message']);
+
+/** A chat message push (WhatsApp-style notification). */
+export interface ChatPayload {
+  type: 'chat_message';
+  conversationId: string;
+  messageId: string;
+  senderId: string;
+  senderName: string;
+  senderPhoto?: string;
+  text: string;
+  messageType: string;
+  sentAt: number;
+  recipientId: string;
+}
 
 function tryJson(v: any): any {
   if (typeof v !== 'string') return null;
@@ -69,7 +84,7 @@ export function extractPushData(raw: any): Record<string, any> | null {
     tryJson(raw?.notification?.request?.trigger?.remoteMessage?.data?.body),
   ];
   for (const c of candidates) {
-    if (isObj(c) && typeof c.type === 'string' && (RING_TYPES.has(c.type) || CANCEL_TYPES.has(c.type))) {
+    if (isObj(c) && typeof c.type === 'string' && (RING_TYPES.has(c.type) || CANCEL_TYPES.has(c.type) || CHAT_TYPES.has(c.type))) {
       return c;
     }
   }
@@ -115,6 +130,25 @@ export function parseCancelData(raw: any): CancelPayload | null {
   const d = extractPushData(raw);
   if (!d || !CANCEL_TYPES.has(d.type)) return null;
   return { type: d.type, roomName: str(d.roomName), sessionId: str(d.sessionId) };
+}
+
+export function parseChatData(raw: any): ChatPayload | null {
+  const d = extractPushData(raw);
+  if (!d || !CHAT_TYPES.has(d.type)) return null;
+  const conversationId = str(d.conversationId);
+  if (!conversationId) return null;
+  return {
+    type: 'chat_message',
+    conversationId,
+    messageId: str(d.messageId) || '',
+    senderId: str(d.senderId) || '',
+    senderName: str(d.senderName) || 'New message',
+    senderPhoto: str(d.senderPhoto),
+    text: str(d.text) || 'New message',
+    messageType: str(d.messageType) || 'text',
+    sentAt: Number(d.sentAt) || Date.now(),
+    recipientId: str(d.recipientId) || '',
+  };
 }
 
 /** notifee needs a flat string->string map. */

@@ -12,7 +12,8 @@
 
 import { Platform } from 'react-native';
 import { Event, EventType } from '@notifee/react-native';
-import { parseRingData, parseCancelData } from './ringPayload';
+import { parseRingData, parseCancelData, parseChatData } from './ringPayload';
+import { displayChatNotification, handleChatEvent } from './chatNotifications';
 import { displayIncomingCallNotifee, cancelRingNotification } from './incomingCallNotifee';
 import {
   showIncoming,
@@ -24,6 +25,13 @@ import {
 /** App closed or in the background: draw the ringing notification. */
 export async function handleRingPush(raw: any): Promise<void> {
   if (Platform.OS !== 'android') return; // iOS gets a normal visible push (see send-call-push)
+
+  // A chat message: draw the WhatsApp-style message notification.
+  const chat = parseChatData(raw);
+  if (chat) {
+    await displayChatNotification(chat);
+    return;
+  }
 
   const cancel = parseCancelData(raw);
   if (cancel) {
@@ -54,6 +62,13 @@ export function handleForegroundPush(raw: any): void {
 export async function handleRingNotificationEvent(event: Event): Promise<void> {
   const { type, detail } = event;
   if (type !== EventType.PRESS && type !== EventType.ACTION_PRESS) return;
+
+  // Tap / Reply / Mark as read / Mute on a chat-message notification
+  const chat = parseChatData(detail.notification?.data);
+  if (chat) {
+    await handleChatEvent(event, chat);
+    return;
+  }
 
   const payload = parseRingData(detail.notification?.data);
   if (!payload) return;

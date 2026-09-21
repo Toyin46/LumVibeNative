@@ -51,6 +51,8 @@ import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+// ✅ NEW: "watch with someone who isn't on LumVibe" (invite by link)
+import { createLinkRoom, LINK_ROOM_MARKER } from '../lib/linkRoom';
 import NetInfo from '@react-native-community/netinfo';
 
 // ✅ NEW: when a caught error is network-shaped (or the device is
@@ -146,11 +148,13 @@ async function fetchConversations(currentUserId: string): Promise<Conversation[]
 
     const { data: convs } = await supabase
       .from('conversations')
-      .select('id, last_message, last_message_at, updated_at, disappearing_enabled')
+      .select('id, last_message, last_message_at, updated_at, disappearing_enabled, group_name')
       .in('id', convIds)
       .order('last_message_at', { ascending: false });
 
-    if (!convs || convs.length === 0) return [];
+    // ✅ NEW: hidden one-person rooms used for link invites never show in the list
+    const visibleConvs = (convs || []).filter((c: any) => c.group_name !== LINK_ROOM_MARKER);
+    if (visibleConvs.length === 0) return [];
 
     const { data: allParticipants } = await supabase
       .from('conversation_participants')
@@ -173,7 +177,7 @@ async function fetchConversations(currentUserId: string): Promise<Conversation[]
     const streakMap: Record<string, number> = {};
     (streaks || []).forEach((s: any) => { streakMap[s.other_user_id] = s.streak_count || 0; });
 
-    return convs.map((conv: any) => {
+    return visibleConvs.map((conv: any) => {
       const otherId = otherUserIdMap[conv.id];
       return {
         ...conv,
@@ -948,6 +952,23 @@ export default function MessagesScreen() {
   const { user } = useAuthStore();
   const navigation = useNavigation<any>();
 
+  // ✅ NEW: start a watch party for someone who is not on LumVibe. Opens
+  // Co-Watch in a fresh room and the share sheet appears with the invite link.
+  const startLinkWatch = useCallback(async () => {
+    if (!user?.id) return;
+    const convId = await createLinkRoom(user.id);
+    if (!convId) {
+      Alert.alert('Could not start', 'Please check your connection and try again.');
+      return;
+    }
+    navigation.navigate('Cowatch', {
+      conversationId: convId,
+      otherName: 'Guest',
+      otherPhoto: '',
+      linkRoom: 'true',
+    });
+  }, [user?.id, navigation]);
+
   const [activeTab,     setActiveTab]     = useState('All');
   const [search,        setSearch]        = useState('');
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -1427,6 +1448,10 @@ export default function MessagesScreen() {
             onPress={() => searchRef.current?.focus()}
           >
             <Ionicons name="search-outline" size={18} color={C.white} />
+          </TouchableOpacity>
+          {/* ✅ NEW: watch together with someone outside LumVibe (share a link) */}
+          <TouchableOpacity style={styles.iconBtn} onPress={startLinkWatch}>
+            <Ionicons name="link-outline" size={18} color={C.white} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.navigate('NewChat')}>
             <Ionicons name="create-outline" size={18} color={C.white} />

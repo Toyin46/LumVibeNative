@@ -22,6 +22,8 @@ import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
 // Home screenshot). It forwards to the one shared ring state instead.
 import { showIncoming, cancelIncomingByTarget } from '../lib/incomingRing';
 import { parseRingData } from '../lib/ringPayload';
+// ✅ NEW: opening a chat removes its message notification from the shade
+import { cancelChatNotification } from '../lib/chatNotifications';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import ContextStoryBar from './components/ContextStoryBar';
@@ -314,6 +316,12 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
   const [incomingCowatch, setIncomingCowatch] = useState<IncomingCowatch | null>(null);
   const [localVideoTrack,  setLocalVideoTrack]  = useState<Track | null>(null);
   const [remoteVideoTrack, setRemoteVideoTrack] = useState<Track | null>(null);
+  // ✅ NEW: the other person's camera / mic state. Switching a camera off only
+  // MUTES its track in LiveKit — the picture freezes or goes black and nothing
+  // told this screen — so these follow the mute events and the call screen can
+  // show the avatar instead.
+  const [remoteCamOff,   setRemoteCamOff]   = useState(false);
+  const [remoteMicMuted, setRemoteMicMuted] = useState(false);
   const roomRef      = useRef<Room | null>(null);
   const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -544,6 +552,8 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
         if (mountedRef.current) setCallState(CALL_INITIAL);
         setLocalVideoTrack(null);
         setRemoteVideoTrack(null);
+        setRemoteCamOff(false);
+        setRemoteMicMuted(false);
       });
 
       // ✅ NEW: actually surface video tracks instead of only publishing them.
@@ -555,11 +565,24 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
         if (publication.kind === Track.Kind.Video) setLocalVideoTrack(null);
       });
-      room.on(RoomEvent.TrackSubscribed, (track) => {
-        if (mountedRef.current && track.kind === Track.Kind.Video) setRemoteVideoTrack(track);
+      room.on(RoomEvent.TrackSubscribed, (track, pub) => {
+        if (!mountedRef.current) return;
+        if (track.kind === Track.Kind.Video) { setRemoteVideoTrack(track); setRemoteCamOff(!!pub?.isMuted); }
+        else if (track.kind === Track.Kind.Audio) setRemoteMicMuted(!!pub?.isMuted);
       });
       room.on(RoomEvent.TrackUnsubscribed, (track) => {
         if (track.kind === Track.Kind.Video) setRemoteVideoTrack(null);
+      });
+      // ✅ NEW: the other person hid / showed their camera, or muted / unmuted
+      room.on(RoomEvent.TrackMuted, (pub, participant) => {
+        if (!mountedRef.current || participant?.isLocal) return;
+        if (pub.source === Track.Source.Camera) setRemoteCamOff(true);
+        if (pub.source === Track.Source.Microphone) setRemoteMicMuted(true);
+      });
+      room.on(RoomEvent.TrackUnmuted, (pub, participant) => {
+        if (!mountedRef.current || participant?.isLocal) return;
+        if (pub.source === Track.Source.Camera) setRemoteCamOff(false);
+        if (pub.source === Track.Source.Microphone) setRemoteMicMuted(false);
       });
 
       await room.connect(LIVEKIT_URL, token);
@@ -832,6 +855,7 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
 
   return {
     callState, incomingCall, localVideoTrack, remoteVideoTrack,
+    remoteCamOff, remoteMicMuted,
     startCall, endCall, acceptCall, declineCall,
     toggleMute, toggleCamera, toggleSpeaker,
     // ✅ NEW (fix #3): incoming cowatch invite banner state + dismiss.
@@ -1317,11 +1341,14 @@ function Waveform({ isMe }: { isMe: boolean }) {
 // ── CALL MODAL ────────────────────────────────────────────────
 function CallModal({
   visible, otherName, otherPhoto, callState, localVideoTrack, remoteVideoTrack,
+  remoteCamOff, remoteMicMuted, myName, myPhoto,
   onEnd, onToggleMute, onToggleSpeaker, onToggleCamera,
 }: {
   visible: boolean; otherName: string; otherPhoto?: string;
   callState: CallState;
   localVideoTrack: Track | null; remoteVideoTrack: Track | null;
+  remoteCamOff?: boolean; remoteMicMuted?: boolean;
+  myName?: string; myPhoto?: string;
   onEnd: () => void; onToggleMute: () => void;
   onToggleSpeaker: () => void; onToggleCamera: () => void;
 }) {
@@ -1329,8 +1356,12 @@ function CallModal({
   const insets = useSafeAreaInsets();
   // ✅ NEW: show live video once it's flowing; fall back to the avatar
   // card (still connecting, camera off, or plain voice call).
-  const showRemoteVideo = callType === 'video' && !!remoteVideoTrack;
+  // ✅ CHANGED: the remote picture is only shown while THEIR camera is on — when
+  // they hide it, their avatar card shows instead of a frozen / black frame.
+  const showRemoteVideo = callType === 'video' && !!remoteVideoTrack && !remoteCamOff;
   const showLocalPreview = callType === 'video' && !!localVideoTrack && !callState.isVideoOff;
+  // ✅ NEW: when YOU hide your camera, your own small tile shows your avatar
+  const showLocalAvatar = callType === 'video' && !showLocalPreview && callState.isVideoOff;
 
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent>
@@ -1346,6 +1377,14 @@ function CallModal({
         {showLocalPreview && (
           <View style={[styles.localPreview, { top: insets.top + 20 }]}>
             <VideoView videoTrack={localVideoTrack as any} style={StyleSheet.absoluteFillObject} objectFit="cover" mirror />
+          </View>
+        )}
+
+        {showLocalAvatar && (
+          <View style={[styles.localPreview, { top: insets.top + 20, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1a1a1a' }]}>
+            {myPhoto
+              ? <Image source={{ uri: myPhoto }} style={StyleSheet.absoluteFillObject} />
+              : <Text style={styles.callAvatarInitial}>{(myName || 'Y')[0].toUpperCase()}</Text>}
           </View>
         )}
 
@@ -1369,6 +1408,13 @@ function CallModal({
             {callState.remoteConnected && <View style={styles.callAvatarRing} />}
           </View>}
           <Text style={styles.callName}>{otherName}</Text>
+          {/* ✅ NEW: they muted their microphone */}
+          {remoteMicMuted && callState.remoteConnected && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }}>
+              <Ionicons name="mic-off" size={14} color={C.red} />
+              <Text style={{ color: C.red, fontSize: 12, fontWeight: '600' }}>Muted</Text>
+            </View>
+          )}
           <Text style={styles.callStatus}>
             {callState.isConnecting ? 'Calling…'
               : callState.remoteConnected ? formatSecs(callState.callDuration)
@@ -1732,6 +1778,7 @@ export default function ChatScreen() {
 
   const {
     callState, incomingCall, localVideoTrack, remoteVideoTrack,
+    remoteCamOff, remoteMicMuted,
     startCall, endCall, acceptCall, declineCall,
     toggleMute, toggleCamera, toggleSpeaker, joinLiveKitRoom,
     setCallState,
@@ -1739,6 +1786,12 @@ export default function ChatScreen() {
     incomingCowatch, dismissCowatchInvite,
     presentIncomingCallPrompt, presentIncomingCowatchPrompt,
   } = useCall(user?.id || '', displayName, id || null, otherUserId || null, (userProfile as any)?.avatar_url || userProfile?.photo_url || undefined);
+
+  // ✅ NEW: opening this chat clears its message notification (and the
+  // "LumVibe" stack header if it was the last one).
+  useEffect(() => {
+    if (id) cancelChatNotification(String(id)).catch(() => {});
+  }, [id]);
 
   // ✅ NEW: cold-start case — the app was fully killed, a call push arrived,
   // the user tapped it, and the root navigator (see the app-entry snippet)
@@ -1993,6 +2046,10 @@ export default function ChatScreen() {
   const openCowatch = useCallback((sessionId?: string) => {
     navigation.navigate(COWATCH_SCREEN, {
       conversationId: id,
+      // ✅ FIX (Co-Watch never rang): Co-Watch had to look up who the other person
+      // is in columns that don't exist in `conversations`, found nobody, and so
+      // never invited anyone. This screen already knows — hand it over.
+      otherUserId: otherUserId || undefined,
       otherName: otherName || '',
       otherPhoto: otherPhoto || '',
       // ✅ FIX: cowatch.tsx reads this param as `sessionId`. It was passed as
@@ -2001,7 +2058,7 @@ export default function ChatScreen() {
       // duplicate "Started a watch party" bubbles in your chat screenshot).
       ...(sessionId ? { sessionId } : {}),
     });
-  }, [navigation, id, otherName, otherPhoto]);
+  }, [navigation, id, otherUserId, otherName, otherPhoto]);
 
   if (loading) {
     return (
@@ -2306,6 +2363,10 @@ export default function ChatScreen() {
         callState={callState}
         localVideoTrack={localVideoTrack}
         remoteVideoTrack={remoteVideoTrack}
+        remoteCamOff={remoteCamOff}
+        remoteMicMuted={remoteMicMuted}
+        myName={displayName}
+        myPhoto={(userProfile as any)?.avatar_url || userProfile?.photo_url || undefined}
         onEnd={endCall}
         onToggleMute={toggleMute}
         onToggleSpeaker={toggleSpeaker}

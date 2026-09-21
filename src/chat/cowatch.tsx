@@ -68,6 +68,7 @@ import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
 import { useAuthStore } from '../store/authStore';
 import { notifyCowatchInvite, notifyCowatchCancelled } from '../lib/notifications';
 import { sendBroadcastOnce } from '../lib/realtimeSend';
+import { shareWatchLink } from '../lib/linkRoom';
 
 // ✅ NEW: how long the app may stay in the background during a watch party
 // before the session is ended. Long enough for a permission dialog, a phone
@@ -185,6 +186,14 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
   // ✅ NEW: real-time "who's talking" — powers the voice-line indicator on each tile
   const [isLocalSpeaking,  setIsLocalSpeaking]  = useState(false);
   const [isRemoteSpeaking, setIsRemoteSpeaking] = useState(false);
+  // ✅ NEW: the OTHER person's camera / mic state. When someone turns their
+  // camera off LiveKit only MUTES the video track — the picture just freezes or
+  // goes black, and nothing told this screen. These follow the mute events so the
+  // tile can show the avatar instead. remoteName is the name they joined with
+  // (used for guests who come in from a link).
+  const [remoteCamOff,    setRemoteCamOff]    = useState(false);
+  const [remoteMicMuted,  setRemoteMicMuted]  = useState(false);
+  const [remoteName,      setRemoteName]      = useState('');
   const mountedRef        = useRef(true);
 
   useEffect(() => {
@@ -223,6 +232,7 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
       room.on(RoomEvent.ParticipantConnected, (participant: any) => {
         if (!mountedRef.current) return;
         setRemoteConnected(true);
+        setRemoteName(String(participant.name || participant.identity || '').split('·')[0].trim());
         // Subscribe to their video/audio tracks automatically
         participant.on('trackPublished', (publication: any) => {
           publication.setSubscribed(true);
@@ -230,6 +240,10 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
         participant.videoTrackPublications.forEach((pub: any) => {
           pub.setSubscribed(true);
           if (pub.track) setRemoteVideoTrack(pub.track);
+          if (pub.isMuted) setRemoteCamOff(true);
+        });
+        participant.audioTrackPublications?.forEach((pub: any) => {
+          if (pub.isMuted) setRemoteMicMuted(true);
         });
       });
 
@@ -237,13 +251,30 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
         if (!mountedRef.current) return;
         setRemoteConnected(false);
         setRemoteVideoTrack(null);
+        setRemoteCamOff(false);
+        setRemoteMicMuted(false);
       });
 
-      room.on(RoomEvent.TrackSubscribed, (track: any, _pub: any, participant: any) => {
+      room.on(RoomEvent.TrackSubscribed, (track: any, pub: any, participant: any) => {
         if (!mountedRef.current) return;
         if (track.kind === Track.Kind.Video) {
           setRemoteVideoTrack(track);
+          setRemoteCamOff(!!pub?.isMuted);
+        } else if (track.kind === Track.Kind.Audio) {
+          setRemoteMicMuted(!!pub?.isMuted);
         }
+      });
+
+      // ✅ NEW: the other person switched their camera / mic off or on.
+      room.on(RoomEvent.TrackMuted, (pub: any, participant: any) => {
+        if (!mountedRef.current || participant?.isLocal) return;
+        if (pub?.source === Track.Source.Camera) setRemoteCamOff(true);
+        if (pub?.source === Track.Source.Microphone) setRemoteMicMuted(true);
+      });
+      room.on(RoomEvent.TrackUnmuted, (pub: any, participant: any) => {
+        if (!mountedRef.current || participant?.isLocal) return;
+        if (pub?.source === Track.Source.Camera) setRemoteCamOff(false);
+        if (pub?.source === Track.Source.Microphone) setRemoteMicMuted(false);
       });
 
       room.on(RoomEvent.TrackUnsubscribed, (track: any) => {
@@ -342,6 +373,7 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
     remoteConnected, callReady, micMuted, camMuted, speakerOn, permDenied,
     localVideoTrack, remoteVideoTrack,
     isLocalSpeaking, isRemoteSpeaking,
+    remoteCamOff, remoteMicMuted, remoteName,
     toggleMic, toggleCam, toggleSpeaker, disconnect,
     // kept for backward compat with PipOverlay prop names
     agoraReady: true,
@@ -946,6 +978,22 @@ function broadcastCowatchInvite(
   sendBroadcastOnce(`call_signal:${conversationId}`, 'cowatch_invite', payload);
 }
 
+// ✅ FIX (Co-Watch never rang): the other person used to be looked up in
+// `conversations.user1_id / user2_id` — columns your table does not have — so the
+// invite silently had nobody to ring. The chat already knows who it is (passed in
+// as `otherUserId`); if not, this asks the table your chat really uses.
+async function resolveOtherUserId(conversationId: string, myId: string): Promise<string | null> {
+  try {
+    const { data } = await supabase
+      .from('conversation_participants')
+      .select('user_id')
+      .eq('conversation_id', conversationId)
+      .neq('user_id', myId)
+      .limit(1);
+    return data && data[0] ? (data[0].user_id as string) : null;
+  } catch (_) { return null; }
+}
+
 // ✅ NEW (ringing rework): the person who started the watch party left before
 // the other person joined — stop the ring on their phone. Three paths, like the
 // invite itself: their any-screen banner (per-user channel), the chat-screen
@@ -1262,9 +1310,10 @@ const PIP_W = 88; const PIP_H = 118;
 const PIP_OFFSET_TOP = Platform.OS === 'ios' ? 130 : 110;
 
 // FIX 4: PipOverlay now uses LiveKit VideoView for remote participant
-function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMuted, onToggleMic, onToggleCam, callReady, isSpeaking }: {
+function PipOverlay({ photo, name, isActive, remoteVideoTrack, remoteCamOff, remoteMicMuted, micMuted, camMuted, onToggleMic, onToggleCam, callReady, isSpeaking }: {
   photo?: string; name: string; isActive: boolean;
   remoteVideoTrack: any;
+  remoteCamOff?: boolean; remoteMicMuted?: boolean;
   micMuted: boolean; camMuted: boolean;
   onToggleMic: () => void; onToggleCam: () => void;
   callReady: boolean; isSpeaking?: boolean;
@@ -1284,8 +1333,8 @@ function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMute
   return (
     <Animated.View style={[pipStyles.pip, { transform: [{ scale: pulse }] }, isSpeaking && pipStyles.pipSpeakingRing]}>
       <TouchableOpacity style={pipStyles.pipTouchable} onPress={() => setShowControls(s => !s)} activeOpacity={0.9}>
-        {remoteVideoTrack && callReady ? (
-          // FIX 4: LiveKit VideoView renders remote participant video
+        {remoteVideoTrack && callReady && !remoteCamOff ? (
+          // FIX 4: LiveKit VideoView renders remote participant video (✅ only while their camera is ON — otherwise the avatar below)
           <VideoView
             style={pipStyles.pipVideo}
             videoTrack={remoteVideoTrack}
@@ -1297,7 +1346,7 @@ function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMute
         <View style={[pipStyles.pipRing, isActive && pipStyles.pipRingActive]} />
         <View style={pipStyles.pipNameTag}>
           <Text style={pipStyles.pipNameText} numberOfLines={1}>{name.split(' ')[0]}</Text>
-          <VoiceWave active={!!isSpeaking} />
+          {remoteMicMuted ? <Feather name="mic-off" size={11} color={C.red} /> : <VoiceWave active={!!isSpeaking} />}
         </View>
         {isActive && <View style={pipStyles.pipLiveDot} />}
       </TouchableOpacity>
@@ -1316,8 +1365,9 @@ function PipOverlay({ photo, name, isActive, remoteVideoTrack, micMuted, camMute
 }
 
 // FIX 4: LocalPreview now uses LiveKit VideoView for local camera
-function LocalPreview({ localVideoTrack, photo, yourName, permDenied, isSpeaking }: {
+function LocalPreview({ localVideoTrack, photo, yourName, permDenied, isSpeaking, camMuted, micMuted }: {
   localVideoTrack: any; photo?: string; yourName: string; permDenied?: boolean; isSpeaking?: boolean;
+  camMuted?: boolean; micMuted?: boolean;
 }) {
   return (
     <View style={[pipStyles.localPip, isSpeaking && pipStyles.pipSpeakingRing]}>
@@ -1326,7 +1376,7 @@ function LocalPreview({ localVideoTrack, photo, yourName, permDenied, isSpeaking
           <Feather name="video-off" size={20} color={C.red} />
           <Text style={{ color: C.red, fontSize: 7, marginTop: 3, textAlign: 'center' }}>Allow{'\n'}Camera</Text>
         </View>
-      ) : localVideoTrack ? (
+      ) : localVideoTrack && !camMuted ? (
         <VideoView
           style={pipStyles.pipVideo}
           videoTrack={localVideoTrack}
@@ -1337,7 +1387,7 @@ function LocalPreview({ localVideoTrack, photo, yourName, permDenied, isSpeaking
       )}
       <View style={pipStyles.pipNameTag}>
         <Text style={pipStyles.pipNameText}>You</Text>
-        <VoiceWave active={!!isSpeaking} />
+        {micMuted ? <Feather name="mic-off" size={11} color={C.red} /> : <VoiceWave active={!!isSpeaking} />}
       </View>
     </View>
   );
@@ -2512,12 +2562,16 @@ export default function CowatchScreen() {
     otherPhoto,
     sessionId: existingSessionId,
     isAiMatch,
+    otherUserId: routeOtherUserId,
+    linkRoom,
   } = (route.params || {}) as {
     conversationId: string;
     otherName: string;
     otherPhoto: string;
     sessionId?: string;
     isAiMatch?: string;
+    otherUserId?: string;
+    linkRoom?: string;   // 'true' = a room you share as a link with someone outside LumVibe
   };
 
   const navigation = useNavigation<any>();
@@ -2572,6 +2626,7 @@ export default function CowatchScreen() {
   const {
     remoteConnected, callReady, micMuted, camMuted, speakerOn, permDenied,
     localVideoTrack, remoteVideoTrack, isLocalSpeaking, isRemoteSpeaking,
+    remoteCamOff, remoteMicMuted, remoteName,
     toggleMic, toggleCam, toggleSpeaker, disconnect: disconnectLiveKit,
     agoraReady, engineJoined, remoteUid,  // backward compat aliases
   } = useLiveKitCall(livekitChannel, user?.id || '', displayName);
@@ -2654,7 +2709,7 @@ export default function CowatchScreen() {
   const [aiMatchPartnerName,  setAiMatchPartnerName]  = useState<string>('');
   const [aiMatchPartnerPhoto, setAiMatchPartnerPhoto] = useState<string | null>(null);
   const [aiMatchPartnerId,    setAiMatchPartnerId]    = useState<string | null>(null);
-  const [otherUserId,         setOtherUserId]         = useState<string | null>(null);
+  const [otherUserId,         setOtherUserId]         = useState<string | null>(routeOtherUserId || null);
   const [safetyModalVisible,  setSafetyModalVisible]  = useState(false);
   const [reportReasonsVisible,setReportReasonsVisible]= useState(false);
   const [reportSubmitting,    setReportSubmitting]    = useState(false);
@@ -2682,11 +2737,10 @@ export default function CowatchScreen() {
 
   // Resolve the other person's id for regular (chat-invited) cowatch — AI Match sets it separately below
   useEffect(() => {
-    if (isAiMatch === 'true' || !conversationId || !user?.id || otherUserId) return;
+    if (isAiMatch === 'true' || linkRoom === 'true' || !conversationId || !user?.id || otherUserId) return;
     (async () => {
-      const { data } = await supabase.from('conversations')
-        .select('user1_id, user2_id').eq('id', conversationId).single();
-      if (data) setOtherUserId(data.user1_id === user.id ? data.user2_id : data.user1_id);
+      const id = await resolveOtherUserId(conversationId, user.id);
+      if (id) setOtherUserId(id);
     })();
   }, [conversationId, user?.id, isAiMatch, otherUserId]);
 
@@ -3072,6 +3126,12 @@ export default function CowatchScreen() {
       // started, which would otherwise "invite" them right back.
       if (createdNew && conversationId) {
         const inviterName = userProfile?.display_name || userProfile?.username || 'Someone';
+        // ✅ NEW: a link room (started from the Messages screen) is for someone
+        // outside LumVibe — open the share sheet straight away so the link can be
+        // sent by WhatsApp / SMS / anything.
+        if (linkRoom === 'true') {
+          setTimeout(() => { shareWatchLink(activeSession.id, inviterName).catch(() => {}); }, 700);
+        }
         // ✅ NEW: instant in-app banner for whoever has this chat open right
         // now — see broadcastCowatchInvite above for why this was missing.
         broadcastCowatchInvite(conversationId, {
@@ -3094,9 +3154,8 @@ export default function CowatchScreen() {
         // overlay and never touches the real messages table.)
         insertCowatchLogMessage(conversationId, user.id);
         try {
-          const { data: convoData } = await supabase.from('conversations').select('user1_id, user2_id').eq('id', conversationId).single();
-          if (convoData) {
-            const inviteeId = convoData.user1_id === user.id ? convoData.user2_id : convoData.user1_id;
+          {
+            const inviteeId = linkRoom === 'true' ? null : (routeOtherUserId || await resolveOtherUserId(conversationId, user.id));
             if (inviteeId) {
               // ✅ CHANGED (ringing rework): the instant in-app ring goes out FIRST.
               // It used to wait behind `await notifyCowatchInvite(...)` — a
@@ -3117,7 +3176,7 @@ export default function CowatchScreen() {
                 inviteeId, user.id, inviterName, conversationId, activeSession.id,
                 invitePayload.inviterPhoto,
               ).catch((e: any) => console.warn('[ring] cowatch push failed:', e));
-            } else {
+            } else if (linkRoom !== 'true') {
               console.warn('[ring] cowatch invite: could not work out who to invite');
             }
           }
@@ -3671,9 +3730,11 @@ export default function CowatchScreen() {
         {/* Partner tile — right side, stacked — FIX 4: LiveKit VideoView */}
         <PipOverlay
           photo={otherPhoto || undefined}
-          name={otherName || 'Partner'}
+          name={linkRoom === 'true' ? (remoteName || 'Guest') : (otherName || 'Partner')}
           isActive={remoteConnected || callReady}
           remoteVideoTrack={remoteVideoTrack}
+          remoteCamOff={remoteCamOff}
+          remoteMicMuted={remoteMicMuted}
           micMuted={micMuted}
           camMuted={camMuted}
           onToggleMic={toggleMic}
@@ -3689,6 +3750,8 @@ export default function CowatchScreen() {
           yourName={userProfile?.display_name || userProfile?.username || 'You'}
           permDenied={permDenied}
           isSpeaking={isLocalSpeaking}
+          camMuted={camMuted}
+          micMuted={micMuted}
         />
 
         {/* TOP BAR */}
@@ -3827,12 +3890,28 @@ export default function CowatchScreen() {
               <Feather name={camMuted ? 'video-off' : 'video'} size={16} color={camMuted ? C.red : C.green} style={{ marginLeft: 10 }} />
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 }}>
-              <Avatar uri={otherPhoto} name={otherName || 'Partner'} size={40} />
-              <Text style={{ flex: 1, color: C.white, fontSize: 14, fontWeight: '600' }}>{otherName || 'Partner'}</Text>
+              <Avatar uri={otherPhoto} name={(linkRoom === 'true' ? remoteName : otherName) || 'Partner'} size={40} />
+              <Text style={{ flex: 1, color: C.white, fontSize: 14, fontWeight: '600' }}>
+                {linkRoom === 'true' ? (remoteConnected ? (remoteName || 'Guest') : 'Waiting for your friend…') : (otherName || 'Partner')}
+              </Text>
               {remoteConnected
                 ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}><View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.green }} /><Text style={{ color: C.green, fontSize: 11, fontWeight: '600' }}>Connected</Text></View>
-                : <Text style={{ color: C.muted, fontSize: 11 }}>Connecting…</Text>}
+                : <Text style={{ color: C.muted, fontSize: 11 }}>{linkRoom === 'true' ? 'Not joined yet' : 'Connecting…'}</Text>}
             </View>
+            {/* ✅ NEW: invite someone outside LumVibe with a link */}
+            {linkRoom === 'true' && (
+              <TouchableOpacity
+                style={{ marginTop: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: C.green, borderRadius: 14, paddingVertical: 12 }}
+                onPress={() => {
+                  if (sessionRef.current) {
+                    shareWatchLink(sessionRef.current.id, userProfile?.display_name || userProfile?.username).catch(() => {});
+                  }
+                }}
+              >
+                <Feather name="link" size={16} color="#000" />
+                <Text style={{ color: '#000', fontWeight: '800', fontSize: 14 }}>Invite via link</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </TouchableOpacity>
       </Modal>

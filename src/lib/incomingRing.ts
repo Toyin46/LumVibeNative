@@ -228,6 +228,7 @@ export function joinIncomingCowatch(p: RingPayload) {
       params: {
         conversationId: p.conversationId,
         sessionId: p.sessionId,
+        otherUserId: p.fromId,
         otherName: p.fromName,
         otherPhoto: p.fromPhoto || '',
       },
@@ -266,21 +267,37 @@ export async function declineIncoming(p: RingPayload) {
 // 'chat' = just open the conversation (the lock-screen "Message" button)
 // 'peek' = the phone was locked and Android launched the app through the ring's
 // full-screen action: show the screen but do NOT stop/duplicate the ring.
-export interface RingAction { action: 'answer' | 'join' | 'open' | 'chat' | 'peek'; payload: RingPayload }
+// 'openchat' = tap on a chat-message notification -> open that conversation.
+export type RingAction =
+  | { action: 'answer' | 'join' | 'open' | 'chat' | 'peek'; payload: RingPayload }
+  | { action: 'openchat'; chat: { conversationId: string; senderId: string; senderName: string; senderPhoto?: string } };
+
 const actionQueue: RingAction[] = [];
 const actionSeen = new Map<string, number>();
 const actionListeners = new Set<() => void>();
 
 export function enqueueRingAction(a: RingAction) {
-  const key = `${a.payload.id}:${a.action}`;
+  const key = a.action === 'openchat' ? `chat:${a.chat.conversationId}` : `${a.payload.id}:${a.action}`;
+  const window = a.action === 'openchat' ? 3000 : 60000; // initial-notification + event both fire
   const seen = actionSeen.get(key);
-  if (seen && Date.now() - seen < 60000) return; // initial-notification + event both fire
+  if (seen && Date.now() - seen < window) return;
   actionSeen.set(key, Date.now());
   actionQueue.push(a);
   actionListeners.forEach(l => l());
 }
 
 function runAction(a: RingAction) {
+  if (a.action === 'openchat') {
+    const c = a.chat;
+    whenNavReady(nav => nav.navigate('Main', {
+      screen: 'Messages',
+      params: {
+        screen: 'ChatDM',
+        params: { id: c.conversationId, otherUserId: c.senderId, otherName: c.senderName, otherPhoto: c.senderPhoto || '' },
+      },
+    }));
+    return;
+  }
   if (a.action === 'answer') answerIncoming(a.payload);
   else if (a.action === 'join') joinIncomingCowatch(a.payload);
   else if (a.action === 'chat') goChat(a.payload);
