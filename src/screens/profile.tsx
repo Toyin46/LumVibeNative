@@ -431,14 +431,34 @@ const bpStyles = StyleSheet.create({
   barFill:  { height: '100%', borderRadius: 3 },
 });
 
+// ✅ CHANGED: a video post showed a plain box with a play icon and nothing
+// else — thumbnail_url was already being fetched but never used. It now shows
+// the actual video thumbnail, with a small play badge on top so it still
+// reads as a video at a glance. Falls back to the plain box only if there
+// truly is no thumbnail yet.
 const LazyPostThumb = memo(({ post, onPress }: { post: Post; onPress: () => void }) => {
   return (
     <TouchableOpacity style={s.postThumb} onPress={onPress} activeOpacity={0.85}>
       {post.media_type === 'video'
         ? (
-          <View style={s.postThumbVideoBg}>
-            <Feather name="play" size={28} color="#fff" />
-          </View>
+          post.thumbnail_url
+            ? (
+              <View style={s.postThumbVideoBg}>
+                <Image
+                  source={{ uri: post.thumbnail_url }}
+                  style={s.postThumbImg}
+                  resizeMode="cover"
+                />
+                <View style={s.postThumbPlayBadge}>
+                  <Feather name="play" size={14} color="#fff" />
+                </View>
+              </View>
+            )
+            : (
+              <View style={s.postThumbVideoBg}>
+                <Feather name="play" size={28} color="#fff" />
+              </View>
+            )
         )
         : post.media_url
           ? (
@@ -3379,6 +3399,7 @@ const s = StyleSheet.create({
   postThumb:           { width: POST_SIZE, height: POST_SIZE, backgroundColor: '#111', position: 'relative', overflow: 'hidden', margin: 0.5 },
   postThumbVideoBg:    { width: '100%', height: '100%', backgroundColor: '#111', justifyContent: 'center', alignItems: 'center' },
   postThumbImg:        { width: '100%', height: '100%' },
+  postThumbPlayBadge:  { position: 'absolute', top: 6, right: 6, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' },
   postThumbStats:      { position: 'absolute', bottom: 4, left: 4, flexDirection: 'row', gap: 6 },
   postThumbStat:       { flexDirection: 'row', alignItems: 'center', gap: 2 },
   postThumbStatText:   { color: '#fff', fontSize: 10 },

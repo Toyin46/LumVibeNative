@@ -125,13 +125,31 @@ async function getOwnerBadgeMultipliers(ownerId: string) {
 
 //const BANNER_AD_UNIT_ID = __DEV__ ? TestIds.BANNER : 'ca-app-pub-8235065812461074/4176727692';
 
+// ✅ CHANGED: 4 -> 20 packages, ₦50 up to the existing 500-coin top tier —
+// approved pricing, no bonus coins. The 4 original packages (Rose, Ice Cream,
+// Love Letter, Trophy) keep their exact original id/coins/price so nothing
+// changes for anyone who already bought one.
 const GIFT_PACKAGES = [
-  { id: 'rose',        name: 'Rose',        icon: '🌹', coins: 10,    ngn: 1_500,   color: '#ff69b4' },
-  { id: 'ice_cream',   name: 'Ice Cream',   icon: '🍦', coins: 50,    ngn: 7_500,   color: '#00bfff' },
-  { id: 'love_letter', name: 'Love Letter', icon: '💌', coins: 100,   ngn: 15_000,  color: '#ff4d8f' },
-  { id: 'trophy',      name: 'Trophy',      icon: '🏆', coins: 500,   ngn: 75_000,  color: '#cd7f32' },
-  { id: 'crown',       name: 'Crown',       icon: '👑', coins: 1000,  ngn: 150_000, color: '#ffd700' },
-  { id: 'diamond',     name: 'Diamond',     icon: '💎', coins: 5000,  ngn: 750_000, color: '#00ffff' },
+  { id: 'spark',        name: 'Spark',        icon: '✨', coins: 1,   ngn: 50,     color: '#ffdd55' },
+  { id: 'heart',        name: 'Heart',        icon: '❤️', coins: 3,   ngn: 300,    color: '#ff4757' },
+  { id: 'smile',        name: 'Smile',        icon: '😊', coins: 5,   ngn: 600,    color: '#ffd93d' },
+  { id: 'rose',         name: 'Rose',         icon: '🌹', coins: 10,  ngn: 1_500,  color: '#ff69b4' },
+  { id: 'candy',        name: 'Candy',        icon: '🍬', coins: 15,  ngn: 2_250,  color: '#ff85c8' },
+  { id: 'balloon',      name: 'Balloon',      icon: '🎈', coins: 20,  ngn: 3_000,  color: '#ff6b6b' },
+  { id: 'star',         name: 'Star',         icon: '⭐', coins: 25,  ngn: 3_750,  color: '#ffd700' },
+  { id: 'cupcake',      name: 'Cupcake',      icon: '🧁', coins: 30,  ngn: 4_500,  color: '#ffb6c1' },
+  { id: 'bouquet',      name: 'Bouquet',      icon: '💐', coins: 40,  ngn: 6_000,  color: '#ff8fab' },
+  { id: 'ice_cream',    name: 'Ice Cream',    icon: '🍦', coins: 50,  ngn: 7_500,  color: '#00bfff' },
+  { id: 'gift_box',     name: 'Gift Box',     icon: '🎁', coins: 60,  ngn: 9_000,  color: '#ff4d6d' },
+  { id: 'sparkler',     name: 'Sparkler',     icon: '🎇', coins: 70,  ngn: 10_500, color: '#ffe066' },
+  { id: 'diamond_ring', name: 'Diamond Ring', icon: '💍', coins: 80,  ngn: 12_000, color: '#00e5ff' },
+  { id: 'love_letter',  name: 'Love Letter',  icon: '💌', coins: 100, ngn: 15_000, color: '#ff4d8f' },
+  { id: 'crown',        name: 'Crown',        icon: '👑', coins: 150, ngn: 22_500, color: '#ffd700' },
+  { id: 'fireworks',    name: 'Fireworks',    icon: '🎆', coins: 200, ngn: 30_000, color: '#ff6347' },
+  { id: 'rocket',       name: 'Rocket',       icon: '🚀', coins: 250, ngn: 37_500, color: '#00ff88' },
+  { id: 'unicorn',      name: 'Unicorn',      icon: '🦄', coins: 300, ngn: 45_000, color: '#c77dff' },
+  { id: 'castle',       name: 'Castle',       icon: '🏰', coins: 400, ngn: 60_000, color: '#9d4edd' },
+  { id: 'trophy',       name: 'Trophy',       icon: '🏆', coins: 500, ngn: 75_000, color: '#cd7f32' },
 ];
 
 const GRADIENT_PRESETS = [
@@ -1246,7 +1264,8 @@ const PostCard = memo(({
         </View>
       </View>
 
-      {item.views_count > 0 && (<View style={styles.viewsContainer}><Feather name="eye" size={14} color="#666" /><Text style={styles.viewsText}>{item.views_count} {item.views_count === 1 ? 'view' : 'views'}</Text></View>)}
+      {/* ✅ REMOVED: public view-count badge — views_count is still tracked
+          (below) for the ranking algorithm, just no longer shown on the post. */}
       {item.location && (<View style={styles.locationContainer}><Feather name="map-pin" size={12} color="#00ff88" /><Text style={styles.locationText}>{item.location}</Text></View>)}
       {item.music_name && item.media_type !== 'voice' && (
         <TouchableOpacity style={styles.musicContainer} onPress={toggleMusicPlayback} activeOpacity={0.7}>
@@ -1721,6 +1740,13 @@ export default function HomeScreen() {
   const viewQueueRef  = useRef<Set<string>>(new Set());
   const viewFlushRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    // ✅ CHANGED (strict 1-account-1-view): the old version read viewed_by,
+  // checked it, then wrote the update as a second step — two views for the
+  // same post close together (very normal while scrolling) could both read
+  // before either write landed, and both add +1. That's how 5 real viewers
+  // turned into 37 views. increment_post_view() does the check-and-add as
+  // ONE atomic database call, so that can no longer happen — one account
+  // can only ever add 1, permanently, logout/login included.
   const handleView = useCallback((postId: string) => {
     if (!userId) return;
     viewQueueRef.current.add(postId);
@@ -1730,13 +1756,10 @@ export default function HomeScreen() {
       viewQueueRef.current.clear();
       for (const pid of toFlush) {
         try {
-          const { data: post } = await supabase.from('posts').select('views_count, viewed_by, user_id').eq('id', pid).single();
+          const { data: didIncrement } = await supabase.rpc('increment_post_view', { p_post_id: pid, p_user_id: userId });
+          if (!didIncrement) continue; // this account already counted for this post
+          const { data: post } = await supabase.from('posts').select('views_count, user_id').eq('id', pid).single();
           if (!post) continue;
-          const viewedBy = post.viewed_by || [];
-          if (viewedBy.includes(userId)) continue;
-          await supabase.from('posts')
-            .update({ views_count: (post.views_count || 0) + 1, viewed_by: [...viewedBy, userId] })
-            .eq('id', pid);
           if (post.user_id && post.user_id !== userId) {
             const { data: ownerData } = await supabase.from('users').select('points').eq('id', post.user_id).single();
             if (ownerData) {
@@ -1744,8 +1767,8 @@ export default function HomeScreen() {
               await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.viewPoints }).eq('id', post.user_id);
             }
           }
-          setPosts(prev => prev.map(p => p.id === pid ? { ...p, views_count: (post.views_count || 0) + 1 } : p));
-          setFeedItems(prev => prev.map(item => (!isAd(item) && item.id === pid) ? { ...item, views_count: (post.views_count || 0) + 1 } : item));
+          setPosts(prev => prev.map(p => p.id === pid ? { ...p, views_count: post.views_count } : p));
+          setFeedItems(prev => prev.map(item => (!isAd(item) && item.id === pid) ? { ...item, views_count: post.views_count } : item));
         } catch (e) { console.error('View tracking error:', e); }
       }
     }, 1500);

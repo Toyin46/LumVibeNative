@@ -56,7 +56,7 @@ function buildInviteMessage(
   referralCode: string,
   includeReferral: boolean,
 ): string {
-  const base = `Hey ${contactFirstName}! It's me ${senderName} 👋\n\nI just joined Lumvibe and I'm loving it! It's a social app with short videos, marketplace to sell your talent, gifts for creators, weekly leaderboards, voice & image posts, and a lot more 🔥\n\nCome join me 👉 https://play.google.com/store/apps/details?id=com.lumvibe.app`;
+  const base = `Hey ${contactFirstName}! It's me ${senderName} 👋\n\nI just joined Lumvibe and I'm loving it! It's a social app with short videos, marketplace to sell your talent, gifts for creators, weekly leaderboards, voice & image posts, and a lot more 🔥\n\nCome join me 👉 https://play.google.com/store/apps/details?id=com.lumvibeapp2`;
   const ref  = `\n\nP.S. Use my referral code 🎁 *${referralCode}* when signing up to get 50 FREE bonus points! (totally optional 😊)`;
   return includeReferral && referralCode ? base + ref : base;
 }
