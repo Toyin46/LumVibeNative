@@ -515,6 +515,14 @@ function useCall(currentUserId: string, displayName: string, conversationId: str
       const room = new Room({
         adaptiveStream: true,
         dynacast:       true,
+        // ✅ NEW: explicit audio processing settings (now matches Co-Watch) —
+        // rather than leaving them at LiveKit's defaults, which can differ
+        // silently between SDK versions and contribute to a crackly call.
+        audioCaptureDefaults: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
       });
       roomRef.current = room;
 

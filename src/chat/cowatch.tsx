@@ -85,7 +85,7 @@ const COWATCH_BACKGROUND_GRACE_MS = 120000;
 // @livekit/react-native only wraps native WebRTC + provides RN-specific UI (VideoView).
 // useTracks/ConnectionState were imported but never used, so they've been dropped.
 import { Room, RoomEvent, Track } from 'livekit-client';
-import { VideoView } from '@livekit/react-native';
+import { VideoView, AudioSession, AndroidAudioTypePresets } from '@livekit/react-native';
 
 // FIX 17: 15-second timeout wrapper for all network requests
 async function fetchWithTimeout<T>(promise: Promise<T>, ms = 15000): Promise<T> {
@@ -206,6 +206,11 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
       if (!granted) { if (mountedRef.current) setPermDenied(true); return; }
       if (!mountedRef.current) return;
 
+      try {
+        await AudioSession.configureAudio({ android: { audioTypeOptions: AndroidAudioTypePresets.communication } });
+        await AudioSession.startAudioSession();
+      } catch (e) { console.warn('[cowatch] audio session setup failed:', e); }
+
       const token = await fetchWithTimeout(fetchLiveKitToken(channelName, displayName || userId));
       if (!token || !mountedRef.current) return;
 
@@ -307,7 +312,7 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
 
       try {
         await room.connect(LIVEKIT_URL, token);
-        if (!mountedRef.current) { room.disconnect(); return; }
+        if (!mountedRef.current) { room.disconnect(); AudioSession.stopAudioSession().catch(() => {}); return; }
 
         // FIX: setCameraEnabled/setMicrophoneEnabled create AND publish the track
         // in one call — there's no createVideoTrack/createAudioTrack method on
@@ -367,6 +372,9 @@ function useLiveKitCall(channelName: string, userId: string, displayName: string
         roomRef.current = null;
       }
     } catch (_) {}
+    // ✅ NEW: release the communication-mode audio session on the way out —
+    // without this, its settings could carry into whatever audio runs next.
+    AudioSession.stopAudioSession().catch(() => {});
   }, []);
 
   return {
@@ -1331,7 +1339,10 @@ function PipOverlay({ photo, name, isActive, remoteVideoTrack, remoteCamOff, rem
   }, [isActive]);
 
   return (
-    <Animated.View style={[pipStyles.pip, { transform: [{ scale: pulse }] }, isSpeaking && pipStyles.pipSpeakingRing]}>
+    <Animated.View
+      style={[pipStyles.pip, { transform: [{ scale: pulse }] }, isSpeaking && pipStyles.pipSpeakingRing]}
+      renderToHardwareTextureAndroid
+    >
       <TouchableOpacity style={pipStyles.pipTouchable} onPress={() => setShowControls(s => !s)} activeOpacity={0.9}>
         {remoteVideoTrack && callReady && !remoteCamOff ? (
           // FIX 4: LiveKit VideoView renders remote participant video (✅ only while their camera is ON — otherwise the avatar below)
@@ -2008,6 +2019,7 @@ const FeedPostCard = memo(function FeedPostCard({
               onLoad={({ duration }) => { if (duration) setDurationMs(duration * 1000); }}
               ignoreSilentSwitch="ignore"
               playInBackground={false}
+              disableFocus={true}
               playWhenInactive={false}
               // FIX: Android's default SurfaceView ignores normal View
               // zIndex/elevation and paints in its own compositing layer,
