@@ -204,31 +204,32 @@ function giftLocalPrice(ngnAmount: number): string {
 
 //const BANNER_AD_UNIT_ID = __DEV__ ? TestIds.BANNER : 'ca-app-pub-8235065812461074/4176727692';
 
-// ✅ CHANGED: 4 -> 20 packages, ₦50 up to the existing 500-coin top tier —
-// approved pricing, no bonus coins. The 4 original packages (Rose, Ice Cream,
-// Love Letter, Trophy) keep their exact original id/coins/price so nothing
-// changes for anyone who already bought one.
+// ✅ CHANGED: gifts are spent from coins you already own — sendGift() below
+// deducts pkg.coins from the balance directly, it never looks at a naira
+// price. So gifts no longer carry one: just an icon, a name, and a coin
+// cost, exactly like TikTok/Instagram/Bigo do it. Naira only ever appears on
+// the Buy Coins screen, where the coins themselves are purchased.
 const GIFT_PACKAGES = [
-  { id: 'spark',        name: 'Spark',        icon: '✨', coins: 1,   ngn: 50,     color: '#ffdd55' },
-  { id: 'heart',        name: 'Heart',        icon: '❤️', coins: 3,   ngn: 300,    color: '#ff4757' },
-  { id: 'smile',        name: 'Smile',        icon: '😊', coins: 5,   ngn: 600,    color: '#ffd93d' },
-  { id: 'rose',         name: 'Rose',         icon: '🌹', coins: 10,  ngn: 1_500,  color: '#ff69b4' },
-  { id: 'candy',        name: 'Candy',        icon: '🍬', coins: 15,  ngn: 2_250,  color: '#ff85c8' },
-  { id: 'balloon',      name: 'Balloon',      icon: '🎈', coins: 20,  ngn: 3_000,  color: '#ff6b6b' },
-  { id: 'star',         name: 'Star',         icon: '⭐', coins: 25,  ngn: 3_750,  color: '#ffd700' },
-  { id: 'cupcake',      name: 'Cupcake',      icon: '🧁', coins: 30,  ngn: 4_500,  color: '#ffb6c1' },
-  { id: 'bouquet',      name: 'Bouquet',      icon: '💐', coins: 40,  ngn: 6_000,  color: '#ff8fab' },
-  { id: 'ice_cream',    name: 'Ice Cream',    icon: '🍦', coins: 50,  ngn: 7_500,  color: '#00bfff' },
-  { id: 'gift_box',     name: 'Gift Box',     icon: '🎁', coins: 60,  ngn: 9_000,  color: '#ff4d6d' },
-  { id: 'sparkler',     name: 'Sparkler',     icon: '🎇', coins: 70,  ngn: 10_500, color: '#ffe066' },
-  { id: 'diamond_ring', name: 'Diamond Ring', icon: '💍', coins: 80,  ngn: 12_000, color: '#00e5ff' },
-  { id: 'love_letter',  name: 'Love Letter',  icon: '💌', coins: 100, ngn: 15_000, color: '#ff4d8f' },
-  { id: 'crown',        name: 'Crown',        icon: '👑', coins: 150, ngn: 22_500, color: '#ffd700' },
-  { id: 'fireworks',    name: 'Fireworks',    icon: '🎆', coins: 200, ngn: 30_000, color: '#ff6347' },
-  { id: 'rocket',       name: 'Rocket',       icon: '🚀', coins: 250, ngn: 37_500, color: '#00ff88' },
-  { id: 'unicorn',      name: 'Unicorn',      icon: '🦄', coins: 300, ngn: 45_000, color: '#c77dff' },
-  { id: 'castle',       name: 'Castle',       icon: '🏰', coins: 400, ngn: 60_000, color: '#9d4edd' },
-  { id: 'trophy',       name: 'Trophy',       icon: '🏆', coins: 500, ngn: 75_000, color: '#cd7f32' },
+  { id: 'spark',        name: 'Spark',        icon: '✨', coins: 1,   color: '#ffdd55' },
+  { id: 'heart',        name: 'Heart',        icon: '❤️', coins: 3,   color: '#ff4757' },
+  { id: 'smile',        name: 'Smile',        icon: '😊', coins: 5,   color: '#ffd93d' },
+  { id: 'rose',         name: 'Rose',         icon: '🌹', coins: 10,  color: '#ff69b4' },
+  { id: 'candy',        name: 'Candy',        icon: '🍬', coins: 15,  color: '#ff85c8' },
+  { id: 'balloon',      name: 'Balloon',      icon: '🎈', coins: 20,  color: '#ff6b6b' },
+  { id: 'star',         name: 'Star',         icon: '⭐', coins: 25,  color: '#ffd700' },
+  { id: 'cupcake',      name: 'Cupcake',      icon: '🧁', coins: 30,  color: '#ffb6c1' },
+  { id: 'bouquet',      name: 'Bouquet',      icon: '💐', coins: 40,  color: '#ff8fab' },
+  { id: 'ice_cream',    name: 'Ice Cream',    icon: '🍦', coins: 50,  color: '#00bfff' },
+  { id: 'gift_box',     name: 'Gift Box',     icon: '🎁', coins: 60,  color: '#ff4d6d' },
+  { id: 'sparkler',     name: 'Sparkler',     icon: '🎇', coins: 70,  color: '#ffe066' },
+  { id: 'diamond_ring', name: 'Diamond Ring', icon: '💍', coins: 80,  color: '#00e5ff' },
+  { id: 'love_letter',  name: 'Love Letter',  icon: '💌', coins: 100, color: '#ff4d8f' },
+  { id: 'crown',        name: 'Crown',        icon: '👑', coins: 150, color: '#ffd700' },
+  { id: 'fireworks',    name: 'Fireworks',    icon: '🎆', coins: 200, color: '#ff6347' },
+  { id: 'rocket',       name: 'Rocket',       icon: '🚀', coins: 250, color: '#00ff88' },
+  { id: 'unicorn',      name: 'Unicorn',      icon: '🦄', coins: 300, color: '#c77dff' },
+  { id: 'castle',       name: 'Castle',       icon: '🏰', coins: 400, color: '#9d4edd' },
+  { id: 'trophy',       name: 'Trophy',       icon: '🏆', coins: 500, color: '#cd7f32' },
 ];
 
 const VIDEO_EFFECTS: Record<string, { label: string; tint?: string; badge?: string; badgeColor?: string; rate?: number }> = {
@@ -2203,7 +2204,6 @@ export default function VideosScreen() {
                         <View style={styles.giftInfo}>
                           <Text style={styles.giftName}>{gift.name}</Text>
                           <Text style={styles.giftAmount}>{gift.coins} coins</Text>
-                          <Text style={styles.giftLocalAmount}>{giftLocalPrice(gift.ngn)}</Text>
                         </View>
                       </View>
                       <Feather name="chevron-right" size={24} color={gift.color} />
