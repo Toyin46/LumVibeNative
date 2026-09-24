@@ -11,13 +11,17 @@
 // Fixing this in one place also means the earlier "extra () on goBack()"
 // class of bug only has one call site to go wrong in, not two.
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Alert, ActivityIndicator, Linking,
+  Alert, ActivityIndicator, Platform,
 } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
+// ✅ NEW (Play Billing): replaces the website/Paystack redirect for real
+// purchases. Test mode (FLW_TEST_MODE) is untouched below — this only
+// changes the live payment path.
+import { useIAP, type Purchase } from 'expo-iap';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 import { detectCurrency, convertFromNgn, formatNgn } from '../utils/currencyUtils';
@@ -25,7 +29,6 @@ import { FLW_TEST_MODE } from '../utils/flutterwaveUtils';
 import { useScreenPadding } from '@/hooks/useScreenPadding'; 
 
 const NGN_PER_COIN = 150;
-const WEB_BUY_URL  = 'https://lumvibe.site/buy-coins';
 
 export interface CoinPackage {
   id: string;
@@ -56,11 +59,16 @@ export interface BuyCoinsConfig {
 
 export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
   const navigation = useNavigation<any>();
-  const { user, userProfile } = useAuthStore();
+  const { user } = useAuthStore();
   const currency              = detectCurrency();
 
   const [loading, setLoading] = useState<string | null>(null);
   const [balance, setBalance] = useState(0);
+  // holds the package the user tapped, so onPurchaseSuccess (which only gets
+  // Google's purchase object back, not our own pkg data) can still show the
+  // right "you got X coins" message. Never used to decide how many coins are
+  // actually credited — see verify-google-purchase for why that matters.
+  const pendingPkgRef = useRef<CoinPackage | null>(null);
 
   const loadBalance = async () => {
     if (!user?.id) return;
@@ -79,17 +87,63 @@ export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
 
   useEffect(() => { if (user?.id) loadBalance(); }, [user?.id]);
 
-  useEffect(() => {
-    const sub = Linking.addEventListener('url', ({ url }) => {
-      if (url.includes(config.redirectUrlMatch) && url.includes('credited=true')) {
-        loadBalance();
-        Alert.alert(config.successMessage.title, config.successMessage.body, [
+  // ✅ NEW (Play Billing): connects to Google Play, loads this wallet's
+  // products once connected, and reacts when a purchase completes.
+  const { connected, products, fetchProducts, requestPurchase, finishTransaction } = useIAP({
+    onPurchaseSuccess: async (purchase: Purchase) => {
+      const pkg = pendingPkgRef.current;
+      pendingPkgRef.current = null;
+      try {
+        // The server is the only thing that decides how many coins this is
+        // worth — it looks that up itself from the verified product id, not
+        // from anything the app sends. This just asks Google "was this a
+        // real payment?" and credits the wallet if so.
+        const { data, error } = await supabase.functions.invoke('verify-google-purchase', {
+          body: {
+            purchaseToken: purchase.purchaseToken,
+            productId:     (purchase as any).productId ?? purchase.id,
+            walletType:    config.walletType,
+          },
+        });
+        if (error || !data?.success) {
+          throw new Error(data?.message || error?.message || 'Verification failed');
+        }
+        // Only remove it from Google's pending-purchase queue once our
+        // server has actually credited the wallet — if verification failed
+        // above we return early and leave it unconsumed, so it can be
+        // retried (by the app, or by Play's own automatic retry) instead of
+        // the payment being silently lost.
+        await finishTransaction({ purchase, isConsumable: true });
+        await loadBalance();
+        const totalCoins = data.coinsCredited ?? pkg?.coins ?? 0;
+        Alert.alert(config.successMessage.title, `${totalCoins.toLocaleString()} coins added!`, [
           { text: config.successMessage.ctaLabel, onPress: () => navigation.goBack() },
         ]);
+      } catch (e: any) {
+        console.error(`[BuyCoins:${config.walletType}] verification error:`, e);
+        Alert.alert(
+          'Purchase received',
+          "We're confirming your payment with Google — if your coins don't appear in a minute, pull down to refresh, or contact support with your order number from the Play Store.",
+        );
+      } finally {
+        setLoading(null);
       }
-    });
-    return () => sub.remove();
-  }, []);
+    },
+    onPurchaseError: (error: any) => {
+      pendingPkgRef.current = null;
+      setLoading(null);
+      // E_USER_CANCELLED / userCancelled: they backed out of the Play sheet
+      // themselves — nothing went wrong, so no need to alarm them with an error.
+      if (error?.code === 'E_USER_CANCELLED' || error?.userCancelled) return;
+      Alert.alert('Purchase failed', error?.message || 'Something went wrong. Please try again.');
+    },
+  });
+
+  useEffect(() => {
+    if (connected && Platform.OS === 'android') {
+      fetchProducts({ skus: config.packages.map(p => p.id), type: 'in-app' });
+    }
+  }, [connected]);
 
   const goBack = () => {
     if (config.navigateBackViaParent) {
@@ -102,16 +156,9 @@ export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
   const handleBuyPackage = async (pkg: CoinPackage) => {
     if (!user?.id) { Alert.alert('Error', 'Please log in to continue.'); return; }
 
-    const userEmail = (userProfile as any)?.email || (user as any)?.email || '';
-
-    if (!userEmail.trim()) {
-      Alert.alert(
-        'Email Required',
-        'Please add an email address to your account before purchasing.\n\nGo to Profile → Settings → Edit Profile.',
-      );
-      return;
-    }
-
+    // ✅ REMOVED (Play Billing): the email requirement only existed to
+    // pre-fill the old website checkout. Google Play identifies the buyer
+    // through their own account, so purchases no longer need one.
     const totalCoins = pkg.coins + pkg.bonusCoins;
     const localPrice = convertFromNgn(pkg.priceNgn, currency);
     const bonusLine  = pkg.bonusCoins > 0
@@ -155,34 +202,45 @@ export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
       return;
     }
 
-    Alert.alert(
-      `${pkg.icon} Buy Coins`,
-      `${bonusLine}You will pay ${localPrice} ${currency.code}` +
-      `${currency.code !== 'NGN' ? `\n(${formatNgn(pkg.priceNgn)})` : ''}` +
-      `\n\n✅ Payment opens on our secure website.\nNo app store fees.\n\nYou'll return here automatically after payment.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Pay Now →',
-          onPress: () => {
-            setLoading(pkg.id);
-            const params = new URLSearchParams({
-              userId:   user.id,
-              email:    userEmail,
-              type:     config.purchaseType,
-              pkg:      pkg.id,
-              currency: currency.code,
-            });
-            const url = `${WEB_BUY_URL}?${params.toString()}`;
-            Linking.openURL(url).catch(() => {
-              Alert.alert('Error', 'Could not open browser. Please try again.');
-            }).finally(() => {
-              setLoading(null);
-            });
-          },
-        },
-      ],
-    );
+    // ✅ CHANGED (Play Billing): was a website redirect ("Payment opens on
+    // our secure website. No app store fees.") — Google requires purchases
+    // of an in-app virtual currency to go through Play Billing itself, not
+    // an external site. This now opens Google's own purchase sheet.
+    if (Platform.OS !== 'android') {
+      Alert.alert('Not available', 'Buying coins is currently only available on Android.');
+      return;
+    }
+    if (!connected) {
+      Alert.alert('One moment', "We're still connecting to Google Play — try again in a few seconds.");
+      return;
+    }
+    const product = products.find(p => p.id === pkg.id);
+    if (!product) {
+      Alert.alert(
+        'Not available yet',
+        "This package isn't set up on the Play Store yet. Please try again shortly, or contact support if this continues.",
+      );
+      return;
+    }
+
+    setLoading(pkg.id);
+    pendingPkgRef.current = pkg;
+    try {
+      // requestPurchase returns once the purchase SHEET closes, not once the
+      // purchase itself completes — the actual result arrives through
+      // onPurchaseSuccess / onPurchaseError above (setLoading(null) happens
+      // there, not here) once Google finishes processing it.
+      await requestPurchase({
+        request: { google: { skus: [pkg.id] } },
+        type: 'in-app',
+      });
+    } catch (e: any) {
+      pendingPkgRef.current = null;
+      setLoading(null);
+      if (e?.code !== 'E_USER_CANCELLED' && !e?.userCancelled) {
+        Alert.alert('Purchase failed', e?.message || 'Something went wrong. Please try again.');
+      }
+    }
   };
 
   const localBalance = convertFromNgn(balance * NGN_PER_COIN, currency);
@@ -210,12 +268,14 @@ export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
         </View>
       )}
 
+      {/* ✅ CHANGED (Play Billing): was "Secure Web Payment" / "no app store
+          fees" — purchases now go through Google Play itself. */}
       <View style={s.webNotice}>
-        <Text style={s.webNoticeIcon}>🌐</Text>
+        <Text style={s.webNoticeIcon}>🔒</Text>
         <View style={s.webNoticeText}>
-          <Text style={s.webNoticeTitle}>Secure Web Payment</Text>
+          <Text style={s.webNoticeTitle}>Secured by Google Play</Text>
           <Text style={s.webNoticeBody}>
-            Tapping Buy opens our secure website — no app store fees. You'll return here automatically after payment.
+            Tapping Buy opens Google's own purchase screen. Your coins are added automatically once payment completes.
           </Text>
         </View>
       </View>
