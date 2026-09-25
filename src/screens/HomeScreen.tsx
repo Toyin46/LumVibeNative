@@ -575,6 +575,15 @@ function WinnerCardInFeed({ winners, onUserPress }: { winners: WeeklyWinner[]; o
 }
 
 // ─── TOP CREATOR SPOTLIGHT (shown at the very top of the home feed, before any scrolling) ─
+const CONFETTI = [
+  { top: 10,  left: 14,  rot: '15deg',  color: '#FFD700', size: 8 },
+  { top: 18,  left: 44,  rot: '-20deg', color: '#00ff88', size: 6 },
+  { top: 8,   right: 50, rot: '30deg',  color: '#FFA500', size: 7 },
+  { top: 22,  right: 16, rot: '-15deg', color: '#FFD700', size: 9 },
+  { top: 46,  left: 8,   rot: '45deg',  color: '#00ff88', size: 6 },
+  { top: 40,  right: 10, rot: '-35deg', color: '#FFA500', size: 6 },
+];
+
 function TopCreatorSpotlight({
   winner, stats, isFollowing, onFollow, onPress,
 }: {
@@ -587,21 +596,45 @@ function TopCreatorSpotlight({
   const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`;
   return (
     <View style={spotlightStyles.wrap}>
-      <LinearGradient colors={['#1a1200', '#0d0d0d', '#001a0a']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={spotlightStyles.gradient}>
+      <LinearGradient colors={['#0f1400', '#0a0a0a', '#00140d']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={spotlightStyles.gradient}>
+        {/* confetti flecks */}
+        {CONFETTI.map((c, i) => (
+          <View
+            key={i}
+            pointerEvents="none"
+            style={[
+              spotlightStyles.confetti,
+              {
+                top: c.top, left: (c as any).left, right: (c as any).right,
+                width: c.size, height: c.size, backgroundColor: c.color,
+                transform: [{ rotate: c.rot }],
+              },
+            ]}
+          />
+        ))}
+
         <View style={spotlightStyles.badgeRow}>
-          <View style={spotlightStyles.badge}>
-            <Text style={spotlightStyles.badgeText}>👑 Top Creator of the Week</Text>
+          <Text style={spotlightStyles.crownTop}>👑</Text>
+          <View style={spotlightStyles.badgeLine}>
+            <Text style={spotlightStyles.laurel}>🌿</Text>
+            <View style={spotlightStyles.badge}>
+              <Text style={spotlightStyles.badgeText}>Top Creator of the Week</Text>
+            </View>
+            <Text style={[spotlightStyles.laurel, { transform: [{ scaleX: -1 }] }]}>🌿</Text>
           </View>
         </View>
+
         <TouchableOpacity style={spotlightStyles.profileRow} onPress={onPress} activeOpacity={0.85}>
           <View style={spotlightStyles.avatarWrap}>
             {winner.avatar_url
               ? <Image source={{ uri: winner.avatar_url }} style={spotlightStyles.avatar} />
-              : <View style={[spotlightStyles.avatar, spotlightStyles.avatarFallback]}><Feather name="user" size={28} color="#FFD700" /></View>}
+              : <View style={[spotlightStyles.avatar, spotlightStyles.avatarFallback]}><Feather name="user" size={26} color="#FFD700" /></View>}
+            <View style={spotlightStyles.avatarCrownBadge}><Text style={spotlightStyles.avatarCrownText}>👑</Text></View>
           </View>
           <View style={spotlightStyles.nameCol}>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
               <Text style={spotlightStyles.name} numberOfLines={1}>{winner.display_name}</Text>
+              <Text style={spotlightStyles.nameCrown}>👑</Text>
             </View>
             <Text style={spotlightStyles.username} numberOfLines={1}>@{winner.username}</Text>
           </View>
@@ -609,24 +642,34 @@ function TopCreatorSpotlight({
             <Text style={[spotlightStyles.followBtnText, isFollowing && spotlightStyles.followingBtnText]}>{isFollowing ? 'Following' : 'Follow'}</Text>
           </TouchableOpacity>
         </TouchableOpacity>
-        <View style={spotlightStyles.statsRow}>
+
+        <View style={spotlightStyles.statsBar}>
           <View style={spotlightStyles.statCol}>
-            <Text style={spotlightStyles.statValue}>{fmt(winner.weekly_points)}</Text>
+            <View style={spotlightStyles.statTop}>
+              <MaterialCommunityIcons name="heart" size={14} color="#ff3b5c" />
+              <Text style={spotlightStyles.statValue}>{fmt(winner.weekly_points)}</Text>
+            </View>
             <Text style={spotlightStyles.statLabel}>Total Points</Text>
           </View>
-          <View style={spotlightStyles.statDivider} />
           <View style={spotlightStyles.statCol}>
-            <Text style={spotlightStyles.statValue}>{fmt(stats.likes)}</Text>
+            <View style={spotlightStyles.statTop}>
+              <MaterialCommunityIcons name="fire" size={14} color="#ff9500" />
+              <Text style={spotlightStyles.statValue}>{fmt(stats.likes)}</Text>
+            </View>
             <Text style={spotlightStyles.statLabel}>Likes</Text>
           </View>
-          <View style={spotlightStyles.statDivider} />
           <View style={spotlightStyles.statCol}>
-            <Text style={spotlightStyles.statValue}>{fmt(stats.comments)}</Text>
+            <View style={spotlightStyles.statTop}>
+              <Feather name="message-circle" size={13} color="#00d4ff" />
+              <Text style={spotlightStyles.statValue}>{fmt(stats.comments)}</Text>
+            </View>
             <Text style={spotlightStyles.statLabel}>Comments</Text>
           </View>
-          <View style={spotlightStyles.statDivider} />
           <View style={spotlightStyles.statCol}>
-            <Text style={spotlightStyles.statValue}>{fmt(stats.views)}</Text>
+            <View style={spotlightStyles.statTop}>
+              <Feather name="corner-up-right" size={13} color="#00e0c6" />
+              <Text style={spotlightStyles.statValue}>{fmt(stats.views)}</Text>
+            </View>
             <Text style={spotlightStyles.statLabel}>Views</Text>
           </View>
         </View>
@@ -636,27 +679,34 @@ function TopCreatorSpotlight({
 }
 
 const spotlightStyles = StyleSheet.create({
-  wrap:            { marginBottom: 12, borderRadius: 16, overflow: 'hidden', borderWidth: 1, borderColor: '#FFD70033' },
-  gradient:        { padding: 16 },
+  wrap:            { marginBottom: 12, marginHorizontal: 10, marginTop: 4, borderRadius: 18, overflow: 'hidden', borderWidth: 1.5, borderColor: '#FFD700', borderStyle: 'dashed' },
+  gradient:        { padding: 16, position: 'relative' },
+  confetti:        { position: 'absolute', borderRadius: 2 },
   badgeRow:        { alignItems: 'center', marginBottom: 14 },
-  badge:           { backgroundColor: 'rgba(255,215,0,0.12)', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1, borderColor: '#FFD70055' },
-  badgeText:       { color: '#FFD700', fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
+  crownTop:        { fontSize: 22, marginBottom: -6, zIndex: 2 },
+  badgeLine:       { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  laurel:          { fontSize: 20, opacity: 0.85 },
+  badge:           { backgroundColor: 'rgba(255,215,0,0.14)', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1, borderColor: '#FFD700' },
+  badgeText:       { color: '#FFD700', fontSize: 12, fontWeight: '800', letterSpacing: 0.2 },
   profileRow:      { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
-  avatarWrap:      { marginRight: 12 },
-  avatar:          { width: 54, height: 54, borderRadius: 27, borderWidth: 2, borderColor: '#FFD700' },
+  avatarWrap:      { marginRight: 12, position: 'relative' },
+  avatar:          { width: 54, height: 54, borderRadius: 27, borderWidth: 2, borderColor: '#fff' },
   avatarFallback:  { backgroundColor: '#1a1a1a', justifyContent: 'center', alignItems: 'center' },
+  avatarCrownBadge:{ position: 'absolute', top: -6, right: -6, width: 22, height: 22, borderRadius: 11, backgroundColor: '#0a0a0a', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#FFD700' },
+  avatarCrownText: { fontSize: 11 },
   nameCol:         { flex: 1 },
   name:            { color: '#fff', fontSize: 16, fontWeight: '700' },
+  nameCrown:       { fontSize: 13 },
   username:        { color: '#888', fontSize: 13, marginTop: 2 },
   followBtn:       { backgroundColor: '#00ff88', borderRadius: 18, paddingHorizontal: 18, paddingVertical: 8 },
   followingBtn:    { backgroundColor: 'transparent', borderWidth: 1, borderColor: '#444' },
   followBtnText:   { color: '#000', fontSize: 13, fontWeight: '700' },
   followingBtnText:{ color: '#aaa' },
-  statsRow:        { flexDirection: 'row', alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: '#ffffff14' },
+  statsBar:        { flexDirection: 'row', backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 12, paddingVertical: 12 },
   statCol:         { flex: 1, alignItems: 'center' },
-  statDivider:     { width: 1, height: 26, backgroundColor: '#ffffff14' },
+  statTop:         { flexDirection: 'row', alignItems: 'center', gap: 4 },
   statValue:       { color: '#fff', fontSize: 14, fontWeight: '700' },
-  statLabel:       { color: '#666', fontSize: 10, marginTop: 3 },
+  statLabel:       { color: '#888', fontSize: 10, marginTop: 4 },
 });
 
 const winnerStyles = StyleSheet.create({
