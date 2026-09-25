@@ -574,6 +574,91 @@ function WinnerCardInFeed({ winners, onUserPress }: { winners: WeeklyWinner[]; o
   );
 }
 
+// ─── TOP CREATOR SPOTLIGHT (shown at the very top of the home feed, before any scrolling) ─
+function TopCreatorSpotlight({
+  winner, stats, isFollowing, onFollow, onPress,
+}: {
+  winner: WeeklyWinner;
+  stats: { likes: number; comments: number; views: number };
+  isFollowing: boolean;
+  onFollow: () => void;
+  onPress: () => void;
+}) {
+  const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`;
+  return (
+    <View style={spotlightStyles.wrap}>
+      <LinearGradient colors={['#1a1200', '#0d0d0d', '#001a0a']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={spotlightStyles.gradient}>
+        <View style={spotlightStyles.badgeRow}>
+          <View style={spotlightStyles.badge}>
+            <Text style={spotlightStyles.badgeText}>👑 Top Creator of the Week</Text>
+          </View>
+        </View>
+        <TouchableOpacity style={spotlightStyles.profileRow} onPress={onPress} activeOpacity={0.85}>
+          <View style={spotlightStyles.avatarWrap}>
+            {winner.avatar_url
+              ? <Image source={{ uri: winner.avatar_url }} style={spotlightStyles.avatar} />
+              : <View style={[spotlightStyles.avatar, spotlightStyles.avatarFallback]}><Feather name="user" size={28} color="#FFD700" /></View>}
+          </View>
+          <View style={spotlightStyles.nameCol}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={spotlightStyles.name} numberOfLines={1}>{winner.display_name}</Text>
+            </View>
+            <Text style={spotlightStyles.username} numberOfLines={1}>@{winner.username}</Text>
+          </View>
+          <TouchableOpacity style={[spotlightStyles.followBtn, isFollowing && spotlightStyles.followingBtn]} onPress={onFollow} activeOpacity={0.8}>
+            <Text style={[spotlightStyles.followBtnText, isFollowing && spotlightStyles.followingBtnText]}>{isFollowing ? 'Following' : 'Follow'}</Text>
+          </TouchableOpacity>
+        </TouchableOpacity>
+        <View style={spotlightStyles.statsRow}>
+          <View style={spotlightStyles.statCol}>
+            <Text style={spotlightStyles.statValue}>{fmt(winner.weekly_points)}</Text>
+            <Text style={spotlightStyles.statLabel}>Total Points</Text>
+          </View>
+          <View style={spotlightStyles.statDivider} />
+          <View style={spotlightStyles.statCol}>
+            <Text style={spotlightStyles.statValue}>{fmt(stats.likes)}</Text>
+            <Text style={spotlightStyles.statLabel}>Likes</Text>
+          </View>
+          <View style={spotlightStyles.statDivider} />
+          <View style={spotlightStyles.statCol}>
+            <Text style={spotlightStyles.statValue}>{fmt(stats.comments)}</Text>
+            <Text style={spotlightStyles.statLabel}>Comments</Text>
+          </View>
+          <View style={spotlightStyles.statDivider} />
+          <View style={spotlightStyles.statCol}>
+            <Text style={spotlightStyles.statValue}>{fmt(stats.views)}</Text>
+            <Text style={spotlightStyles.statLabel}>Views</Text>
+          </View>
+        </View>
+      </LinearGradient>
+    </View>
+  );
+}
+
+const spotlightStyles = StyleSheet.create({
+  wrap:            { marginBottom: 12, borderRadius: 16, overflow: 'hidden', borderWidth: 1, borderColor: '#FFD70033' },
+  gradient:        { padding: 16 },
+  badgeRow:        { alignItems: 'center', marginBottom: 14 },
+  badge:           { backgroundColor: 'rgba(255,215,0,0.12)', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1, borderColor: '#FFD70055' },
+  badgeText:       { color: '#FFD700', fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
+  profileRow:      { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  avatarWrap:      { marginRight: 12 },
+  avatar:          { width: 54, height: 54, borderRadius: 27, borderWidth: 2, borderColor: '#FFD700' },
+  avatarFallback:  { backgroundColor: '#1a1a1a', justifyContent: 'center', alignItems: 'center' },
+  nameCol:         { flex: 1 },
+  name:            { color: '#fff', fontSize: 16, fontWeight: '700' },
+  username:        { color: '#888', fontSize: 13, marginTop: 2 },
+  followBtn:       { backgroundColor: '#00ff88', borderRadius: 18, paddingHorizontal: 18, paddingVertical: 8 },
+  followingBtn:    { backgroundColor: 'transparent', borderWidth: 1, borderColor: '#444' },
+  followBtnText:   { color: '#000', fontSize: 13, fontWeight: '700' },
+  followingBtnText:{ color: '#aaa' },
+  statsRow:        { flexDirection: 'row', alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: '#ffffff14' },
+  statCol:         { flex: 1, alignItems: 'center' },
+  statDivider:     { width: 1, height: 26, backgroundColor: '#ffffff14' },
+  statValue:       { color: '#fff', fontSize: 14, fontWeight: '700' },
+  statLabel:       { color: '#666', fontSize: 10, marginTop: 3 },
+});
+
 const winnerStyles = StyleSheet.create({
   banner:               { marginBottom: 8 },
   bannerGradient:       { paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: '#FFD70033' },
@@ -1484,6 +1569,23 @@ export default function HomeScreen() {
     } catch (e) { console.error('Error loading weekly winners:', e); }
   };
 
+  // ✅ NEW: best-effort Likes/Comments/Views for the #1 spotlight card, summed
+  // from posts already present in the loaded feed — no extra network call,
+  // so this can never break feed loading if it comes up empty.
+  const topCreatorStats = useMemo(() => {
+    if (weeklyWinners.length === 0) return { likes: 0, comments: 0, views: 0 };
+    const topId = weeklyWinners[0].user_id;
+    let likes = 0, comments = 0, views = 0;
+    feedItems.forEach((it) => {
+      if (!isAd(it) && !isWinnerCard(it) && (it as Post).user_id === topId) {
+        likes += (it as Post).likes_count || 0;
+        comments += (it as Post).comments_count || 0;
+        views += (it as Post).views_count || 0;
+      }
+    });
+    return { likes, comments, views };
+  }, [feedItems, weeklyWinners]);
+
   const loadFeed = async (forceRefresh = false) => {
     if (!forceRefresh && feedCacheRef.current && Date.now() - feedCacheRef.current.timestamp < FEED_CACHE_DURATION) {
       setFeedItems(feedCacheRef.current.data); setLoading(false); setRefreshing(false); return;
@@ -2173,7 +2275,20 @@ export default function HomeScreen() {
         onEndReached={loadMoreFeed}
         onEndReachedThreshold={0.6}
         ListFooterComponent={loadingMore ? <View style={{ paddingVertical: 24 }}><ActivityIndicator size="small" color="#00ff88" /></View> : null}
-        ListHeaderComponent={weeklyWinners.length > 0 ? <WinnersBanner winners={weeklyWinners} onUserPress={handleUserPress} isOfficial={winnersAreOfficial} /> : null}
+        ListHeaderComponent={
+          weeklyWinners.length > 0 ? (
+            <View>
+              <TopCreatorSpotlight
+                winner={weeklyWinners[0]}
+                stats={topCreatorStats}
+                isFollowing={followStatusMap.get(weeklyWinners[0].user_id) || false}
+                onFollow={() => handleFollow(weeklyWinners[0].user_id, followStatusMap.get(weeklyWinners[0].user_id) || false)}
+                onPress={() => handleUserPress(weeklyWinners[0].user_id)}
+              />
+              <WinnersBanner winners={weeklyWinners} onUserPress={handleUserPress} isOfficial={winnersAreOfficial} />
+            </View>
+          ) : null
+        }
         ListEmptyComponent={<View style={styles.emptyContainer}><Feather name="image" size={64} color="#666" /><Text style={styles.emptyText}>{t.feed.noContent}</Text><Text style={styles.emptySubtext}>{t.feed.noContentSub}</Text></View>}
       />
 

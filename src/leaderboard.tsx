@@ -66,18 +66,21 @@ function CountdownTimer() {
   const { t } = useTranslation();
   return (
     <View style={countdownStyles.container}>
-      <Text style={countdownStyles.label}>🔄 {t.leaderboard.resetsIn}</Text>
+      <Text style={countdownStyles.label}>⏱ {t.leaderboard.resetsIn}</Text>
       <View style={countdownStyles.units}>
         {[
           { value: d, unit: t.leaderboard.days },
           { value: h, unit: t.leaderboard.hours },
           { value: m, unit: t.leaderboard.mins },
           { value: s, unit: t.leaderboard.secs },
-        ].map(({ value, unit }) => (
-          <View key={unit} style={countdownStyles.unitBox}>
-            <Text style={countdownStyles.unitValue}>{String(value).padStart(2, '0')}</Text>
-            <Text style={countdownStyles.unitLabel}>{unit}</Text>
-          </View>
+        ].map(({ value, unit }, i) => (
+          <React.Fragment key={unit}>
+            {i > 0 && <Text style={countdownStyles.colon}>:</Text>}
+            <View style={countdownStyles.unitBox}>
+              <Text style={countdownStyles.unitValue}>{String(value).padStart(2, '0')}</Text>
+              <Text style={countdownStyles.unitLabel}>{unit}</Text>
+            </View>
+          </React.Fragment>
         ))}
       </View>
       <Text style={countdownStyles.pointsGuide}>
@@ -92,6 +95,7 @@ const countdownStyles = StyleSheet.create({
   label:       { color: '#888', fontSize: 11, marginBottom: 6 },
   units:       { flexDirection: 'row', gap: 6 },
   unitBox:     { alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, minWidth: 44, borderWidth: 1, borderColor: '#2a2a2a' },
+  colon:       { color: '#00ff88', fontSize: 16, fontWeight: 'bold', marginHorizontal: 2 },
   unitValue:   { color: '#00ff88', fontSize: 16, fontWeight: 'bold', fontVariant: ['tabular-nums'] },
   unitLabel:   { color: '#555', fontSize: 9, marginTop: 2 },
   pointsGuide: { color: '#00ff8866', fontSize: 10, fontWeight: '600', marginTop: 10 },
@@ -248,18 +252,20 @@ export default function LeaderboardScreen() {
     const cfg = isTop3 ? RANK_CONFIG[item.rank as 1|2|3] : null;
     const pts = getDisplayPoints(item);
     return (
-      <TouchableOpacity style={[styles.userItem, isTop3 && cfg ? { backgroundColor: cfg.glow, borderColor: cfg.color, borderWidth: 1 } : {}]} onPress={() => handleUserPress(item.id)} activeOpacity={0.8}>
-        <View style={styles.rankContainer}>
-          {isTop3 && cfg ? <Text style={styles.rankEmoji}>{cfg.emoji}</Text> : <Text style={styles.rankText}>#{item.rank}</Text>}
+      <TouchableOpacity style={styles.userItem} onPress={() => handleUserPress(item.id)} activeOpacity={0.8}>
+        <View style={styles.avatarWrap}>
+          {item.avatar_url
+            ? <Image source={{ uri: item.avatar_url }} style={styles.avatar} />
+            : <View style={[styles.avatar, styles.avatarPlaceholder]}><Ionicons name="person" size={22} color="#555" /></View>}
+          <View style={[styles.rankBadge, { backgroundColor: cfg ? cfg.color : '#1a1a1a', borderColor: '#000' }]}>
+            {cfg ? <Text style={styles.rankBadgeEmoji}>{cfg.emoji}</Text> : <Text style={styles.rankBadgeNum}>{item.rank}</Text>}
+          </View>
         </View>
-        {item.avatar_url
-          ? <Image source={{ uri: item.avatar_url }} style={[styles.avatar, isTop3 && cfg ? { borderWidth: 2, borderColor: cfg.color } : {}]} />
-          : <View style={[styles.avatar, styles.avatarPlaceholder, isTop3 && cfg ? { borderWidth: 2, borderColor: cfg.color } : {}]}><Ionicons name="person" size={24} color={cfg?.color || '#00ff88'} /></View>}
         <View style={styles.userInfo}>
-          <Text style={[styles.displayName, isTop3 && cfg ? { color: cfg.color } : {}]}>{item.display_name}</Text>
-          <Text style={styles.username}>@{item.username}</Text>
+          <Text style={[styles.displayName, isTop3 && cfg ? { color: cfg.color } : {}]} numberOfLines={1}>{item.display_name}</Text>
+          <Text style={styles.username} numberOfLines={1}>@{item.username}</Text>
         </View>
-        <View style={[styles.pointsContainer, isTop3 && cfg ? { borderColor: cfg.color } : {}]}>
+        <View style={styles.pointsContainer}>
           <Text style={[styles.pointsValue, isTop3 && cfg ? { color: cfg.color } : {}]}>{pts.toLocaleString()}</Text>
           <Text style={styles.pointsLabel}>{t.leaderboard.pointsLabel}</Text>
         </View>
@@ -287,8 +293,15 @@ export default function LeaderboardScreen() {
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>🏆 {t.leaderboard.title}</Text>
+        <Text style={styles.headerTitle}>{t.leaderboard.title}</Text>
         <View style={{ width: 40 }} />
+      </View>
+
+      <View style={styles.titlePillWrap}>
+        <View style={styles.titlePill}>
+          <Text style={styles.titlePillIcon}>👑</Text>
+          <Text style={styles.titlePillText}>Weekly Leaderboard</Text>
+        </View>
       </View>
 
       <View style={styles.filterContainer}>
@@ -331,6 +344,10 @@ const styles = StyleSheet.create({
   header:           { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 60, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
   backBtn:          { padding: 4 },
   headerTitle:      { fontSize: 20, fontWeight: 'bold', color: '#fff' },
+  titlePillWrap:    { alignItems: 'center', paddingTop: 14 },
+  titlePill:        { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#111', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 7, borderWidth: 1, borderColor: '#FFD70033' },
+  titlePillIcon:    { fontSize: 14 },
+  titlePillText:    { color: '#FFD700', fontSize: 13, fontWeight: '700' },
   filterContainer:  { flexDirection: 'row', paddingHorizontal: 16, paddingVertical: 14, gap: 10 },
   filterTab:        { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 10, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#2a2a2a' },
   filterTabActive:  { backgroundColor: '#00ff88', borderColor: '#00ff88' },
@@ -343,18 +360,19 @@ const styles = StyleSheet.create({
   dividerLine:      { flex: 1, height: 1, backgroundColor: '#1a1a1a' },
   dividerText:      { color: '#555', fontSize: 11, fontWeight: '600' },
   listContainer:    { paddingBottom: 40, paddingTop: 16 },
-  userItem:         { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 16, marginHorizontal: 16, marginBottom: 6, borderRadius: 12, backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#1a1a1a' },
-  rankContainer:    { width: 36, alignItems: 'center' },
-  rankEmoji:        { fontSize: 22 },
-  rankText:         { fontSize: 14, fontWeight: 'bold', color: '#555' },
-  avatar:           { width: 48, height: 48, borderRadius: 24, marginRight: 12 },
+  userItem:         { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 14, marginHorizontal: 16, marginBottom: 8, borderRadius: 14, backgroundColor: '#111', borderWidth: 1, borderColor: '#1e1e1e' },
+  avatarWrap:       { position: 'relative', marginRight: 12 },
+  avatar:           { width: 46, height: 46, borderRadius: 23 },
   avatarPlaceholder:{ backgroundColor: '#1a1a1a', justifyContent: 'center', alignItems: 'center' },
-  userInfo:         { flex: 1 },
+  rankBadge:        { position: 'absolute', bottom: -2, right: -2, width: 20, height: 20, borderRadius: 10, borderWidth: 2, justifyContent: 'center', alignItems: 'center' },
+  rankBadgeEmoji:   { fontSize: 11 },
+  rankBadgeNum:     { fontSize: 10, fontWeight: 'bold', color: '#aaa' },
+  userInfo:         { flex: 1, paddingRight: 8 },
   displayName:      { fontSize: 15, fontWeight: '600', color: '#fff' },
   username:         { fontSize: 13, color: '#666', marginTop: 2 },
-  pointsContainer:  { alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a2a', minWidth: 60 },
-  pointsValue:      { fontSize: 14, fontWeight: 'bold', color: '#00ff88' },
-  pointsLabel:      { fontSize: 9, color: '#555', marginTop: 1 },
+  pointsContainer:  { alignItems: 'flex-end', minWidth: 70 },
+  pointsValue:      { fontSize: 15, fontWeight: 'bold', color: '#fff' },
+  pointsLabel:      { fontSize: 10, color: '#666', marginTop: 1 },
   emptyContainer:   { alignItems: 'center', paddingTop: 60 },
   emptyText:        { color: '#fff', fontSize: 18, fontWeight: '600' },
   emptySubtext:     { color: '#666', fontSize: 14, marginTop: 8 },
