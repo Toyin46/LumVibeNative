@@ -663,7 +663,7 @@ function ContactInviteModal({
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={ci.overlay}
       >
         <View style={ci.sheet}>
@@ -2551,7 +2551,7 @@ export default function ProfileScreen() {
 
       {/* Withdraw */}
       <Modal visible={withdrawModalVisible} animationType="slide" transparent onRequestClose={() => setWithdrawModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.modalOverlay}>
           <View style={th.modal}>
             <View style={s.modalHeader}>
               <Text style={s.modalTitle}>💸 {t.wallet.withdrawFunds}</Text>
@@ -2623,7 +2623,7 @@ export default function ProfileScreen() {
 
       {/* Bank Connect */}
       <Modal visible={paystackConnectModalVisible} animationType="slide" transparent onRequestClose={() => setPaystackConnectModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.modalOverlay}>
           <View style={th.modal}>
             <View style={s.modalHeader}>
               <Text style={s.modalTitle}>🏦 Connect Bank</Text>
@@ -2759,7 +2759,7 @@ export default function ProfileScreen() {
 
       {/* Social Links */}
       <Modal visible={socialModalVisible} animationType="slide" transparent onRequestClose={() => setSocialModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.modalOverlay}>
           <View style={th.modal}>
             <View style={s.modalHeader}>
               <Text style={s.modalTitle}>🔗 Social Media Links</Text>
@@ -3154,7 +3154,7 @@ export default function ProfileScreen() {
 
       {/* Edit Profile */}
       <Modal visible={editModalVisible} animationType="slide" transparent onRequestClose={() => setEditModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.modalOverlay}>
           <View style={th.modal}>
             <View style={s.modalHeader}>
               <Text style={s.modalTitle}>✏️ Edit Profile</Text>
@@ -3283,7 +3283,7 @@ export default function ProfileScreen() {
 
       {/* Delete Account */}
       <Modal visible={deleteAccountModalVisible} animationType="fade" transparent onRequestClose={() => setDeleteAccountModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.modalOverlay}>
           <View style={[th.modal, { padding: 24 }]}>
             <Text style={{ color: '#ff4444', fontSize: 20, fontWeight: 'bold', marginBottom: 8 }}>⚠️ Delete Account</Text>
             <Text style={{ color: '#ccc', fontSize: 14, lineHeight: 22, marginBottom: 20 }}>This permanently deletes your account, posts, coins, and all data. This cannot be undone.</Text>
