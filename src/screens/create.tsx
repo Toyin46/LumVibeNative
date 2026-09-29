@@ -47,6 +47,8 @@ import { captureRef } from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/marketplacePostBridge';
 import NetInfo from '@react-native-community/netinfo';
+// Crowd Cam (multi-phone film) -- lives in its own files under src/crowdcam/
+import CrowdCamModal from '../crowdcam/CrowdCamModal';
 
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
@@ -4376,6 +4378,7 @@ export default function CreateScreen() {
 
   // ─── Audio Studio state ───────────────────────────────
   const [showAudioStudio, setShowAudioStudio] = useState(false);
+  const [showCrowdCam, setShowCrowdCam]       = useState(false); // Crowd Cam modal
   const [studioVoiceUri, setStudioVoiceUri] = useState<string | null>(null);
   const [studioEffectId, setStudioEffectId] = useState<string | null>(null);
   const [autoTuneEnabled, setAutoTuneEnabled] = useState(false);
@@ -5973,7 +5976,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
       <View style={ms.camScreen}>
         {/* Camera area */}
         <View style={[ms.camBox, { height: cH }]}>
-          {hasLiveGLEffect ? (
+          {showCrowdCam ? null : hasLiveGLEffect ? (
             // A GL shader effect is selected (Mood Ring, Gaze Trail, etc.) —
             // switch from the normal camera views to the live GL renderer so
             // the effect is actually visible now, not just after posting.
@@ -6092,6 +6095,9 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 </View>
               )}
             </View>
+            <TouchableOpacity style={ms.camIconBtn} onPress={() => setShowCrowdCam(true)}>
+              <Ionicons name="people-outline" size={22} color="#fff" />
+            </TouchableOpacity>
             <TouchableOpacity style={ms.camIconBtn} onPress={() => setScreenView('drafts')}>
               <Ionicons name="document-text-outline" size={22} color="#fff" />
               {drafts.length > 0 && <View style={ms.draftBadge}><Text style={ms.draftBadgeTxt}>{drafts.length}</Text></View>}
@@ -6366,6 +6372,24 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             // Go to compose after Audio Studio done
             if (!mediaUri) {
               setMediaType('voice');
+            }
+            setScreenView('compose');
+          }}
+        />
+
+        {/* Crowd Cam modal (multi-phone film) */}
+        <CrowdCamModal
+          visible={showCrowdCam}
+          onClose={() => setShowCrowdCam(false)}
+          onFilmReady={({ localUri, contributors }) => {
+            setShowCrowdCam(false);
+            setCapturedWithLiveFx(false);
+            setOriginalMediaUri(localUri);
+            setMediaUri(localUri);
+            setMediaType('video');
+            setVideoPlaying(false);
+            if (contributors.length) {
+              setCaption(prev => prev || ('Filmed by ' + contributors.map(u => '@' + u).join(' ')));
             }
             setScreenView('compose');
           }}

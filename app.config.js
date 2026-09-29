@@ -55,7 +55,24 @@ export default {
         "android.permission.WAKE_LOCK",
         "android.permission.VIBRATE",
         "android.permission.POST_NOTIFICATIONS"
-      ]
+      ],
+      // ✅ NEW (Play Console flagged these as undeclared): expo-media-library
+      // adds these two automatically, whether the app needs them or not.
+      // LumVibe only ever WRITES a new file to the gallery (saving a video)
+      // and picks media to post through the system picker — neither needs
+      // broad gallery-read access, so these are blocked from the final
+      // build rather than declaring a use case that isn't real. Saving to
+      // the gallery keeps working; this only removes the ability to browse
+      // the user's existing photos, which nothing in the app does anyway.
+      "blockedPermissions": [
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
+      // ✅ NEW: Play requires a new version code for every upload — your
+      // last one used code 1, so this build must be 2 or higher. Bump this
+      // by 1 every time you build again after this.
+      "versionCode": 2
     },
     "plugins": [
       "expo-audio",
