@@ -3,32 +3,43 @@
 // The whole Crowd Cam screen. create.tsx only renders <CrowdCamModal .../>
 // and receives the finished film through onFilmReady.
 //
-// Flow:  home (create / join) -> lobby (camera preview + code)
-//        -> recording (everyone, started by the host) -> uploading
-//        -> film (host builds the film from all uploaded clips)
+// Flow:  home (create / join)
+//        -> camera (your camera big, other phones as tiles on the right)
+//        -> recording (host presses the red button for everyone)
+//        -> uploading -> wrap (host waits for every clip)
+//        -> result (film preview + angles + "Continue to post")
 // ─────────────────────────────────────────────────────────────
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, Modal, ActivityIndicator,
-  StyleSheet, Alert, Share, Platform, StatusBar,
+  StyleSheet, Alert, Share, Platform, StatusBar, Image, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system/legacy';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import {
   Camera, useCameraDevice, useCameraFormat,
-  useCameraPermission, useMicrophonePermission, VideoFile,
+  useCameraPermission, useMicrophonePermission,
 } from 'react-native-vision-camera';
 import { useAuthStore } from '../store/authStore';
 import {
-  CrowdRoom, createRoom, joinRoom, getRoom, setRoomStatus, watchRoom,
-  countMembers, listClips, uploadClip,
+  CrowdRoom, CrowdPerson, LiveChannel,
+  createRoom, joinRoom, getRoom, setRoomStatus, watchRoom,
+  listPeople, uploadClip, openLiveChannel,
 } from './crowdCamApi';
-import { buildCrowdFilm, BuildStage } from './buildFilm';
+import { analyzeRoom, renderFilm, debugSummary, BuildStage, FilmResult, RoomAnalysis } from './buildFilm';
 
 const ACCENT = '#00ff88';
-const MAX_TAKE_SEC = 90;   // auto-stop: keeps files (and mobile data) small
-const MAX_FILM_SEC = 45;   // keep the spliced URL short for the first tests
+const BG = '#050b09';
+const CARD = '#0b1512';
+const EDGE = 'rgba(0,255,136,0.28)';
+const MAX_TAKE_SEC = 90;      // auto-stop: keeps files (and mobile data) small
+const MAX_FILM_SEC = 45;      // keep the joined-up film URL short for the first tests
+const LIVE_EVERY_MS = 2000;   // how often each phone sends its tiny preview picture
+const LIVE_WIDTH = 90;        // preview picture width in pixels (about 2-4 KB)
 
-type Step = 'home' | 'lobby' | 'recording' | 'uploading' | 'film';
+type Step = 'home' | 'camera' | 'uploading' | 'wrap' | 'result';
 
 export interface CrowdFilmResult {
   localUri: string;
@@ -43,7 +54,7 @@ interface Props {
 }
 
 const STAGE_TEXT: Record<BuildStage, string> = {
-  listing: 'Finding everyone\'s clips…',
+  listing: "Finding everyone's clips…",
   audio: 'Listening to each phone…',
   syncing: 'Lining the clips up…',
   cutting: 'Choosing the best angles…',
@@ -52,8 +63,55 @@ const STAGE_TEXT: Record<BuildStage, string> = {
   done: 'Done',
 };
 
-const fmt = (sec: number) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec) % 60).padStart(2, '0')}`;
+const initials = (name: string | null) => (name ? name.replace('@', '').slice(0, 2).toUpperCase() : '?');
 
+// ── small pieces ─────────────────────────────────────────────
+type TileState = 'joined' | 'recording' | 'uploaded';
+const STATE_COLOR: Record<TileState, string> = { joined: '#f5b301', recording: '#ff453a', uploaded: ACCENT };
+const STATE_TEXT: Record<TileState, string> = { joined: 'In room', recording: 'Recording', uploaded: 'Uploaded' };
+
+function PhoneTile(props: { label: string; sub: string; frame?: string; state: TileState; style?: any }) {
+  const { label, sub, frame, state } = props;
+  return (
+    <View style={[s.tile, props.style]}>
+      {frame ? (
+        <Image source={{ uri: `data:image/jpeg;base64,${frame}` }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      ) : (
+        <View style={s.tilePlaceholder}>
+          <Text style={s.tileInitials}>{initials(sub)}</Text>
+        </View>
+      )}
+      <View style={s.tileShade} />
+      <View style={s.tileBottom}>
+        <Ionicons name={state === 'uploaded' ? 'checkmark-circle' : 'mic'} size={13} color={STATE_COLOR[state]} />
+        <View style={{ marginLeft: 5, flex: 1 }}>
+          <Text style={s.tileLabel} numberOfLines={1}>{label}</Text>
+          <Text style={[s.tileState, { color: STATE_COLOR[state] }]} numberOfLines={1}>{STATE_TEXT[state]}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function FilmPreview({ uri, playing, onToggle }: { uri: string; playing: boolean; onToggle: () => void }) {
+  const player = useVideoPlayer(uri, (p: any) => { p.loop = true; });
+  useEffect(() => {
+    try { playing ? player.play() : player.pause(); } catch { /* player not ready yet */ }
+  }, [playing, player]);
+  return (
+    <TouchableOpacity activeOpacity={1} onPress={onToggle} style={StyleSheet.absoluteFill}>
+      <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="cover" nativeControls={false} />
+      {!playing && (
+        <View style={s.playOverlay}>
+          <View style={s.playCircle}><Ionicons name="play" size={30} color="#fff" style={{ marginLeft: 3 }} /></View>
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+}
+
+// ── the screen ───────────────────────────────────────────────
 export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) {
   const { user } = useAuthStore();
   const userId: string | undefined = (user as any)?.id;
@@ -63,39 +121,51 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
-  const [members, setMembers] = useState(1);
-  const [clipCount, setClipCount] = useState(0);
+  const [people, setPeople] = useState<CrowdPerson[]>([]);
+  const [frames, setFrames] = useState<Record<string, string>>({});
+  const [isRecording, setIsRecording] = useState(false);
   const [recSec, setRecSec] = useState(0);
   const [uploadPct, setUploadPct] = useState(0);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
-  const [myClipUploaded, setMyClipUploaded] = useState(false);
   const [buildText, setBuildText] = useState('');
   const [building, setBuilding] = useState(false);
+  const [useFront, setUseFront] = useState(false);
+  const [liveOn, setLiveOn] = useState(true);
+  const [liveWorks, setLiveWorks] = useState(true);
+  const [camReady, setCamReady] = useState(false);
+  const [result, setResult] = useState<FilmResult | null>(null);
+  const [seed, setSeed] = useState(1);
+  const [playing, setPlaying] = useState(false);
+  const [recordedAtDate, setRecordedAtDate] = useState<Date>(new Date());
 
   const isHost = !!room && !!userId && room.host_id === userId;
 
   // camera
   const { hasPermission: hasCam, requestPermission: reqCam } = useCameraPermission();
   const { hasPermission: hasMic, requestPermission: reqMic } = useMicrophonePermission();
-  const device = useCameraDevice('back');
+  const device = useCameraDevice(useFront ? 'front' : 'back');
   const format = useCameraFormat(device, [
     { videoResolution: { width: 1280, height: 720 } },
     { fps: 30 },
   ]);
-  const cameraRef = useRef<Camera>(null);
-  const [camReady, setCamReady] = useState(false);
+  const cameraRef = useRef<any>(null);
 
-  // refs so timers/callbacks always see fresh values
+  // refs so timers / callbacks always see fresh values
   const stepRef = useRef<Step>('home');
   const roomRef = useRef<CrowdRoom | null>(null);
   const recordingRef = useRef(false);
+  const camReadyRef = useRef(false);
+  const recSecRef = useRef(0);
   const recStartedAt = useRef<Date | null>(null);
   const pendingFile = useRef<{ uri: string; durationSec: number; recordedAt: Date } | null>(null);
-  const recSecRef = useRef(0);
+  const analysisRef = useRef<RoomAnalysis | null>(null);
+  const liveRef = useRef<LiveChannel | null>(null);
   useEffect(() => { stepRef.current = step; }, [step]);
   useEffect(() => { roomRef.current = room; }, [room]);
+  useEffect(() => { camReadyRef.current = camReady; }, [camReady]);
+  useEffect(() => { recSecRef.current = recSec; }, [recSec]);
 
-  // ask for permissions when the modal opens
+  // permissions
   useEffect(() => {
     if (!visible) return;
     (async () => {
@@ -104,12 +174,13 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     })();
   }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // full reset when the modal is closed
+  // full reset when the modal closes
   const resetAll = useCallback(() => {
     setStep('home'); setRoom(null); setCode(''); setTitle(''); setBusy(false);
-    setMembers(1); setClipCount(0); setRecSec(0); setUploadPct(0); setUploadErr(null);
-    setMyClipUploaded(false); setBuildText(''); setBuilding(false); setCamReady(false);
-    recordingRef.current = false; pendingFile.current = null;
+    setPeople([]); setFrames({}); setIsRecording(false); setRecSec(0);
+    setUploadPct(0); setUploadErr(null); setBuildText(''); setBuilding(false);
+    setCamReady(false); setResult(null); setSeed(1); setPlaying(false);
+    recordingRef.current = false; pendingFile.current = null; analysisRef.current = null;
   }, []);
   useEffect(() => { if (!visible) resetAll(); }, [visible, resetAll]);
 
@@ -126,8 +197,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
         { roomId: r.id, userId, localUri: f.uri, durationSec: f.durationSec, recordedAt: f.recordedAt },
         setUploadPct,
       );
-      setMyClipUploaded(true);
-      setStep('film');
+      setStep('wrap');
     } catch (e: any) {
       setUploadErr(e?.message || 'Upload failed');
     }
@@ -137,12 +207,15 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     if (recordingRef.current || !cameraRef.current) return;
     recordingRef.current = true;
     recStartedAt.current = new Date();
+    setRecordedAtDate(new Date());
     setRecSec(0);
-    setStep('recording');
+    setIsRecording(true);
     cameraRef.current.startRecording({
-      onRecordingFinished: (video: VideoFile) => {
+      onRecordingFinished: (video: any) => {
         recordingRef.current = false;
-        const uri = Platform.OS === 'android' && !video.path.startsWith('file://') ? `file://${video.path}` : video.path;
+        setIsRecording(false);
+        const path: string = video.path;
+        const uri = Platform.OS === 'android' && !path.startsWith('file://') ? `file://${path}` : path;
         pendingFile.current = {
           uri,
           durationSec: Math.round((video.duration ?? recSecRef.current) * 100) / 100,
@@ -152,7 +225,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
       },
       onRecordingError: (err: any) => {
         recordingRef.current = false;
-        setStep('lobby');
+        setIsRecording(false);
         Alert.alert('Recording problem', String(err?.message || err));
       },
     });
@@ -163,23 +236,21 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     try { await cameraRef.current?.stopRecording(); } catch { /* finished callback still fires */ }
   }, []);
 
-  // recording timer + auto stop
-  useEffect(() => { recSecRef.current = recSec; }, [recSec]);
+  // timer + auto stop
   useEffect(() => {
-    if (step !== 'recording') return;
+    if (!isRecording) return;
     const t = setInterval(() => setRecSec(x => x + 1), 1000);
     return () => clearInterval(t);
-  }, [step]);
+  }, [isRecording]);
   useEffect(() => {
-    if (step === 'recording' && recSec >= MAX_TAKE_SEC) stopRecording();
-  }, [recSec, step, stopRecording]);
+    if (isRecording && recSec >= MAX_TAKE_SEC) stopRecording();
+  }, [recSec, isRecording, stopRecording]);
 
   // ── reacting to the room (realtime + a slow poll as a safety net) ──
   const applyRoom = useCallback((r: CrowdRoom) => {
     setRoom(r);
-    const s = stepRef.current;
-    if (r.status === 'recording' && s === 'lobby') startRecording();
-    if (r.status === 'closed' && s === 'recording') stopRecording();
+    if (r.status === 'recording' && stepRef.current === 'camera' && !recordingRef.current && camReadyRef.current) startRecording();
+    if (r.status === 'closed' && recordingRef.current) stopRecording();
   }, [startRecording, stopRecording]);
 
   useEffect(() => {
@@ -189,14 +260,54 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
       try {
         const r = await getRoom(room.id);
         if (r) applyRoom(r);
-        setMembers(await countMembers(room.id));
-        if (stepRef.current === 'film' || stepRef.current === 'uploading') {
-          setClipCount((await listClips(room.id)).length);
-        }
+        setPeople(await listPeople(room.id));
       } catch { /* offline for a moment: try again next tick */ }
     }, 2500);
+    listPeople(room.id).then(setPeople).catch(() => {});
     return () => { unwatch(); clearInterval(poll); };
   }, [room?.id, applyRoom]);
+
+  // ── near-live preview pictures between phones ──────────────
+  useEffect(() => {
+    if (!room?.id || !userId) return;
+    const ch = openLiveChannel(room.id, (from, b64) => {
+      if (from !== userId) setFrames(prev => ({ ...prev, [from]: b64 }));
+    });
+    liveRef.current = ch;
+    return () => { ch.close(); liveRef.current = null; };
+  }, [room?.id, userId]);
+
+  const othersCount = Math.max(0, people.length - 1);
+  useEffect(() => {
+    if (!(isRecording && liveOn && liveWorks && othersCount > 0 && userId)) return;
+    let stopped = false;
+    let busyNow = false;
+    let fails = 0;
+    const tick = async () => {
+      if (stopped || busyNow) return;
+      busyNow = true;
+      try {
+        const cam = cameraRef.current;
+        if (!cam || typeof cam.takeSnapshot !== 'function') throw new Error('snapshots not supported');
+        const snap = await cam.takeSnapshot({ quality: 30, skipMetadata: true });
+        const src = String(snap.path).startsWith('file://') ? snap.path : `file://${snap.path}`;
+        const small = await ImageManipulator.manipulateAsync(
+          src, [{ resize: { width: LIVE_WIDTH } }],
+          { compress: 0.3, format: ImageManipulator.SaveFormat.JPEG, base64: true },
+        );
+        if (small.base64) liveRef.current?.send(userId, small.base64);
+        FileSystem.deleteAsync(src, { idempotent: true }).catch(() => {});
+        FileSystem.deleteAsync(small.uri, { idempotent: true }).catch(() => {});
+        fails = 0;
+      } catch {
+        fails += 1;
+        if (fails >= 3) { stopped = true; setLiveWorks(false); } // this phone can't do it: stop trying, recording is unaffected
+      }
+      busyNow = false;
+    };
+    const t = setInterval(tick, LIVE_EVERY_MS);
+    return () => { stopped = true; clearInterval(t); };
+  }, [isRecording, liveOn, liveWorks, othersCount, userId]);
 
   // ── actions ────────────────────────────────────────────────
   const onCreate = async () => {
@@ -204,7 +315,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     setBusy(true);
     try {
       const r = await createRoom(title || 'Crowd Cam');
-      setRoom(r); setStep('lobby');
+      setRoom(r); setStep('camera');
     } catch (e: any) { Alert.alert('Could not create room', e?.message || ''); }
     setBusy(false);
   };
@@ -215,8 +326,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     setBusy(true);
     try {
       const r = await joinRoom(code);
-      setRoom(r); setStep('lobby');
-      if (r.status === 'recording') setTimeout(() => applyRoom(r), 600); // joined late: start straight away
+      setRoom(r); setStep('camera');
     } catch (e: any) { Alert.alert('Could not join', e?.message || ''); }
     setBusy(false);
   };
@@ -235,71 +345,109 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     stopRecording();
   };
 
-  const onShare = () => {
+  const shareCode = () => {
     if (!room) return;
     Share.share({ message: `Join my LumVibe Crowd Cam "${room.title}". Room code: ${room.join_code}` });
   };
 
-  const onMakeFilm = async () => {
+  const showFailure = (e: any) => {
+    const details: string | undefined = e?.details;
+    Alert.alert(
+      'Could not make the film',
+      String(e?.message || 'Unknown error'),
+      details
+        ? [{ text: 'Share details', onPress: () => Share.share({ message: details }) }, { text: 'OK' }]
+        : [{ text: 'OK' }],
+    );
+  };
+
+  const makeFilm = async (nextSeed: number, reuse: boolean) => {
     if (!room) return;
     setBuilding(true);
     try {
-      const res = await buildCrowdFilm(room.id, {
-        maxFilmSec: MAX_FILM_SEC,
-        onStage: (s, d) => setBuildText(STAGE_TEXT[s] + (d ? ` ${d}` : '')),
-      });
-      if (res.failedClipIds.length) {
-        Alert.alert(
-          'Some clips were left out',
-          `${res.failedClipIds.length} clip(s) could not be lined up with the others (the sound was too different, or they don't overlap in time).`,
-        );
-      }
-      onFilmReady({ localUri: res.localUri, contributors: res.contributors, durationSec: res.durationSec });
+      const onStage = (st: BuildStage, d?: string) => setBuildText(STAGE_TEXT[st] + (d ? ` ${d}` : ''));
+      if (!reuse || !analysisRef.current) analysisRef.current = await analyzeRoom(room.id, onStage);
+      const film = await renderFilm(analysisRef.current, { seed: nextSeed, maxFilmSec: MAX_FILM_SEC, onStage });
+      setSeed(nextSeed);
+      setResult(film);
+      setPlaying(false);
+      setStep('result');
     } catch (e: any) {
-      Alert.alert('Could not make the film', e?.message || 'Unknown error');
+      if (analysisRef.current && !e?.details) e.details = debugSummary(analysisRef.current);
+      showFailure(e);
     }
     setBuilding(false);
     setBuildText('');
   };
 
+  const continueToPost = () => {
+    if (!result) return;
+    onFilmReady({ localUri: result.localUri, contributors: result.contributors, durationSec: result.durationSec });
+  };
+
   const leave = () => {
-    if (recordingRef.current) {
-      Alert.alert('You are recording', 'Stop recording first.');
-      return;
-    }
+    if (recordingRef.current) return Alert.alert('You are recording', 'Stop recording first.');
     onClose();
   };
 
-  // ── UI ─────────────────────────────────────────────────────
-  const showCamera = visible && (step === 'lobby' || step === 'recording') && hasCam && hasMic && !!device;
+  // ── derived UI data ────────────────────────────────────────
+  const others = people.filter(p => p.user_id !== userId);
+  const roomRecording = room?.status === 'recording';
+  const tileStateOf = (p: CrowdPerson): TileState => (p.has_clip ? 'uploaded' : roomRecording ? 'recording' : 'joined');
+  const labelOf = (p: CrowdPerson) => `Camera ${people.indexOf(p) + 1}${p.is_host ? ' · Host' : ''}`;
+  const uploadedCount = people.filter(p => p.has_clip).length;
+  const showCamera = visible && step === 'camera' && hasCam && hasMic && !!device;
+  const permsOk = hasCam && hasMic;
 
+  const CodeStrip = (
+    <View style={s.codeStrip}>
+      <View style={s.codeIcon}><Ionicons name="link" size={18} color={ACCENT} /></View>
+      <View style={{ flex: 1 }}>
+        <Text style={s.codeCap}>Share this code</Text>
+        <Text style={s.codeSmall}>Others join by entering it in their Crowd Cam</Text>
+      </View>
+      <Text style={s.codeBig}>{room?.join_code}</Text>
+      <TouchableOpacity onPress={shareCode} style={{ padding: 8 }}>
+        <Ionicons name="share-outline" size={20} color={ACCENT} />
+      </TouchableOpacity>
+    </View>
+  );
+
+  // ── UI ─────────────────────────────────────────────────────
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={leave} statusBarTranslucent>
       <StatusBar barStyle="light-content" />
       <View style={s.root}>
-        {showCamera && (
-          <Camera
-            ref={cameraRef}
-            style={StyleSheet.absoluteFill}
-            device={device!}
-            format={format}
-            fps={30}
-            isActive={true}
-            video={true}
-            audio={true}
-            onInitialized={() => setCamReady(true)}
-          />
+        {/* header (all steps except result, which has its own) */}
+        {step !== 'result' && (
+          <View style={s.header}>
+            <TouchableOpacity style={s.roundBtn} onPress={leave}>
+              <Ionicons name="close" size={22} color="#fff" />
+            </TouchableOpacity>
+            <View style={{ alignItems: 'center' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="videocam" size={18} color={ACCENT} />
+                <Text style={s.headerTitle}>  Crowd Cam</Text>
+              </View>
+              {step === 'camera' && room && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
+                  <View style={[s.dot, { backgroundColor: isRecording ? '#ff453a' : ACCENT }]} />
+                  <Text style={s.headerSub}>{isRecording ? `Recording LIVE  ·  ${mmss(recSec)}` : 'Ready'}</Text>
+                </View>
+              )}
+            </View>
+            <View style={s.roundBtn}>
+              {room ? (
+                <>
+                  <Ionicons name="people" size={20} color="#fff" />
+                  <View style={s.badge}><Text style={s.badgeTxt}>{people.length || 1}</Text></View>
+                </>
+              ) : null}
+            </View>
+          </View>
         )}
 
-        <View style={s.topRow}>
-          <TouchableOpacity style={s.iconBtn} onPress={leave}>
-            <Ionicons name="close" size={24} color="#fff" />
-          </TouchableOpacity>
-          <Text style={s.topTitle}>Crowd Cam</Text>
-          <View style={{ width: 40 }} />
-        </View>
-
-        {(!hasCam || !hasMic) && (
+        {!permsOk && (
           <View style={s.center}>
             <Text style={s.h1}>Camera and microphone needed</Text>
             <TouchableOpacity style={s.primary} onPress={async () => { await reqCam(); await reqMic(); }}>
@@ -308,7 +456,8 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
           </View>
         )}
 
-        {hasCam && hasMic && step === 'home' && (
+        {/* HOME */}
+        {permsOk && step === 'home' && (
           <View style={s.panel}>
             <Text style={s.h1}>Film an event with friends' phones</Text>
             <Text style={s.sub}>Everyone films. LumVibe lines the clips up and cuts one film from all the angles.</Text>
@@ -323,7 +472,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
             <View style={s.divider} />
 
             <Text style={s.label}>Join a room</Text>
-            <TextInput style={[s.input, s.codeInput]} value={code} onChangeText={t => setCode(t.toUpperCase())}
+            <TextInput style={[s.input, s.codeInput]} value={code} onChangeText={(t: string) => setCode(t.toUpperCase())}
               placeholder="ROOM CODE" placeholderTextColor="#666" autoCapitalize="characters" maxLength={8} />
             <TouchableOpacity style={[s.secondary, busy && s.dim]} disabled={busy} onPress={onJoin}>
               <Text style={s.secondaryTxt}>Join</Text>
@@ -331,40 +480,95 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
           </View>
         )}
 
-        {step === 'lobby' && room && (
-          <View style={s.bottomCard}>
-            <Text style={s.label}>{room.title}</Text>
-            <Text style={s.code}>{room.join_code}</Text>
-            <Text style={s.sub}>{members} phone{members === 1 ? '' : 's'} in the room</Text>
-            <TouchableOpacity style={s.secondary} onPress={onShare}>
-              <Ionicons name="share-outline" size={16} color={ACCENT} />
-              <Text style={s.secondaryTxt}>  Share code</Text>
-            </TouchableOpacity>
-            {isHost ? (
-              <TouchableOpacity style={[s.primary, (!camReady || busy) && s.dim]} disabled={!camReady || busy} onPress={onHostStart}>
-                <Text style={s.primaryTxt}>{camReady ? 'Start recording for everyone' : 'Getting camera ready…'}</Text>
-              </TouchableOpacity>
-            ) : (
-              <Text style={s.wait}>Waiting for the host to start…{'\n'}Point your phone at the action.</Text>
+        {/* CAMERA + RECORDING */}
+        {permsOk && step === 'camera' && room && (
+          <View style={s.cameraBody}>
+            <View style={s.gridRow}>
+              <View style={s.mainTile}>
+                {showCamera && (
+                  <Camera
+                    ref={cameraRef}
+                    style={StyleSheet.absoluteFill}
+                    device={device!}
+                    format={format}
+                    fps={30}
+                    isActive={true}
+                    video={true}
+                    audio={true}
+                    onInitialized={() => setCamReady(true)}
+                  />
+                )}
+                <View style={s.hostPill}>
+                  <Ionicons name={isHost ? 'ribbon' : 'person'} size={13} color={ACCENT} />
+                  <Text style={s.hostPillTxt}> {isHost ? 'Host (You)' : 'You'}</Text>
+                </View>
+                <View style={s.mainBottom}>
+                  <Ionicons name="mic" size={14} color="#fff" />
+                  <Text style={s.mainBottomTxt}>  {useFront ? 'Front camera' : 'Back camera'}</Text>
+                </View>
+              </View>
+
+              <View style={s.sideCol}>
+                {others.length === 0 ? (
+                  <View style={[s.tile, s.emptySide]}>
+                    <Ionicons name="people-outline" size={22} color="#4d6b60" />
+                    <Text style={s.emptySideTxt}>Other phones appear here when they join</Text>
+                  </View>
+                ) : (
+                  <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ flexGrow: 1 }}>
+                    {others.slice(0, 8).map(p => (
+                      <PhoneTile
+                        key={p.user_id}
+                        label={labelOf(p)}
+                        sub={p.username ?? ''}
+                        frame={liveOn ? frames[p.user_id] : undefined}
+                        state={tileStateOf(p)}
+                        style={{ height: 118, marginBottom: 8 }}
+                      />
+                    ))}
+                  </ScrollView>
+                )}
+              </View>
+            </View>
+
+            {!liveWorks && isRecording && (
+              <Text style={s.liveNote}>Live thumbnails aren't available on this phone. Recording is not affected.</Text>
             )}
+
+            <View style={s.controls}>
+              <TouchableOpacity style={[s.sideBtn, isRecording && s.dim]} disabled={isRecording} onPress={() => { setCamReady(false); setUseFront(v => !v); }}>
+                <Ionicons name="camera-reverse-outline" size={20} color="#fff" />
+                <Text style={s.sideBtnTxt}>Flip</Text>
+              </TouchableOpacity>
+
+              {isRecording ? (
+                <TouchableOpacity style={s.recBtn} onPress={isHost ? onHostStop : stopRecording}>
+                  <View style={s.stopSquare} />
+                </TouchableOpacity>
+              ) : isHost ? (
+                <TouchableOpacity style={[s.recBtn, (!camReady || busy) && s.dim]} disabled={!camReady || busy} onPress={onHostStart}>
+                  <View style={s.recDotBig} />
+                </TouchableOpacity>
+              ) : (
+                <View style={[s.recBtn, s.dim]}><Ionicons name="hourglass-outline" size={26} color="#fff" /></View>
+              )}
+
+              <TouchableOpacity style={s.sideBtn} onPress={() => setLiveOn(v => !v)}>
+                <Ionicons name={liveOn ? 'eye-outline' : 'eye-off-outline'} size={20} color={liveOn ? ACCENT : '#fff'} />
+                <Text style={[s.sideBtnTxt, liveOn && { color: ACCENT }]}>Live view</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={s.hint}>
+              {isRecording
+                ? (isHost ? 'Tap the square to stop everyone' : 'The host controls the recording. Tap to stop your phone only.')
+                : (isHost ? (camReady ? 'Tap the red button to start recording on every phone' : 'Getting camera ready…') : 'Waiting for the host to start…')}
+            </Text>
+
+            {CodeStrip}
           </View>
         )}
 
-        {step === 'recording' && (
-          <>
-            <View style={s.recBadge}>
-              <View style={s.recDot} />
-              <Text style={s.recTxt}>{fmt(recSec)}</Text>
-            </View>
-            <View style={s.recBottom}>
-              <TouchableOpacity style={s.stopBtn} onPress={isHost ? onHostStop : stopRecording}>
-                <View style={s.stopSquare} />
-              </TouchableOpacity>
-              <Text style={s.hint}>{isHost ? 'Tap to stop everyone' : 'Tap to stop your phone'}</Text>
-            </View>
-          </>
-        )}
-
+        {/* UPLOADING */}
         {step === 'uploading' && (
           <View style={s.center}>
             {uploadErr ? (
@@ -383,28 +587,125 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
           </View>
         )}
 
-        {step === 'film' && room && (
-          <View style={s.center}>
-            <Ionicons name="checkmark-circle" size={54} color={ACCENT} />
-            <Text style={s.h1}>{myClipUploaded ? 'Your clip is uploaded' : 'Clip uploaded'}</Text>
-            <Text style={s.sub}>{clipCount} of {members} clip{members === 1 ? '' : 's'} in the room</Text>
+        {/* WRAP: wait for everyone's clip, host builds the film */}
+        {step === 'wrap' && room && (
+          <View style={s.wrapBody}>
+            <View style={{ alignItems: 'center', marginTop: 8 }}>
+              <Ionicons name="checkmark-circle" size={48} color={ACCENT} />
+              <Text style={s.h1}>Your clip is uploaded</Text>
+              <Text style={s.sub}>{uploadedCount} of {people.length} phone{people.length === 1 ? '' : 's'} have uploaded</Text>
+            </View>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={s.wrapGrid}>
+              {people.map(p => (
+                <PhoneTile
+                  key={p.user_id}
+                  label={p.user_id === userId ? (p.is_host ? 'You · Host' : 'You') : labelOf(p)}
+                  sub={p.username ?? ''}
+                  state={p.has_clip ? 'uploaded' : 'recording'}
+                  style={{ width: '31%', height: 120, marginBottom: 8 }}
+                />
+              ))}
+            </ScrollView>
             {isHost ? (
               building ? (
-                <>
-                  <ActivityIndicator color={ACCENT} style={{ marginTop: 18 }} />
+                <View style={{ alignItems: 'center', paddingBottom: 30 }}>
+                  <ActivityIndicator color={ACCENT} />
                   <Text style={[s.sub, { marginTop: 10 }]}>{buildText}</Text>
-                </>
+                </View>
               ) : (
-                <>
-                  <TouchableOpacity style={[s.primary, clipCount < 2 && s.dim]} disabled={clipCount < 2} onPress={onMakeFilm}>
+                <View style={{ paddingHorizontal: 20, paddingBottom: 28 }}>
+                  <TouchableOpacity style={[s.primary, uploadedCount < 2 && s.dim]} disabled={uploadedCount < 2} onPress={() => makeFilm(1, false)}>
                     <Text style={s.primaryTxt}>Make the film</Text>
                   </TouchableOpacity>
-                  <Text style={s.hint}>{clipCount < 2 ? 'Waiting for at least 2 clips…' : 'Wait until everyone has uploaded, then tap.'}</Text>
-                </>
+                  <Text style={s.hint}>{uploadedCount < 2 ? 'Waiting for at least 2 clips…' : 'Wait until everyone has uploaded, then tap.'}</Text>
+                </View>
               )
             ) : (
-              <Text style={s.wait}>The host will build the film and post it.{'\n'}You'll be credited.</Text>
+              <Text style={[s.hint, { paddingBottom: 34 }]}>The host will build the film and post it. You'll be credited.</Text>
             )}
+          </View>
+        )}
+
+        {/* RESULT */}
+        {step === 'result' && result && room && (
+          <View style={{ flex: 1 }}>
+            <View style={s.header}>
+              <TouchableOpacity style={s.roundBtn} onPress={() => { setPlaying(false); setStep('wrap'); }}>
+                <Ionicons name="chevron-back" size={22} color="#fff" />
+              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="videocam" size={18} color={ACCENT} />
+                <Text style={s.headerTitle}>  Crowd Cam</Text>
+              </View>
+              <View style={{ width: 40 }} />
+            </View>
+
+            <ScrollView contentContainerStyle={{ paddingHorizontal: 14, paddingBottom: 30 }}>
+              <View style={s.previewRow}>
+                <View style={s.previewMain}>
+                  <FilmPreview key={result.localUri} uri={result.localUri} playing={playing} onToggle={() => setPlaying(p => !p)} />
+                  <View style={s.pillLeft}>
+                    <Ionicons name="videocam" size={12} color={ACCENT} />
+                    <Text style={s.pillTxt}> {result.angles.length} Cameras</Text>
+                  </View>
+                  <View style={s.pillRight}><Text style={s.pillTxt}>{mmss(result.durationSec)}</Text></View>
+                </View>
+                <View style={s.thumbCol}>
+                  {result.angles.slice(0, 4).map(a => (
+                    <View key={a.clipId} style={[s.thumb, a.usedInFilm && { borderColor: ACCENT }]}>
+                      <Image source={{ uri: a.thumbUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                      {a.method === 'start-time' && <View style={s.thumbWarn}><Ionicons name="time-outline" size={11} color="#000" /></View>}
+                    </View>
+                  ))}
+                </View>
+              </View>
+
+              <View style={s.doneCard}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <View style={s.checkRing}><Ionicons name="checkmark" size={26} color={ACCENT} /></View>
+                  <View style={{ marginLeft: 14, flex: 1 }}>
+                    <Text style={s.doneTitle}>Your film is ready!</Text>
+                    <Text style={s.doneSub}>Cut from {result.angles.length} camera{result.angles.length === 1 ? '' : 's'}, {result.shots} shots.</Text>
+                  </View>
+                </View>
+                <View style={s.statsRow}>
+                  <View style={s.stat}><Text style={s.statBig}>{result.angles.length}</Text><Text style={s.statCap}>Cameras</Text></View>
+                  <View style={s.stat}><Text style={s.statBig}>{mmss(result.durationSec)}</Text><Text style={s.statCap}>Duration</Text></View>
+                  <View style={s.stat}>
+                    <Text style={s.statBig}>{recordedAtDate.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</Text>
+                    <Text style={s.statCap}>{recordedAtDate.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</Text>
+                  </View>
+                </View>
+              </View>
+
+              {result.angles.some(a => a.method === 'start-time') && (
+                <Text style={s.warn}>
+                  Some cameras were lined up by start time because their sound didn't match. They may be slightly off (marked with a clock).
+                </Text>
+              )}
+              {result.angles.some(a => a.silent) && (
+                <Text style={s.warn}>One camera recorded no sound. Check that its microphone is allowed.</Text>
+              )}
+
+              <View style={s.codeStripFlat}>
+                <Ionicons name="link" size={18} color={ACCENT} />
+                <Text style={s.codeCap2}>Share code again</Text>
+                <Text style={s.codeMid}>{room.join_code}</Text>
+              </View>
+
+              <TouchableOpacity style={s.primary} onPress={continueToPost}>
+                <Ionicons name="arrow-forward-circle" size={20} color="#000" />
+                <Text style={[s.primaryTxt, { marginLeft: 8 }]}>Continue to post</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.secondary} onPress={() => setPlaying(p => !p)}>
+                <Ionicons name={playing ? 'pause' : 'play'} size={16} color={ACCENT} />
+                <Text style={s.secondaryTxt}>  {playing ? 'Pause film' : 'Watch full film'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.ghost, building && s.dim]} disabled={building} onPress={() => makeFilm(seed + 1, true)}>
+                {building ? <ActivityIndicator color={ACCENT} /> : <Text style={s.ghostTxt}>Try a different cut</Text>}
+              </TouchableOpacity>
+              {building && <Text style={s.hint}>{buildText}</Text>}
+            </ScrollView>
           </View>
         )}
       </View>
@@ -413,33 +714,91 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0a0a0a' },
-  topRow: { position: 'absolute', top: 44, left: 0, right: 0, zIndex: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14 },
-  topTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  iconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
+  root: { flex: 1, backgroundColor: BG },
+  header: { paddingTop: 44, paddingHorizontal: 14, paddingBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  headerTitle: { color: '#fff', fontSize: 19, fontWeight: '800' },
+  headerSub: { color: '#b8ccc4', fontSize: 12, marginLeft: 6, fontWeight: '600' },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  roundBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  badge: { position: 'absolute', top: -2, right: -2, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: ACCENT, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  badgeTxt: { color: '#000', fontSize: 11, fontWeight: '800' },
+
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 },
-  panel: { flex: 1, paddingHorizontal: 22, paddingTop: 110 },
+  panel: { flex: 1, paddingHorizontal: 22, paddingTop: 20 },
   h1: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', marginBottom: 8 },
-  sub: { color: '#9a9a9a', fontSize: 13, textAlign: 'center', marginBottom: 14, lineHeight: 19 },
-  label: { color: '#cfcfcf', fontSize: 13, fontWeight: '700', marginTop: 10, marginBottom: 8 },
-  input: { backgroundColor: '#151515', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 12, color: '#fff', paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, marginBottom: 12 },
+  sub: { color: '#9bb0a8', fontSize: 13, textAlign: 'center', marginBottom: 14, lineHeight: 19 },
+  label: { color: '#d3e2dc', fontSize: 13, fontWeight: '700', marginTop: 10, marginBottom: 8 },
+  input: { backgroundColor: CARD, borderWidth: 1, borderColor: EDGE, borderRadius: 12, color: '#fff', paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, marginBottom: 12 },
   codeInput: { letterSpacing: 4, textAlign: 'center', fontSize: 20, fontWeight: '800' },
-  primary: { backgroundColor: ACCENT, borderRadius: 14, paddingVertical: 14, alignItems: 'center', justifyContent: 'center', marginTop: 8, alignSelf: 'stretch' },
+  primary: { flexDirection: 'row', backgroundColor: ACCENT, borderRadius: 14, paddingVertical: 15, alignItems: 'center', justifyContent: 'center', marginTop: 10, alignSelf: 'stretch' },
   primaryTxt: { color: '#000', fontSize: 15, fontWeight: '800' },
-  secondary: { flexDirection: 'row', borderWidth: 1, borderColor: ACCENT, borderRadius: 14, paddingVertical: 12, alignItems: 'center', justifyContent: 'center', marginTop: 8, alignSelf: 'stretch' },
+  secondary: { flexDirection: 'row', borderWidth: 1, borderColor: ACCENT, borderRadius: 14, paddingVertical: 13, alignItems: 'center', justifyContent: 'center', marginTop: 10, alignSelf: 'stretch' },
   secondaryTxt: { color: ACCENT, fontSize: 14, fontWeight: '700' },
+  ghost: { paddingVertical: 14, alignItems: 'center', marginTop: 4 },
+  ghostTxt: { color: '#9bb0a8', fontSize: 14, fontWeight: '700' },
   dim: { opacity: 0.45 },
-  divider: { height: 1, backgroundColor: '#222', marginVertical: 18 },
-  bottomCard: { position: 'absolute', left: 14, right: 14, bottom: 26, backgroundColor: 'rgba(10,10,10,0.88)', borderRadius: 20, padding: 18, borderWidth: 1, borderColor: '#222' },
-  code: { color: ACCENT, fontSize: 38, fontWeight: '900', letterSpacing: 8, textAlign: 'center', marginVertical: 6 },
-  wait: { color: '#bdbdbd', textAlign: 'center', marginTop: 14, lineHeight: 20 },
-  hint: { color: '#8a8a8a', fontSize: 12, textAlign: 'center', marginTop: 10 },
-  recBadge: { position: 'absolute', top: 100, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 6 },
-  recDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#ff3b30', marginRight: 8 },
-  recTxt: { color: '#fff', fontWeight: '800', fontSize: 15 },
-  recBottom: { position: 'absolute', bottom: 40, left: 0, right: 0, alignItems: 'center' },
-  stopBtn: { width: 74, height: 74, borderRadius: 37, borderWidth: 4, borderColor: '#fff', alignItems: 'center', justifyContent: 'center' },
-  stopSquare: { width: 28, height: 28, borderRadius: 6, backgroundColor: '#ff3b30' },
-  barBg: { alignSelf: 'stretch', height: 8, borderRadius: 4, backgroundColor: '#222', overflow: 'hidden', marginVertical: 14 },
+  divider: { height: 1, backgroundColor: '#1b2a25', marginVertical: 18 },
+
+  cameraBody: { flex: 1, paddingHorizontal: 12, paddingBottom: 14 },
+  gridRow: { flex: 1, flexDirection: 'row' },
+  mainTile: { flex: 1, borderRadius: 22, overflow: 'hidden', backgroundColor: '#000', borderWidth: 1, borderColor: EDGE },
+  sideCol: { width: '31%', marginLeft: 8 },
+  hostPill: { position: 'absolute', top: 10, left: 10, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5 },
+  hostPillTxt: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  mainBottom: { position: 'absolute', bottom: 10, left: 10, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
+  mainBottomTxt: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  tile: { borderRadius: 14, overflow: 'hidden', backgroundColor: CARD, borderWidth: 1, borderColor: EDGE },
+  tilePlaceholder: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0f1e19' },
+  tileInitials: { color: '#3f6b5a', fontSize: 26, fontWeight: '900' },
+  tileShade: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 44, backgroundColor: 'rgba(0,0,0,0.55)' },
+  tileBottom: { position: 'absolute', left: 6, right: 6, bottom: 5, flexDirection: 'row', alignItems: 'center' },
+  tileLabel: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  tileState: { fontSize: 10, fontWeight: '700' },
+  emptySide: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 8 },
+  emptySideTxt: { color: '#557267', fontSize: 11, textAlign: 'center', marginTop: 6 },
+  liveNote: { color: '#f5b301', fontSize: 11, textAlign: 'center', marginTop: 6 },
+
+  controls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: CARD, borderRadius: 22, paddingVertical: 12, paddingHorizontal: 16, marginTop: 10, borderWidth: 1, borderColor: '#14231d' },
+  sideBtn: { width: 92, height: 54, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', justifyContent: 'center' },
+  sideBtnTxt: { color: '#fff', fontSize: 11, fontWeight: '700', marginTop: 3 },
+  recBtn: { width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: '#ff453a', alignItems: 'center', justifyContent: 'center' },
+  recDotBig: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#ff453a' },
+  stopSquare: { width: 28, height: 28, borderRadius: 6, backgroundColor: '#ff453a' },
+  hint: { color: '#7f958c', fontSize: 12, textAlign: 'center', marginTop: 8 },
+
+  codeStrip: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: EDGE, backgroundColor: CARD, borderRadius: 18, paddingVertical: 10, paddingHorizontal: 12, marginTop: 10 },
+  codeIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: 'rgba(0,255,136,0.12)', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  codeCap: { color: ACCENT, fontSize: 13, fontWeight: '800' },
+  codeSmall: { color: '#7f958c', fontSize: 10, marginTop: 2 },
+  codeBig: { color: ACCENT, fontSize: 24, fontWeight: '900', letterSpacing: 3, marginLeft: 6 },
+
+  wrapBody: { flex: 1 },
+  wrapGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', paddingHorizontal: 18, paddingTop: 14 },
+
+  previewRow: { flexDirection: 'row', height: 300 },
+  previewMain: { flex: 1, borderRadius: 20, overflow: 'hidden', backgroundColor: '#000', borderWidth: 1, borderColor: EDGE },
+  thumbCol: { width: '24%', marginLeft: 8, justifyContent: 'space-between' },
+  thumb: { height: 70, borderRadius: 12, overflow: 'hidden', backgroundColor: CARD, borderWidth: 1, borderColor: '#1e3029' },
+  thumbWarn: { position: 'absolute', top: 4, right: 4, backgroundColor: '#f5b301', borderRadius: 8, padding: 2 },
+  pillLeft: { position: 'absolute', top: 10, left: 10, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5 },
+  pillRight: { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5 },
+  pillTxt: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  playOverlay: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.25)' },
+  playCircle: { width: 64, height: 64, borderRadius: 32, borderWidth: 3, borderColor: '#fff', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.35)' },
+
+  doneCard: { marginTop: 14, backgroundColor: CARD, borderRadius: 20, borderWidth: 1, borderColor: EDGE, padding: 16 },
+  checkRing: { width: 52, height: 52, borderRadius: 26, borderWidth: 3, borderColor: ACCENT, alignItems: 'center', justifyContent: 'center' },
+  doneTitle: { color: '#fff', fontSize: 20, fontWeight: '800' },
+  doneSub: { color: '#9bb0a8', fontSize: 13, marginTop: 2 },
+  statsRow: { flexDirection: 'row', marginTop: 14, borderWidth: 1, borderColor: '#14231d', borderRadius: 14, paddingVertical: 10 },
+  stat: { flex: 1, alignItems: 'center' },
+  statBig: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  statCap: { color: '#7f958c', fontSize: 11, marginTop: 2 },
+  warn: { color: '#f5b301', fontSize: 12, marginTop: 10, lineHeight: 17 },
+  codeStripFlat: { flexDirection: 'row', alignItems: 'center', backgroundColor: CARD, borderRadius: 16, borderWidth: 1, borderColor: EDGE, padding: 14, marginTop: 12 },
+  codeCap2: { color: ACCENT, fontWeight: '800', fontSize: 13, marginLeft: 10, flex: 1 },
+  codeMid: { color: ACCENT, fontSize: 22, fontWeight: '900', letterSpacing: 3 },
+
+  barBg: { alignSelf: 'stretch', height: 8, borderRadius: 4, backgroundColor: '#14231d', overflow: 'hidden', marginVertical: 14 },
   barFill: { height: 8, backgroundColor: ACCENT },
 });

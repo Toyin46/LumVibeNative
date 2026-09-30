@@ -1126,7 +1126,7 @@ const VideoPost = memo(function VideoPost({
                 <Feather name="cpu" size={20} color="#fff" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={cowatchStyles.optionTitle}>AI Match Me</Text>
+                <Text style={cowatchStyles.optionTitle}> Match Me</Text>
                 <Text style={cowatchStyles.optionSubtitle}>Let AI find someone with similar vibes to watch with.</Text>
               </View>
               <Feather name="chevron-right" size={20} color="#a78bfa" />

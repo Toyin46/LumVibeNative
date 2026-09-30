@@ -14,9 +14,20 @@ export const FINE_HZ = 100;
 const COARSE_FACTOR = 4;
 const COARSE_HZ = FINE_HZ / COARSE_FACTOR;
 
-// Starting thresholds. TUNE THESE with real recordings from real phones.
+// Thresholds. Calibrated on simulated audio only -- TUNE with real recordings.
+// "strict": search the whole timeline. "hinted": we already know roughly where the
+// answer must be (the phones pressed record within seconds of each other), so a
+// much smaller search window is used and a weaker match is trustworthy.
 export const MIN_SCORE = 0.7;
 export const MIN_CONFIDENCE = 7;
+// near window (+-3 s around the start-time guess): a wrong match can never be worse
+// than 3 s off, so a weaker match is acceptable. far window (+-10 s): stricter.
+export const NEAR_RADIUS_SEC = 3;
+export const NEAR_MIN_SCORE = 0.45;
+export const NEAR_MIN_CONFIDENCE = 3;
+export const FAR_RADIUS_SEC = 10;
+export const FAR_MIN_SCORE = 0.65;
+export const FAR_MIN_CONFIDENCE = 5;
 
 export interface WavData { samples: Float32Array; sampleRate: number }
 
@@ -31,7 +42,14 @@ export interface OffsetEstimate {
   coarseScore: number;
 }
 
-export interface ClipInput { id: string; env: Float32Array }
+export interface ClipInput {
+  id: string;
+  env: Float32Array;
+  /** when the phone pressed record (device clock, ms since 1970). Optional but very useful. */
+  recordedAtMs?: number;
+}
+
+export type SyncMethod = 'reference' | 'audio' | 'audio-hinted' | 'start-time';
 
 export interface SyncedClip {
   id: string;
@@ -41,9 +59,38 @@ export interface SyncedClip {
   confidence: number;
   /** which already-synced clip this one was matched against (null = reference) */
   syncedTo: string | null;
+  /** how the position was found; 'start-time' = approximate (no reliable sound match) */
+  method: SyncMethod;
 }
 
-export interface SyncResult { clips: SyncedClip[]; failed: string[] }
+export interface PairReport {
+  clipId: string;
+  anchorId: string;
+  hintSec: number | null;
+  full: { offsetSec: number; score: number; prominence: number } | null;
+  near: { offsetSec: number; score: number; prominence: number } | null;
+  far: { offsetSec: number; score: number; prominence: number } | null;
+}
+
+export interface SyncResult {
+  clips: SyncedClip[];
+  failed: string[];
+  /** numbers behind every decision, for debugging with real clips */
+  reports: PairReport[];
+}
+
+export interface SyncOptions {
+  maxLagSec?: number;
+  /** if true (default) a clip that cannot be matched by sound is placed by its start time */
+  startTimeFallback?: boolean;
+}
+
+export interface SearchOptions {
+  maxLagSec?: number;
+  /** only look for the answer near centerSec +/- radiusSec */
+  centerSec?: number;
+  radiusSec?: number;
+}
 
 // ── WAV parsing ───────────────────────────────────────────────
 export function parseWav(buf: ArrayBuffer): WavData {
@@ -219,23 +266,43 @@ function findPeak(scores: Float32Array, exclude: number) {
   return { idx, best, prominence };
 }
 
+/** quick sanity numbers about a clip's sound (to spot silent clips) */
+export function audioStats(samples: Float32Array): { rms: number; peak: number } {
+  let acc = 0, peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const a = Math.abs(samples[i]);
+    acc += samples[i] * samples[i];
+    if (a > peak) peak = a;
+  }
+  return { rms: samples.length ? Math.sqrt(acc / samples.length) : 0, peak };
+}
+
 /**
  * Where does clip B start on clip A's timeline?
- * Returns null if the clips are too short / cannot be compared.
+ * Pass a number (max lag in seconds) or SearchOptions. Returns null if the clips
+ * are too short / cannot be compared.
  */
-export function estimateOffset(refEnv: Float32Array, clipEnv: Float32Array, maxLagSec = 120): OffsetEstimate | null {
+export function estimateOffset(refEnv: Float32Array, clipEnv: Float32Array, options: number | SearchOptions = {}): OffsetEstimate | null {
+  const o: SearchOptions = typeof options === 'number' ? { maxLagSec: options } : options;
   const aC = pool(refEnv, COARSE_FACTOR);
   const bC = pool(clipEnv, COARSE_FACTOR);
   if (Math.min(aC.length, bC.length) < 2 * COARSE_HZ) return null;
 
   const minOv = Math.max(8, Math.min(Math.round(6 * COARSE_HZ), Math.floor(0.5 * Math.min(aC.length, bC.length))));
-  const maxLagC = Math.round(maxLagSec * COARSE_HZ);
-  const lagMin = Math.max(-maxLagC, -(bC.length - minOv));
-  const lagMax = Math.min(maxLagC, aC.length - minOv);
+  let lo: number, hi: number;
+  if (o.centerSec !== undefined && o.radiusSec !== undefined) {
+    lo = Math.round((o.centerSec - o.radiusSec) * COARSE_HZ);
+    hi = Math.round((o.centerSec + o.radiusSec) * COARSE_HZ);
+  } else {
+    const m = Math.round((o.maxLagSec ?? 120) * COARSE_HZ);
+    lo = -m; hi = m;
+  }
+  const lagMin = Math.max(lo, -(bC.length - minOv));
+  const lagMax = Math.min(hi, aC.length - minOv);
   if (lagMin > lagMax) return null;
 
   const coarse = scoreLags(aC, bC, lagMin, lagMax, minOv);
-  const cp = findPeak(coarse, COARSE_HZ); // ignore matches within 1 s of the best when finding the runner-up
+  const cp = findPeak(coarse, COARSE_HZ);
   const lagC = lagMin + cp.idx;
 
   const fLo = lagC * COARSE_FACTOR - (COARSE_FACTOR + 2);
@@ -256,45 +323,86 @@ export function estimateOffset(refEnv: Float32Array, clipEnv: Float32Array, maxL
 export function isReliable(e: OffsetEstimate | null): e is OffsetEstimate {
   return !!e && e.coarseScore >= MIN_SCORE && e.confidence >= MIN_CONFIDENCE;
 }
+const okNear = (e: OffsetEstimate | null): e is OffsetEstimate =>
+  !!e && e.coarseScore >= NEAR_MIN_SCORE && e.confidence >= NEAR_MIN_CONFIDENCE;
+const okFar = (e: OffsetEstimate | null): e is OffsetEstimate =>
+  !!e && e.coarseScore >= FAR_MIN_SCORE && e.confidence >= FAR_MIN_CONFIDENCE;
 
 // ── Sync a whole room ────────────────────────────────────────
 /**
- * The longest clip becomes the reference. Every other clip is matched against
- * any clip that is already placed (so a clip that only overlaps a *neighbour*
- * still gets placed). Clips that cannot be matched reliably are returned in `failed`.
+ * The longest clip becomes the reference. Each other clip is matched against
+ * clips that are already placed. Three levels of evidence, best first:
+ *   1. audio, whole timeline, strict thresholds              -> 'audio'
+ *   2. audio within +-3 s / +-10 s of the start-time guess    -> 'audio-hinted'
+ *   3. (optional) just trust the phones' start times          -> 'start-time'
  */
-export function syncClips(clips: ClipInput[], maxLagSec = 120): SyncResult {
-  if (clips.length === 0) return { clips: [], failed: [] };
+export function syncClips(clips: ClipInput[], options: number | SyncOptions = {}): SyncResult {
+  const opt: SyncOptions = typeof options === 'number' ? { maxLagSec: options } : options;
+  const maxLag = opt.maxLagSec ?? 120;
+  const useStartTime = opt.startTimeFallback ?? true;
+  const reports: PairReport[] = [];
+  if (clips.length === 0) return { clips: [], failed: [], reports };
+
   const byLen = [...clips].sort((a, b) => b.env.length - a.env.length);
   const ref = byLen[0];
   const pos = new Map<string, number>([[ref.id, 0]]);
   const conf = new Map<string, number>([[ref.id, 1]]);
   const via = new Map<string, string | null>([[ref.id, null]]);
+  const how = new Map<string, SyncMethod>([[ref.id, 'reference']]);
+  const byId = new Map(clips.map(c => [c.id, c] as const));
   let pending = byLen.slice(1);
 
+  const hintFor = (a: ClipInput, c: ClipInput): number | null =>
+    a.recordedAtMs !== undefined && c.recordedAtMs !== undefined ? (c.recordedAtMs - a.recordedAtMs) / 1000 : null;
+
+  // Pass 1: audio evidence (strict, then hinted). Repeat so chains can form.
   let progress = true;
   while (pending.length && progress) {
     progress = false;
     const still: ClipInput[] = [];
     for (const c of pending) {
-      let bestEst: OffsetEstimate | null = null;
-      let bestAnchor = '';
+      let best: { est: OffsetEstimate; anchor: string; method: SyncMethod } | null = null;
       for (const a of clips) {
         if (!pos.has(a.id)) continue;
-        const est = estimateOffset(a.env, c.env, maxLagSec);
-        if (isReliable(est) && (!bestEst || est.confidence > bestEst.confidence)) {
-          bestEst = est;
-          bestAnchor = a.id;
-        }
+        const hint = hintFor(a, c);
+        const full = estimateOffset(a.env, c.env, maxLag);
+        const near = hint !== null ? estimateOffset(a.env, c.env, { centerSec: hint, radiusSec: NEAR_RADIUS_SEC }) : null;
+        const far = hint !== null ? estimateOffset(a.env, c.env, { centerSec: hint, radiusSec: FAR_RADIUS_SEC }) : null;
+        const brief = (e: OffsetEstimate | null) => e && { offsetSec: e.offsetSec, score: e.coarseScore, prominence: e.confidence };
+        reports.push({ clipId: c.id, anchorId: a.id, hintSec: hint, full: brief(full), near: brief(near), far: brief(far) });
+        if (isReliable(full) && (!best || full.confidence > best.est.confidence)) best = { est: full, anchor: a.id, method: 'audio' };
+        if (okFar(far) && (!best || far.confidence > best.est.confidence)) best = { est: far, anchor: a.id, method: 'audio-hinted' };
+        if (okNear(near) && (!best || near.confidence > best.est.confidence)) best = { est: near, anchor: a.id, method: 'audio-hinted' };
       }
-      if (bestEst) {
-        pos.set(c.id, (pos.get(bestAnchor) as number) + bestEst.offsetSec);
-        conf.set(c.id, bestEst.confidence);
-        via.set(c.id, bestAnchor);
+      if (best) {
+        pos.set(c.id, (pos.get(best.anchor) as number) + best.est.offsetSec);
+        conf.set(c.id, best.est.confidence);
+        via.set(c.id, best.anchor);
+        how.set(c.id, best.method);
         progress = true;
       } else still.push(c);
     }
     pending = still;
+  }
+
+  // Pass 2: no reliable sound match -> trust the phones' start times (approximate).
+  if (pending.length) {
+    const stillFailed: ClipInput[] = [];
+    for (const c of pending) {
+      let anyHint: { anchor: string; hint: number } | null = null;
+      for (const a of clips) {
+        if (!pos.has(a.id)) continue;
+        const hint = hintFor(a, c);
+        if (hint !== null) { anyHint = { anchor: a.id, hint }; break; }
+      }
+      if (useStartTime && anyHint) {
+        pos.set(c.id, (pos.get(anyHint.anchor) as number) + anyHint.hint);
+        conf.set(c.id, 0);
+        via.set(c.id, anyHint.anchor);
+        how.set(c.id, 'start-time');
+      } else stillFailed.push(c);
+    }
+    pending = stillFailed;
   }
 
   let minStart = Infinity;
@@ -305,10 +413,11 @@ export function syncClips(clips: ClipInput[], maxLagSec = 120): SyncResult {
     out.push({
       id: c.id,
       startSec: Math.round(((pos.get(c.id) as number) - minStart) * 100) / 100,
-      durationSec: Math.round((c.env.length / FINE_HZ) * 100) / 100,
+      durationSec: Math.round((byId.get(c.id)!.env.length / FINE_HZ) * 100) / 100,
       confidence: conf.get(c.id) as number,
       syncedTo: via.get(c.id) ?? null,
+      method: how.get(c.id) as SyncMethod,
     });
   }
-  return { clips: out, failed: pending.map(p => p.id) };
+  return { clips: out, failed: pending.map(p => p.id), reports };
 }

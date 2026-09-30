@@ -2963,6 +2963,22 @@ export default function CowatchScreen() {
     loadFeed(feedType, 0, true);
   }, [feedType]);
 
+  // ✅ NEW (link rooms): save the exact post order this phone is showing, so a
+  // guest joining from the web page sees the SAME posts at the SAME positions
+  // (the session only stores an index, and a fresh fetch would shift as new
+  // posts arrive). Re-saved whenever the feed loads more / refreshes.
+  useEffect(() => {
+    if (linkRoom !== 'true' || !session?.id) return;
+    const t = setTimeout(() => {
+      const ids = postsRef.current.map(p => p.id);
+      if (!ids.length) return;
+      supabase.from('cowatch_session_posts')
+        .upsert({ session_id: session.id, post_ids: ids, updated_at: new Date().toISOString() })
+        .then(({ error }) => { if (error) console.warn('[linkRoom] save post order failed:', error.message); });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [feedItems, session?.id, linkRoom]);
+
   // ─────────────────────────────────────────────────────────────
   // AI MATCH — full setup flow
   // Called instead of setupSession when isAiMatch === 'true'

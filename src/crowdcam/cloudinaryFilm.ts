@@ -61,6 +61,11 @@ export function buildFilmUrl(o: FilmUrlOptions): string {
   return `https://res.cloudinary.com/${o.cloudName}/video/upload/${parts.join('/')}/${pidOf(first.clipId)}.mp4`;
 }
 
+/** a still picture from an uploaded clip (used for the angle thumbnails) */
+export function angleThumbUrl(cloudName: string, publicId: string, atSec = 1): string {
+  return `https://res.cloudinary.com/${cloudName}/video/upload/so_${atSec},c_fill,w_240,h_426,q_auto,f_jpg/${publicId}.jpg`;
+}
+
 /** 8 kHz audio version of a clip, used only for syncing (small download) */
 export function audioUrlFor(cloudName: string, publicId: string, lowRate = true): string {
   return `https://res.cloudinary.com/${cloudName}/video/upload/${lowRate ? 'af_8000/' : ''}${publicId}.wav`;
