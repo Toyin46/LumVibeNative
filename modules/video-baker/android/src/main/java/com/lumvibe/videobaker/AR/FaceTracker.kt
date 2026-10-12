@@ -61,6 +61,7 @@ class FaceTracker(context: Context) {
      * effect this frame," not an error; faces going in/out of frame is normal.
      */
     fun detect(bitmap: Bitmap, timestampMs: Long): FaceLandmarkerResult? {
+        frameAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
         val mpImage = BitmapImageBuilder(bitmap).build()
         val result = faceLandmarker.detectForVideo(mpImage, timestampMs)
         return if (result.faceLandmarks().isEmpty()) null else result
@@ -146,6 +147,65 @@ class FaceTracker(context: Context) {
         val left = points[468]
         val right = points[473]
         return ((left.x() + right.x()) / 2f) to ((left.y() + right.y()) / 2f)
+    }
+
+    // ── EYE LASER support (same maths as the website's calc.face) ───────────────
+    /** width / height of the last frame given to detect(); keeps x and y distances comparable. */
+    @Volatile var frameAspect: Float = 0.5625f
+
+    private class OneEuro(private val minCut: Float, private val beta: Float) {
+        private var x = 0f; private var dx = 0f; private var t = 0L; private var ready = false
+        private fun alpha(cut: Float, dt: Float) = 1f / (1f + (1f / (2f * Math.PI.toFloat() * cut)) / dt)
+        fun filter(v: Float, tMs: Long): Float {
+            if (!ready) { x = v; dx = 0f; t = tMs; ready = true; return v }
+            val dt = maxOf((tMs - t) / 1000f, 0.001f); t = tMs
+            dx += alpha(1f, dt) * ((v - x) / dt - dx)
+            x += alpha(minCut + beta * kotlin.math.abs(dx), dt) * (v - x)
+            return x
+        }
+    }
+    private val gazeFilterX = OneEuro(1.2f, 3f)
+    private val gazeFilterY = OneEuro(1.2f, 3f)
+    private var openLeft = -1f
+    private var openRight = -1f
+
+    /**
+     * [irisLeftX, irisLeftY, irisRightX, irisRightY, gazeX, gazeY, openLeft, openRight].
+     * "Left" = image-left (the user's right eye). gaze = head direction + eye direction,
+     * x right / y down, ~0 when looking at the camera. null = no iris landmarks in this result.
+     */
+    fun eyeLaserSignals(result: FaceLandmarkerResult, nowMs: Long): FloatArray? {
+        val lm = result.faceLandmarks().firstOrNull() ?: return null
+        if (lm.size <= 473) return null
+        val ar = frameAspect
+        fun off(i: Int, a: Int, b: Int): FloatArray {
+            val dx = (lm[b].x() - lm[a].x()) * ar
+            val dy = lm[b].y() - lm[a].y()
+            val w = maxOf(kotlin.math.hypot(dx, dy), 1e-4f)
+            return floatArrayOf(
+                (lm[i].x() - (lm[a].x() + lm[b].x()) / 2f) * ar / w,
+                (lm[i].y() - (lm[a].y() + lm[b].y()) / 2f) / w,
+            )
+        }
+        val o1 = off(468, 33, 133)
+        val o2 = off(473, 362, 263)
+        var gx = 2.4f * (o1[0] + o2[0]) / 2f
+        var gy = 2.4f * (o1[1] + o2[1]) / 2f
+        val m = result.facialTransformationMatrixes().orElse(null)?.firstOrNull()
+        if (m != null && m.size >= 11) {
+            val n = maxOf(kotlin.math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]), 1e-6f)
+            gx += m[8] / n
+            gy -= m[9] / n
+        }
+        val sx = gazeFilterX.filter(gx, nowMs)
+        val sy = gazeFilterY.filter(gy, nowMs)
+        fun openness(blink: Float) = 1f - ((blink - 0.30f) / 0.40f).coerceIn(0f, 1f)
+        // image-left eye = the user's RIGHT eye -> eyeBlinkRight
+        val tl = openness(blendshapeScore(result, "eyeBlinkRight"))
+        val tr = openness(blendshapeScore(result, "eyeBlinkLeft"))
+        openLeft = if (openLeft < 0f) tl else openLeft + (tl - openLeft) * 0.6f
+        openRight = if (openRight < 0f) tr else openRight + (tr - openRight) * 0.6f
+        return floatArrayOf(lm[468].x(), lm[468].y(), lm[473].x(), lm[473].y(), sx, sy, openLeft, openRight)
     }
 
     /** Call once when done baking — releases the model's native resources. */

@@ -15,8 +15,23 @@ android {
   defaultConfig {
     minSdkVersion 24
     targetSdkVersion 36
+    // ADDED: wires the new C++ engine (src/main/cpp/) into the existing
+    // Gradle build. Nothing above this line changed.
+    externalNativeBuild {
+      cmake {
+        cppFlags ""
+      }
+    }
   }
   compileSdk 36
+  // ADDED: same reasoning as defaultConfig's block above — points Gradle
+  // at the new CMakeLists.txt.
+  externalNativeBuild {
+    cmake {
+      path "src/main/cpp/CMakeLists.txt"
+      version "3.22.1"
+    }
+  }
 }
 
 dependencies {

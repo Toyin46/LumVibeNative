@@ -55,6 +55,8 @@ import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java
 import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
+// LumVibe Audio Engine (shared C++): noise removal, autotune, effects, beat mix, mastering
+import { bakeAudioStudio, paramsFromStudio } from 'modules/video-baker/audioStudio';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -518,7 +520,7 @@ const FREESOUND_GENRE_TAGS: Record<string,string> = {
 
 // ─── FX EFFECTS ───────────────────────────────────────────
 // brightness/contrast values for ImageManipulator — these get BAKED into the file
-const FX_EFFECTS: FxEffect[] = [
+const FX_EFFECTS_ALL: FxEffect[] = [
   {id:'fx_none',           name:'No FX',        emoji:'✖️',category:'basic',     desc:'Remove all FX',            brightness:1,    contrast:1,    saturation:1   },
   {id:'fx_vhs',            name:'VHS Tape',      emoji:'📼',category:'retro',     desc:'Old camcorder look',       brightness:0.88, contrast:0.92, saturation:0.65},
   {id:'fx_fire',           name:'Fire Grade',    emoji:'🔥',category:'mood',      desc:'Inferno colour burn',      brightness:1.02, contrast:1.3,  saturation:1.5 },
@@ -612,6 +614,31 @@ const FX_EFFECTS: FxEffect[] = [
   // ⛔ COMMENTED OUT for launch (per user's cut list — not deleted, easy to bring back): {id:'fx_gl_paint_splash',    name:'Paint Splash',   emoji:'🎨',category:'creative', desc:'Color splashes on movement — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'paint_splash'},
   {id:'fx_gl_finger_draw',     name:'Finger Draw',    emoji:'✍️',category:'creative', desc:'Glowing trail from your fingertip — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'finger_draw'},
 ];
+// ── Effects the website also shows (name + emoji tile; real cover images can be added to FX_IMAGES later under the same id) ──
+const FX_EXTRA: FxEffect[] = [
+  {id:'fx_gl_eye_laser', name:'Eye Laser', emoji:'🔴', category:'creative', desc:'Eye Laser — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'eye_laser'},
+  {id:'fx_gl_demon_eyes', name:'Demon Eyes', emoji:'👹', category:'creative', desc:'Demon Eyes — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'demon_eyes'},
+  {id:'fx_gl_gaze_trail', name:'Gaze Trail', emoji:'👀', category:'creative', desc:'Gaze Trail — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gaze_trail'},
+  {id:'fx_gl_aura_glow', name:'Aura Glow', emoji:'🌟', category:'mood', desc:'Aura Glow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'aura_glow'},
+  {id:'fx_gl_big_head', name:'Big Head', emoji:'🗣️', category:'creative', desc:'Big Head — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'big_head'},
+  {id:'fx_gl_beat_reactor', name:'Beat Reactor', emoji:'🎵', category:'creative', desc:'Beat Reactor — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'beat_reactor'},
+  {id:'fx_gl_beat_shake', name:'Beat Shake', emoji:'📳', category:'creative', desc:'Beat Shake — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'beat_shake'},
+  {id:'fx_gl_drop_transform', name:'Drop Transform', emoji:'💥', category:'creative', desc:'Drop Transform — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'drop_transform'},
+  {id:'fx_gl_voice_halo', name:'Voice Halo', emoji:'⭕', category:'creative', desc:'Voice Halo — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'voice_halo'},
+  {id:'fx_gl_cinematic_glow', name:'Cinematic Glow', emoji:'🎬', category:'beauty', desc:'Cinematic Glow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'cinematic_glow'},
+  {id:'fx_gl_flash_camera', name:'Flash Camera', emoji:'📸', category:'beauty', desc:'Flash Camera — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'flash_camera'},
+  {id:'fx_gl_rich_camera', name:'Rich Camera', emoji:'🎞️', category:'beauty', desc:'Rich Camera — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rich_camera'},
+  {id:'fx_gl_golden_hour', name:'Golden Hour', emoji:'🌅', category:'beauty', desc:'Golden Hour — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'golden_hour'},
+  {id:'fx_gl_gold_skin', name:'Gold Skin', emoji:'👑', category:'beauty', desc:'Gold Skin — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'gold_skin'},
+  {id:'fx_gl_particle_flow', name:'Particle Flow', emoji:'💫', category:'mood', desc:'Particle Flow — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'particle_flow'},
+  {id:'fx_gl_rain_fall', name:'Rain Drop', emoji:'🌧️', category:'mood', desc:'Rain Drop — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'rain_fall'},
+  {id:'fx_gl_tap_shockwave', name:'Tap Shockwave', emoji:'💥', category:'creative', desc:'Tap Shockwave — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'tap_shockwave'},
+  {id:'fx_gl_thermal_pulse', name:'Thermal Pulse', emoji:'🌡️', category:'mood', desc:'Thermal Pulse — baked in', brightness:1,contrast:1,saturation:1, glShaderEffect:'thermal_pulse'},
+];
+// Hidden until their second version (still in the code, just not shown). To bring one back, delete its name from this list.
+const FX_HIDDEN = new Set(['wink_spark','blink_freeze','mouth_words','rock_paper_scissors','bokeh_lights','clap_burst','depth_bloom','face_morph','fire_book','fist_bump_boom','freeze_touch','glitch_wave','hand_portal','lightning_hands','mouth_fire','raise_eyebrow','space_background','superpower','throw_confetti','tiny_body','two_hand_frame','face_explosion']);
+const FX_EFFECTS: FxEffect[] = [...FX_EFFECTS_ALL, ...FX_EXTRA.filter(e => !FX_EFFECTS_ALL.some(f => f.glShaderEffect === e.glShaderEffect))]
+  .filter(f => !f.glShaderEffect || !FX_HIDDEN.has(f.glShaderEffect));
 
 // FX card cover images — Metro's bundler requires STATIC require() calls; it
 // cannot resolve `require(`...${id}.png`)` at build time, so every one of the
@@ -699,6 +726,7 @@ const FX_OVERLAY_TINTS: Record<string,string> = {
   fx_gl_tap_shockwave:'transparent', fx_gl_spin_effect:'transparent', fx_gl_face_morph:'transparent',
   fx_gl_fire_book:'transparent', fx_gl_stickers_react:'transparent',
 };
+FX_EXTRA.forEach(f => { FX_OVERLAY_TINTS[f.id] = 'transparent'; });   // GL effects draw themselves: no colour wash on top
 
 // ─── FILTERS ──────────────────────────────────────────────
 // manipulator values are used for REAL baking via ImageManipulator
@@ -3036,6 +3064,8 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
   const audioRecorderInstance = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const voiceSnd = useRef<CompatSound | null>(null);
   const beatSnd  = useRef<CompatSound | null>(null);
+  // last rendered preview, so tapping Preview again without changing anything is instant
+  const previewCache = useRef<{ key: string; uri: string } | null>(null);
   const atSnd    = useRef<CompatSound | null>(null);
   const mixVSnd  = useRef<CompatSound | null>(null);
   const mixBSnd  = useRef<CompatSound | null>(null);
@@ -3113,6 +3143,11 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
       });
       const recording = audioRecorderInstance;
       await recording.prepareToRecordAsync();
+      // STUDIO SYNC: restart the beat from 0 at the instant recording starts, so time 0 of the voice
+      // file == time 0 of the beat. The audio engine mixes them on that shared timeline.
+      if (selBeat && beatSnd.current) {
+        try { await beatSnd.current.setPositionAsync(0); await beatSnd.current.playAsync(); setPlayBeat(true); } catch {}
+      }
       recording.record();
       recRef.current = recording;
       setRecActive(true);
@@ -3258,20 +3293,35 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
         ? Math.min((selEffect.cloudinaryVolume / 100) * voiceVol, 1.0)
         : selEffect.previewVolume * voiceVol;
 
-      // Load voice first, then beat — sequential createAsync avoids Android session conflicts
+      // PREVIEW = THE REAL RESULT. Render exactly what posting will produce (noise removed, autotune,
+      // effects, beat mixed in) with the audio engine, then play that one file.
+      // Falls back to the old raw voice + separate beat playback if the engine is unavailable.
+      let renderedUri: string | null = null;
       if (voiceUri && voiceVol > 0) {
-        const processedUri = autoTune
-          ? await applyProfessionalAutoTune(voiceUri, selEffect.id, 'major')
-          : voiceUri;
-        const { sound: vs } = await createCompatSound(
-          { uri: processedUri },
-          {
-            shouldPlay: false, // don't start yet — wait for beat to load too
-            volume: Math.min(vol, 1.0),
-            rate,
-            shouldCorrectPitch: autoTune || selEffect.id !== 'none',
-            pitchCorrectionQuality: 'high',
+        try {
+          const params = paramsFromStudio({ effect: selEffect, studio: studioEdit, autoTune, voiceVolume: voiceVol, beatVolume: beatVol });
+          const key = JSON.stringify([voiceUri, beatUri ?? null, params]);
+          if (previewCache.current?.key === key) {
+            renderedUri = previewCache.current.uri;
+          } else {
+            setBaking(true);   // shows the spinner while the song is mastered (a few seconds)
+            try {
+              const res = await bakeAudioStudio({ voiceUri, beatUri: beatUri ?? null, params });
+              renderedUri = res.uri;
+              previewCache.current = { key, uri: res.uri };
+            } finally { setBaking(false); }
           }
+        } catch (e: any) {
+          console.warn('Studio preview render failed, playing raw voice + beat:', e);
+        }
+      }
+
+      if (voiceUri && voiceVol > 0) {
+        const { sound: vs } = await createCompatSound(
+          { uri: renderedUri ?? voiceUri },
+          renderedUri
+            ? { shouldPlay: false, volume: 1.0 }            // already mixed + mastered by the engine
+            : { shouldPlay: false, volume: Math.min(vol, 1.0), rate, shouldCorrectPitch: autoTune || selEffect.id !== 'none', pitchCorrectionQuality: 'high' }
         );
         mixVSnd.current = vs;
         vs.setOnPlaybackStatusUpdate(st => {
@@ -3282,8 +3332,8 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
         });
       }
 
-      // Load beat after voice
-      if (beatUri && beatVol > 0) {
+      // Beat on its own only when it is NOT already inside the rendered song
+      if (!renderedUri && beatUri && beatVol > 0) {
         const { sound: bs } = await createCompatSound(
           { uri: beatUri },
           { shouldPlay: false, isLooping: true, volume: beatVol },
@@ -3318,49 +3368,43 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
 
     try {
       let finalVoiceUri = voiceUri;
+      let beatForParent: string | null = selBeat?.url || null;
+      let finalDuration = recDur;
 
-      // ✅ STEP 1: Bake voice effects into audio file (no longer preview-only)
-      if (voiceUri && (selEffect.id !== 'none' || autoTune)) {
+      // ONE call: noise removal → autotune → effects → mix with beat → mastering (shared C++ engine).
+      if (voiceUri) {
         try {
-          Alert.alert('🎛️ Processing', 'Baking your voice effects... this takes a few seconds.');
-          finalVoiceUri = await bakeVoiceEffect(voiceUri, selEffect, autoTune, eqBands);
-        } catch (e) {
-          console.warn('Voice effect bake failed, using original:', e);
-          finalVoiceUri = voiceUri;
-        }
-      }
-
-      // ✅ STEP 2: Bake studio edits (trim, reverse, chorus, noise gate)
-      if (finalVoiceUri && (
-        studioEdit.reverse || studioEdit.trimStart > 0 || studioEdit.trimEnd > 0 ||
-        studioEdit.chorus || studioEdit.delay > 0 || studioEdit.normalise || studioEdit.noiseGate
-      )) {
-        try {
-          finalVoiceUri = await bakeStudioEdit(finalVoiceUri, studioEdit, recDur);
-        } catch (e) {
-          console.warn('Studio edit bake failed, using original:', e);
-        }
-      }
-
-      // ✅ STEP 3: Apply autotune if enabled and no effect was applied yet
-      if (finalVoiceUri && finalVoiceUri === voiceUri && autoTune) {
-        try {
-          finalVoiceUri = await applyProfessionalAutoTune(finalVoiceUri, selEffect.id);
-        } catch (e) {
-          console.warn('AutoTune bake failed, using original:', e);
+          const res = await bakeAudioStudio({
+            voiceUri,
+            beatUri: selBeat?.url ?? null,
+            params: paramsFromStudio({
+              effect: selEffect,
+              studio: studioEdit,
+              autoTune,
+              voiceVolume: voiceVol,
+              beatVolume: beatVol,
+              // latencyMs: 0,   // see README_AUDIO.md "Getting the voice exactly on the beat"
+            }),
+          });
+          finalVoiceUri = res.uri;                    // the finished song: voice + beat already mixed
+          finalDuration = Math.max(1, Math.round(res.durationSec));
+          beatForParent = null;                       // the beat is inside the song now — don't play it twice
+        } catch (e: any) {
+          console.warn('Audio Studio mix failed, using the raw voice:', e);
+          Alert.alert('Studio mix unavailable', (e?.message || 'Could not master the track') + '\n\nPosting your raw voice instead.');
         }
       }
 
       onDone({
         voiceUri: finalVoiceUri,
-        beatUri: selBeat?.url || null,
+        beatUri: beatForParent,
         beatName: selBeat?.name || null,
         beatArtist: selBeat?.artist || null,
         voiceVolume: voiceVol, beatVolume: beatVol,
         effectName: selEffect.id !== 'none' ? selEffect.name : null,
         effectId: selEffect.id !== 'none' ? selEffect.id : null,
         effectReverb: selEffect.reverb, effectEcho: selEffect.echo, effectChorus: selEffect.chorus,
-        duration: recDur, autoTuneEnabled: autoTune,
+        duration: finalDuration, autoTuneEnabled: autoTune,
       });
     } finally {
       setBaking(false);

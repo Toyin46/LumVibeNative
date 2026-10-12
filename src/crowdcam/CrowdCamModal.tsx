@@ -29,6 +29,57 @@ import {
   listPeople, uploadClip, openLiveChannel,
 } from './crowdCamApi';
 import { analyzeRoom, renderFilm, debugSummary, BuildStage, FilmResult, RoomAnalysis } from './buildFilm';
+// Effects under the record button (same live GL effects + same recorder as the normal camera in create.tsx)
+import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview';
+import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview';
+import { CROWD_FX, crowdFxById } from './crowdFx';
+
+// ── Crowd Cam shows the SAME effects as the camera in create.tsx (and the website): every effect below, minus the hidden ones.
+// Entries already in ./crowdFx keep their cover image; the rest get an emoji tile. To bring a hidden effect back, delete its name from CROWD_HIDDEN.
+const CROWD_EXTRA = [
+  { id: 'vintage_flicker', name: 'Old Film', emoji: '🎞️', gl: 'vintage_flicker' },
+  { id: 'neon_edge', name: 'Neon Trace', emoji: '💡', gl: 'neon_edge' },
+  { id: 'duotone_pulse', name: 'Duo Pulse', emoji: '🔵', gl: 'duotone_pulse' },
+  { id: 'liquid_chrome', name: 'Liquid Chrome', emoji: '🌊', gl: 'liquid_chrome' },
+  { id: 'ink_wash', name: 'Ink Wash', emoji: '🖌️', gl: 'ink_wash' },
+  { id: 'mood_ring', name: 'Mood Ring', emoji: '💍', gl: 'mood_ring' },
+  { id: 'smile_shatter', name: 'Smile Shatter', emoji: '💥', gl: 'smile_shatter' },
+  { id: 'head_tilt_zoom', name: 'Tilt Zoom', emoji: '🎯', gl: 'head_tilt_zoom' },
+  { id: 'color_drain', name: 'Color Drain', emoji: '🩶', gl: 'color_drain' },
+  { id: 'silence_ripple', name: 'Silence Ripple', emoji: '🔵', gl: 'silence_ripple' },
+  { id: 'split_prism', name: 'Split Prism', emoji: '🔺', gl: 'split_prism' },
+  { id: 'double_take', name: 'Double Take', emoji: '👥', gl: 'double_take' },
+  { id: 'skin_smooth', name: 'Skin Smooth', emoji: '🌸', gl: 'skin_smooth' },
+  { id: 'snow_fall', name: 'Snow Fall', emoji: '❄️', gl: 'snow_fall' },
+  { id: 'retro_vhs', name: 'Retro VHS', emoji: '📼', gl: 'retro_vhs' },
+  { id: 'light_leak', name: 'Light Leak', emoji: '🌅', gl: 'light_leak' },
+  { id: 'palm_magic', name: 'Palm Magic', emoji: '✨', gl: 'palm_magic' },
+  { id: 'spin_effect', name: 'Spin Effect', emoji: '🌀', gl: 'spin_effect' },
+  { id: 'stickers_react', name: 'Stickers React', emoji: '💕', gl: 'stickers_react' },
+  { id: 'finger_draw', name: 'Finger Draw', emoji: '✍️', gl: 'finger_draw' },
+  { id: 'eye_laser', name: 'Eye Laser', emoji: '🔴', gl: 'eye_laser' },
+  { id: 'demon_eyes', name: 'Demon Eyes', emoji: '👹', gl: 'demon_eyes' },
+  { id: 'gaze_trail', name: 'Gaze Trail', emoji: '👀', gl: 'gaze_trail' },
+  { id: 'aura_glow', name: 'Aura Glow', emoji: '🌟', gl: 'aura_glow' },
+  { id: 'big_head', name: 'Big Head', emoji: '🗣️', gl: 'big_head' },
+  { id: 'beat_reactor', name: 'Beat Reactor', emoji: '🎵', gl: 'beat_reactor' },
+  { id: 'beat_shake', name: 'Beat Shake', emoji: '📳', gl: 'beat_shake' },
+  { id: 'drop_transform', name: 'Drop Transform', emoji: '💥', gl: 'drop_transform' },
+  { id: 'voice_halo', name: 'Voice Halo', emoji: '⭕', gl: 'voice_halo' },
+  { id: 'cinematic_glow', name: 'Cinematic Glow', emoji: '🎬', gl: 'cinematic_glow' },
+  { id: 'flash_camera', name: 'Flash Camera', emoji: '📸', gl: 'flash_camera' },
+  { id: 'rich_camera', name: 'Rich Camera', emoji: '🎞️', gl: 'rich_camera' },
+  { id: 'golden_hour', name: 'Golden Hour', emoji: '🌅', gl: 'golden_hour' },
+  { id: 'gold_skin', name: 'Gold Skin', emoji: '👑', gl: 'gold_skin' },
+  { id: 'particle_flow', name: 'Particle Flow', emoji: '💫', gl: 'particle_flow' },
+  { id: 'rain_fall', name: 'Rain Drop', emoji: '🌧️', gl: 'rain_fall' },
+  { id: 'tap_shockwave', name: 'Tap Shockwave', emoji: '💥', gl: 'tap_shockwave' },
+  { id: 'thermal_pulse', name: 'Thermal Pulse', emoji: '🌡️', gl: 'thermal_pulse' },
+] as unknown as typeof CROWD_FX;
+const CROWD_HIDDEN = new Set<string>(['wink_spark', 'blink_freeze', 'mouth_words', 'rock_paper_scissors', 'bokeh_lights', 'clap_burst', 'depth_bloom', 'face_morph', 'fire_book', 'fist_bump_boom', 'freeze_touch', 'glitch_wave', 'hand_portal', 'lightning_hands', 'mouth_fire', 'raise_eyebrow', 'space_background', 'superpower', 'throw_confetti', 'tiny_body', 'two_hand_frame', 'face_explosion']);
+const CROWD_ALL = [...CROWD_FX, ...CROWD_EXTRA.filter(e => !CROWD_FX.some(f => (f as any).gl === (e as any).gl))]
+  .filter(f => !CROWD_HIDDEN.has((f as any).gl)) as unknown as Array<(typeof CROWD_FX)[number]>;
+const crowdFxFind = (id: string | null) => (id ? CROWD_ALL.find(f => f.id === id) ?? null : null);
 
 const ACCENT = '#00ff88';
 const BG = '#050b09';
@@ -150,6 +201,15 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
   ]);
   const cameraRef = useRef<any>(null);
 
+  // ── effects: null = plain camera (VisionCamera, exactly as before). An effect id swaps in LiveEffectPreview,
+  // which records the effect-composited video itself (same path create.tsx uses). Chosen per phone; each phone's clip carries its own look.
+  const [selectedFx, setSelectedFx] = useState<string | null>(null);
+  const liveFx = crowdFxFind(selectedFx) ?? crowdFxById(selectedFx);
+  const fxPreviewRef = useRef<LiveEffectPreviewHandle>(null);
+  const liveFxRef = useRef(false);
+  liveFxRef.current = !!liveFx;
+  const recViaFxRef = useRef(false);
+
   // refs so timers / callbacks always see fresh values
   const stepRef = useRef<Step>('home');
   const roomRef = useRef<CrowdRoom | null>(null);
@@ -204,8 +264,28 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
   }, [userId]);
 
   const startRecording = useCallback(() => {
-    if (recordingRef.current || !cameraRef.current) return;
+    if (recordingRef.current) return;
+    if (liveFxRef.current) {
+      // effect on → record through LiveEffectPreview's own recorder (view stays mounted, so nothing jumps)
+      if (!fxPreviewRef.current) return;
+      recordingRef.current = true; recViaFxRef.current = true;
+      recStartedAt.current = new Date();
+      setRecordedAtDate(new Date());
+      setRecSec(0);
+      setIsRecording(true);
+      const stamp = Date.now();
+      const videoOnlyPath = `${FileSystem.cacheDirectory}cc_fx_video_${stamp}.mp4`.replace('file://', '');
+      const pcmPath = `${FileSystem.cacheDirectory}cc_fx_audio_${stamp}.pcm`.replace('file://', '');
+      fxPreviewRef.current.startRecording(videoOnlyPath, pcmPath).catch((err: any) => {
+        recordingRef.current = false; recViaFxRef.current = false;
+        setIsRecording(false);
+        Alert.alert('Recording problem', String(err?.message || err));
+      });
+      return;
+    }
+    if (!cameraRef.current) return;
     recordingRef.current = true;
+    recViaFxRef.current = false;
     recStartedAt.current = new Date();
     setRecordedAtDate(new Date());
     setRecSec(0);
@@ -233,8 +313,29 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
 
   const stopRecording = useCallback(async () => {
     if (!recordingRef.current) return;
+    if (recViaFxRef.current) {
+      const finalPath = `${FileSystem.cacheDirectory}cc_fx_final_${Date.now()}.mp4`.replace('file://', '');
+      try {
+        const res = await fxPreviewRef.current?.stopRecording(finalPath);
+        const path = res?.path || finalPath;
+        const dur = recSecRef.current;
+        recordingRef.current = false; recViaFxRef.current = false;
+        setIsRecording(false);
+        pendingFile.current = {
+          uri: path.startsWith('file://') ? path : `file://${path}`,
+          durationSec: Math.round(dur * 100) / 100,
+          recordedAt: recStartedAt.current ?? new Date(),
+        };
+        beginUpload();
+      } catch (err: any) {
+        recordingRef.current = false; recViaFxRef.current = false;
+        setIsRecording(false);
+        Alert.alert('Recording problem', String(err?.message || err));
+      }
+      return;
+    }
     try { await cameraRef.current?.stopRecording(); } catch { /* finished callback still fires */ }
-  }, []);
+  }, [beginUpload]);
 
   // timer + auto stop
   useEffect(() => {
@@ -287,6 +388,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
       if (stopped || busyNow) return;
       busyNow = true;
       try {
+        if (liveFxRef.current) { busyNow = false; return; } // effect view has no snapshot API: thumbnails pause, recording is unaffected
         const cam = cameraRef.current;
         if (!cam || typeof cam.takeSnapshot !== 'function') throw new Error('snapshots not supported');
         const snap = await cam.takeSnapshot({ quality: 30, skipMetadata: true });
@@ -396,7 +498,15 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
   const tileStateOf = (p: CrowdPerson): TileState => (p.has_clip ? 'uploaded' : roomRecording ? 'recording' : 'joined');
   const labelOf = (p: CrowdPerson) => `Camera ${people.indexOf(p) + 1}${p.is_host ? ' · Host' : ''}`;
   const uploadedCount = people.filter(p => p.has_clip).length;
-  const showCamera = visible && step === 'camera' && hasCam && hasMic && !!device;
+  const showCamera = visible && step === 'camera' && hasCam && hasMic && !!device && !liveFx;
+  const showLiveFx = visible && step === 'camera' && hasCam && hasMic && !!liveFx;
+  // LiveEffectPreview has no onInitialized: treat it as ready shortly after it mounts (or after a flip)
+  useEffect(() => {
+    if (!showLiveFx) return;
+    setCamReady(false);
+    const t = setTimeout(() => setCamReady(true), 700);
+    return () => clearTimeout(t);
+  }, [showLiveFx, selectedFx, useFront]);
   const permsOk = hasCam && hasMic;
 
   const CodeStrip = (
@@ -485,6 +595,14 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
           <View style={s.cameraBody}>
             <View style={s.gridRow}>
               <View style={s.mainTile}>
+                {showLiveFx && (
+                  <LiveEffectPreview
+                    ref={fxPreviewRef}
+                    effect={liveFx!.gl}
+                    facing={useFront ? 'front' : 'back'}
+                    style={StyleSheet.absoluteFill}
+                  />
+                )}
                 {showCamera && (
                   <Camera
                     ref={cameraRef}
@@ -531,7 +649,10 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
               </View>
             </View>
 
-            {!liveWorks && isRecording && (
+            {liveFx && isRecording && othersCount > 0 && (
+              <Text style={s.liveNote}>Live thumbnails pause while an effect is on. Recording is not affected.</Text>
+            )}
+            {!liveWorks && isRecording && !liveFx && (
               <Text style={s.liveNote}>Live thumbnails aren't available on this phone. Recording is not affected.</Text>
             )}
 
@@ -558,6 +679,27 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
                 <Text style={[s.sideBtnTxt, liveOn && { color: ACCENT }]}>Live view</Text>
               </TouchableOpacity>
             </View>
+            {/* Effects — under the record button, same look as the camera's strip. Locked while recording. */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={[s.fxStrip, isRecording && s.dim]} contentContainerStyle={{ gap: 10, paddingHorizontal: 4 }} pointerEvents={isRecording ? 'none' : 'auto'}>
+              <TouchableOpacity style={s.fxItem} onPress={() => { if (selectedFx) { setCamReady(false); setSelectedFx(null); } }}>
+                <View style={[s.fxThumb, !selectedFx && s.fxThumbOn, { backgroundColor: '#1a1a1a' }]}>
+                  <Ionicons name="ban-outline" size={18} color="#888" />
+                  {!selectedFx && <View style={s.fxCheck}><Ionicons name="checkmark" size={11} color="#000" /></View>}
+                </View>
+                <Text style={[s.fxName, !selectedFx && { color: ACCENT }]} numberOfLines={1}>None</Text>
+              </TouchableOpacity>
+              {CROWD_ALL.map(f => (
+                <TouchableOpacity key={f.id} style={s.fxItem} onPress={() => { if (selectedFx !== f.id) { setCamReady(false); setSelectedFx(f.id); } }}>
+                  <View style={[s.fxThumb, selectedFx === f.id && s.fxThumbOn]}>
+                    {f.image
+                      ? <Image source={f.image} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                      : <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1a1a1a' }}><Text style={{ fontSize: 20 }}>{f.emoji}</Text></View>}
+                    {selectedFx === f.id && <View style={s.fxCheck}><Ionicons name="checkmark" size={11} color="#000" /></View>}
+                  </View>
+                  <Text style={[s.fxName, selectedFx === f.id && { color: ACCENT }]} numberOfLines={1}>{f.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
             <Text style={s.hint}>
               {isRecording
                 ? (isHost ? 'Tap the square to stop everyone' : 'The host controls the recording. Tap to stop your phone only.')
@@ -764,6 +906,12 @@ const s = StyleSheet.create({
   recBtn: { width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: '#ff453a', alignItems: 'center', justifyContent: 'center' },
   recDotBig: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#ff453a' },
   stopSquare: { width: 28, height: 28, borderRadius: 6, backgroundColor: '#ff453a' },
+  fxStrip: { marginTop: 10, flexGrow: 0 },
+  fxItem: { alignItems: 'center', width: 60 },
+  fxThumb: { width: 54, height: 54, borderRadius: 12, borderWidth: 2, borderColor: '#1a1a1a', overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+  fxThumbOn: { borderColor: ACCENT },
+  fxCheck: { position: 'absolute', top: 3, right: 3, width: 16, height: 16, borderRadius: 8, backgroundColor: ACCENT, alignItems: 'center', justifyContent: 'center' },
+  fxName: { color: '#7f958c', fontSize: 10, fontWeight: '600', marginTop: 4, textAlign: 'center' },
   hint: { color: '#7f958c', fontSize: 12, textAlign: 'center', marginTop: 8 },
 
   codeStrip: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: EDGE, backgroundColor: CARD, borderRadius: 18, paddingVertical: 10, paddingHorizontal: 12, marginTop: 10 },
