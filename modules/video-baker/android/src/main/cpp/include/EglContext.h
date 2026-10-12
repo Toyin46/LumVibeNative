@@ -1,4 +1,9 @@
 #pragma once
+// Needed so eglext.h declares eglPresentationTimeANDROID() (setPresentationTime below).
+// Without this the NDK header only has the function-pointer typedef -> "undeclared identifier".
+#ifndef EGL_EGLEXT_PROTOTYPES
+#define EGL_EGLEXT_PROTOTYPES 1
+#endif
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <android/native_window.h>
