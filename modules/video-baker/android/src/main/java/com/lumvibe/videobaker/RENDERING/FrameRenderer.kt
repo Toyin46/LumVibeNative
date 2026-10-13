@@ -151,8 +151,13 @@ class FrameRenderer(private val context: Context) {
     private var outputW = -1
     private var outputH = -1
 
+    // STAGE A: the same centre-crop coordinates as an array, so the C++ engine's camera quad
+    // uses exactly what the legacy renderer uses (4 corners, s,t each).
+    private var cameraTexCoordsArray: FloatArray = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+    fun cameraTexCoords(): FloatArray = cameraTexCoordsArray
+
     private fun rebuildCameraTexCoords() {
-        if (outputW <= 0 || outputH <= 0) { cameraTexCoordBuffer = texCoordBuffer; return }
+        if (outputW <= 0 || outputH <= 0) { cameraTexCoordBuffer = texCoordBuffer; cameraTexCoordsArray = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f); return }
         val camAspect = frameWidth.toFloat() / frameHeight.toFloat()
         val outAspect = outputW.toFloat() / outputH.toFloat()
         var u0 = 0f; var v0 = 0f; var u1 = 1f; var v1 = 1f
@@ -171,7 +176,8 @@ class FrameRenderer(private val context: Context) {
         }
         // Same corner order as textureCoords = [0,0, 1,0, 0,1, 1,1] above, just
         // with the cropped bounds substituted in for 0/1.
-        cameraTexCoordBuffer = makeBuffer(floatArrayOf(u0, v0, u1, v0, u0, v1, u1, v1))
+        cameraTexCoordsArray = floatArrayOf(u0, v0, u1, v0, u0, v1, u1, v1)
+        cameraTexCoordBuffer = makeBuffer(cameraTexCoordsArray)
     }
 
     // Caption/watermark textures come from an Android Canvas Bitmap uploaded via

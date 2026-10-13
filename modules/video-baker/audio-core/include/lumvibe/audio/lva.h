@@ -67,6 +67,19 @@ LVA_API int lva_process(const float* params, int paramCount,
                         lva_progress_cb cb, void* user,
                         float** outPcm, int* outFrames, int* outRate, int* outChannels);
 
+// STAGE C: the website's whole "Done" pipeline (js/create/proMix.js masterSong):
+//   lift quiet mic -> noise removal + light pitch correction -> studio vocal chain ->
+//   beat EQ pocket + ducking under the voice -> glue -> -14 LUFS master -> limiter.
+// One call, no parameters to tune (that is the point: same finished song as the website).
+// latencyMs = how late the voice was recorded compared with the beat (0 if unknown).
+// Returns 5 with lva_last_error() == "SILENT_VOICE" when nothing can be heard in the recording.
+// Output: interleaved STEREO float @ 48 kHz in [-1, 1]; free with lva_free().
+LVA_API int lva_master_song(float latencyMs,
+                            const float* voice, int voiceFrames, int voiceRate, int voiceChannels,
+                            const float* beat,  int beatFrames,  int beatRate,  int beatChannels,
+                            lva_progress_cb cb, void* user,
+                            float** outPcm, int* outFrames, int* outRate, int* outChannels);
+
 LVA_API void        lva_free(float* p);
 LVA_API const char* lva_last_error(void);
 LVA_API int         lva_param_count(void);

@@ -518,6 +518,7 @@ void EffectEngine::renderFrame() {
     if (!def) return;
     uint32_t program = compiledPrograms_[currentEffectId_];
     backend_->useProgram(program);
+    backend_->setUniformMat4(program, "uTexMatrix", texMatrix_);
     applyBindings(program, *def);
     evaluateTriggers(*def);
     if (freezeFrameAge_ >= 0.f) {

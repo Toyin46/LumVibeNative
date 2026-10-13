@@ -54,6 +54,27 @@ Java_com_lumvibe_videobaker_AudioStudioNative_nativeProcess(
   return env->NewDirectByteBuffer(out, (jlong)frames * ch * (jlong)sizeof(float));
 }
 
+// STAGE C: the website's whole mastering pipeline in one call (see lva_master_song in lva.h).
+JNIEXPORT jobject JNICALL
+Java_com_lumvibe_videobaker_AudioStudioNative_nativeMasterSong(
+    JNIEnv* env, jobject, jfloat latencyMs,
+    jshortArray voice, jint voiceSamples, jint voiceRate, jint voiceChannels,
+    jshortArray beat, jint beatSamples, jint beatRate, jint beatChannels) {
+
+  g_lastError.clear();
+  std::vector<float> v, b;
+  if (!shortsToFloat(env, voice, voiceSamples, v)) { g_lastError = "voice recording could not be read"; return nullptr; }
+  const bool haveBeat = shortsToFloat(env, beat, beatSamples, b);
+
+  float* out = nullptr; int frames = 0, rate = 0, ch = 0;
+  const int rc = lva_master_song(latencyMs,
+                                 v.data(), (int)(v.size() / (size_t)voiceChannels), voiceRate, voiceChannels,
+                                 haveBeat ? b.data() : nullptr, haveBeat ? (int)(b.size() / (size_t)beatChannels) : 0, beatRate, beatChannels,
+                                 nullptr, nullptr, &out, &frames, &rate, &ch);
+  if (rc != 0 || !out) { g_lastError = lva_last_error(); return nullptr; }
+  return env->NewDirectByteBuffer(out, (jlong)frames * ch * (jlong)sizeof(float));
+}
+
 JNIEXPORT void JNICALL
 Java_com_lumvibe_videobaker_AudioStudioNative_nativeRelease(JNIEnv* env, jobject, jobject buffer) {
   if (!buffer) return;

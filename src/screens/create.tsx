@@ -56,7 +56,7 @@ import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com
 import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
 // LumVibe Audio Engine (shared C++): noise removal, autotune, effects, beat mix, mastering
-import { bakeAudioStudio, paramsFromStudio } from 'modules/video-baker/audioStudio';
+import { bakeAudioStudio, paramsFromStudio, masterSong, SilentVoiceError } from 'modules/video-baker/audioStudio';
 import { Asset } from 'expo-asset';
 // ⚠️ Adjust the path above if create.tsx lives somewhere other than src/screens/ —
 // it must resolve to the modules/video-baker folder at your project root.
@@ -3007,7 +3007,7 @@ function MetronomePanel() {
 }
 
 function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
-  const [tab, setTab]               = useState<StudioTab>('record');
+  const [tab, setTab]               = useState<StudioTab>('beats');
   const [recActive, setRecActive]   = useState(false);
   const [recDur, setRecDur]         = useState(0);
   const [voiceUri, setVoiceUri]     = useState<string | null>(null);
@@ -3066,6 +3066,9 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
   const beatSnd  = useRef<CompatSound | null>(null);
   // last rendered preview, so tapping Preview again without changing anything is instant
   const previewCache = useRef<{ key: string; uri: string } | null>(null);
+  // WEBSITE PARITY: how late (ms) the beat became audible after recording started. The studio moves the
+  // voice earlier by this much so it lands exactly on the beat (same idea as the website's latencyMs).
+  const latencyMsRef = useRef(0);
   const atSnd    = useRef<CompatSound | null>(null);
   const mixVSnd  = useRef<CompatSound | null>(null);
   const mixBSnd  = useRef<CompatSound | null>(null);
@@ -3143,13 +3146,26 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
       });
       const recording = audioRecorderInstance;
       await recording.prepareToRecordAsync();
-      // STUDIO SYNC: restart the beat from 0 at the instant recording starts, so time 0 of the voice
-      // file == time 0 of the beat. The audio engine mixes them on that shared timeline.
-      if (selBeat && beatSnd.current) {
-        try { await beatSnd.current.setPositionAsync(0); await beatSnd.current.playAsync(); setPlayBeat(true); } catch {}
+      // WEBSITE PARITY: the beat plays while you sing and restarts from 0 right as recording starts.
+      // We measure how late it became audible so the studio can re-align your voice to it.
+      if (selBeat && !beatSnd.current) {
+        try {
+          const { sound } = await createCompatSound({ uri: selBeat.url }, { shouldPlay: false, isLooping: true, volume: 0.75 });
+          beatSnd.current = sound;
+        } catch {}
       }
+      latencyMsRef.current = 0;
       recording.record();
       recRef.current = recording;
+      const tRec = Date.now();
+      if (selBeat && beatSnd.current) {
+        try {
+          await beatSnd.current.setPositionAsync(0);
+          await beatSnd.current.playAsync();
+          setPlayBeat(true);
+          latencyMsRef.current = Math.max(0, Math.min(600, (Date.now() - tRec) + 40)); // +40 ms: typical wired-earphone output delay
+        } catch {}
+      }
       setRecActive(true);
       setRecDur(0);
       timerRef.current = setInterval(() => setRecDur(d => d + 1), 1000);
@@ -3166,9 +3182,11 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
     }
     try {
       await recRef.current.stop();
+      try { await beatSnd.current?.pauseAsync(); } catch {}
+      setPlayBeat(false);
       const uri = recRef.current.uri; recRef.current = null; setRecActive(false);
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-      if (uri) { setVoiceUri(uri); Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); Alert.alert('✅ Recorded!', 'Voice ready. Go to Effects tab to add pitch effects.'); }
+      if (uri) { setVoiceUri(uri); Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); Alert.alert('✅ Recorded!', 'Tap Done and the studio will make it sound professional.'); }
     } catch (e: any) { Alert.alert('Error', getFriendlyError(e)); }
   };
 
@@ -3297,22 +3315,24 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
       // effects, beat mixed in) with the audio engine, then play that one file.
       // Falls back to the old raw voice + separate beat playback if the engine is unavailable.
       let renderedUri: string | null = null;
-      if (voiceUri && voiceVol > 0) {
-        try {
-          const params = paramsFromStudio({ effect: selEffect, studio: studioEdit, autoTune, voiceVolume: voiceVol, beatVolume: beatVol });
-          const key = JSON.stringify([voiceUri, beatUri ?? null, params]);
-          if (previewCache.current?.key === key) {
-            renderedUri = previewCache.current.uri;
-          } else {
-            setBaking(true);   // shows the spinner while the song is mastered (a few seconds)
+      if (voiceUri) {
+        const key = JSON.stringify([voiceUri, beatUri ?? null, Math.round(latencyMsRef.current)]);
+        if (previewCache.current?.key === key) {
+          renderedUri = previewCache.current.uri;
+        } else {
+          setBaking(true);   // "Mastering your song..." while the studio works (a few seconds)
+          try {
+            let res;
             try {
-              const res = await bakeAudioStudio({ voiceUri, beatUri: beatUri ?? null, params });
-              renderedUri = res.uri;
-              previewCache.current = { key, uri: res.uri };
-            } finally { setBaking(false); }
-          }
-        } catch (e: any) {
-          console.warn('Studio preview render failed, playing raw voice + beat:', e);
+              res = await masterSong({ voiceUri, beatUri: beatUri ?? null, latencyMs: latencyMsRef.current });
+            } catch (e: any) {
+              if (e instanceof SilentVoiceError || !beatUri) throw e;
+              Alert.alert('Beat not mixed', "The beat couldn't be mixed in, so you'll hear your voice only.");
+              res = await masterSong({ voiceUri, beatUri: null, latencyMs: latencyMsRef.current });
+            }
+            renderedUri = res.uri;
+            previewCache.current = { key, uri: res.uri };
+          } finally { setBaking(false); }
         }
       }
 
@@ -3355,6 +3375,7 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
       try { await mixVSnd.current?.unloadAsync(); } catch {}
       try { await mixBSnd.current?.unloadAsync(); } catch {}
       mixVSnd.current = null; mixBSnd.current = null;
+      if (e?.name === 'SilentVoiceError') { Alert.alert('Studio', "We couldn't hear your voice in that recording. Check your microphone and record again."); return; }
       Alert.alert('⚠️ Mix Preview', getFriendlyError(e) + '\n\nThe beat preview needs internet. Your voice will still be saved.');
     }
   };
@@ -3371,27 +3392,28 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
       let beatForParent: string | null = selBeat?.url || null;
       let finalDuration = recDur;
 
-      // ONE call: noise removal → autotune → effects → mix with beat → mastering (shared C++ engine).
+      // WEBSITE PARITY: one studio pass (noise removal + pitch correction + studio vocal chain + beat ducking +
+      // streaming-loudness master) in the shared C++ engine - the same finished song as the website's Done button.
       if (voiceUri) {
         try {
-          const res = await bakeAudioStudio({
-            voiceUri,
-            beatUri: selBeat?.url ?? null,
-            params: paramsFromStudio({
-              effect: selEffect,
-              studio: studioEdit,
-              autoTune,
-              voiceVolume: voiceVol,
-              beatVolume: beatVol,
-              // latencyMs: 0,   // see README_AUDIO.md "Getting the voice exactly on the beat"
-            }),
-          });
-          finalVoiceUri = res.uri;                    // the finished song: voice + beat already mixed
+          let res;
+          try {
+            res = await masterSong({ voiceUri, beatUri: selBeat?.url ?? null, latencyMs: latencyMsRef.current });
+            beatForParent = null;                     // the beat is inside the song now - don't play it twice
+          } catch (e: any) {
+            if (e instanceof SilentVoiceError) {
+              Alert.alert('Studio', "We couldn't hear your voice in that recording. Check your microphone and record again.");
+              return;
+            }
+            if (!selBeat) throw e;
+            res = await masterSong({ voiceUri, beatUri: null, latencyMs: latencyMsRef.current });
+            Alert.alert('Studio', "The beat couldn't be mixed in, so it's added as background music instead.");
+          }
+          finalVoiceUri = res.uri;
           finalDuration = Math.max(1, Math.round(res.durationSec));
-          beatForParent = null;                       // the beat is inside the song now — don't play it twice
         } catch (e: any) {
-          console.warn('Audio Studio mix failed, using the raw voice:', e);
-          Alert.alert('Studio mix unavailable', (e?.message || 'Could not master the track') + '\n\nPosting your raw voice instead.');
+          Alert.alert('Studio', 'The studio could not finish your song: ' + (e?.message || 'unknown error') + '. Please try again.');
+          return;
         }
       }
 
@@ -3400,11 +3422,10 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
         beatUri: beatForParent,
         beatName: selBeat?.name || null,
         beatArtist: selBeat?.artist || null,
-        voiceVolume: voiceVol, beatVolume: beatVol,
-        effectName: selEffect.id !== 'none' ? selEffect.name : null,
-        effectId: selEffect.id !== 'none' ? selEffect.id : null,
-        effectReverb: selEffect.reverb, effectEcho: selEffect.echo, effectChorus: selEffect.chorus,
-        duration: finalDuration, autoTuneEnabled: autoTune,
+        voiceVolume: 1, beatVolume: 1,                    // same values the website's studio returns
+        effectName: 'Studio mix', effectId: 'studio',
+        effectReverb: 0, effectEcho: 0, effectChorus: false,
+        duration: finalDuration, autoTuneEnabled: true,
       });
     } finally {
       setBaking(false);
@@ -3414,11 +3435,17 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <View style={at.c}>
+        {baking && (
+          <View style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, zIndex: 50, elevation: 50, backgroundColor: 'rgba(0,0,0,0.78)', alignItems: 'center', justifyContent: 'center' }}>
+            <ActivityIndicator size="large" color="#00ff88" />
+            <Text style={{ color: '#fff', marginTop: 12, fontWeight: '700' }}>Mastering your song…</Text>
+          </View>
+        )}
         <View style={at.hdr}>
           <TouchableOpacity onPress={onClose} style={at.closeBtn}><Feather name="x" size={22} color="#fff" /></TouchableOpacity>
           <View style={{ alignItems: 'center' }}>
             <Text style={at.hTitle}>🎙️ Audio Studio</Text>
-            <Text style={at.hSub}>Voice & beat mixer</Text>
+            <Text style={at.hSub}>Pick a beat · sing · done</Text>
           </View>
           <TouchableOpacity style={[at.doneBtn, (!canDone || baking) && at.doneBtnOff]} onPress={done} disabled={!canDone || baking}>
             {baking
@@ -3431,28 +3458,27 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
         {/* Status bar */}
         <View style={at.sBar}>
           {[
-            { icon: 'mic', val: voiceUri, label: voiceUri ? '✓ Voice' : 'No voice', color: '#00ff88' },
             { icon: 'music', val: selBeat, label: selBeat?.name || 'No beat', color: '#ffd700' },
-            { icon: 'zap', val: selEffect.id !== 'none', label: selEffect.id !== 'none' ? selEffect.name : 'No effect', color: '#aa00ff' }
+            { icon: 'mic', val: voiceUri, label: voiceUri ? '✓ Voice' : 'No voice', color: '#00ff88' }
           ].map((it, i) => (
             <React.Fragment key={i}>
               <View style={at.sItem}>
                 <Feather name={it.icon as any} size={12} color={it.val ? it.color : '#444'} />
                 <Text style={[at.sTxt, { color: it.val ? it.color : '#444' }]} numberOfLines={1}>{it.label}</Text>
               </View>
-              {i < 2 && <View style={at.sDot} />}
+              {i < 1 && <View style={at.sDot} />}
             </React.Fragment>
           ))}
         </View>
 
         {/* Tab bar */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={at.tabScroll} contentContainerStyle={{ gap: 0 }}>
-          {(['record', 'beats', 'effects', 'mix', 'edit'] as StudioTab[]).map(t => (
+          {(['beats', 'record'] as StudioTab[]).map(t => (
             <TouchableOpacity key={t} style={[at.tab, tab === t && at.tabOn]} onPress={() => setTab(t)}>
               <Text style={at.tabEmoji}>
                 {t === 'record' ? '🎙️' : t === 'beats' ? '🎵' : t === 'effects' ? '⚡' : t === 'mix' ? '🎚️' : '✂️'}
               </Text>
-              <Text style={[at.tabLbl, tab === t && at.tabLblOn]}>{t.charAt(0).toUpperCase() + t.slice(1)}</Text>
+              <Text style={[at.tabLbl, tab === t && at.tabLblOn]}>{t === 'beats' ? '1 · Pick a beat' : '2 · Record'}</Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
@@ -3475,9 +3501,9 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
                   </LinearGradient>
                 </TouchableOpacity>
                 {voiceUri && (
-                  <TouchableOpacity style={at.pvBtn} onPress={toggleVoice}>
-                    <Feather name={playVoice ? 'pause' : 'play'} size={20} color="#00ff88" />
-                    <Text style={at.pvTxt}>{playVoice ? 'Stop' : 'Preview'}</Text>
+                  <TouchableOpacity style={at.pvBtn} onPress={previewMix}>
+                    <Feather name={playingMix ? 'pause' : 'play'} size={20} color="#00ff88" />
+                    <Text style={at.pvTxt}>{playingMix ? 'Stop' : 'Hear it'}</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -3499,12 +3525,14 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
                 </View>
                 <Feather name="chevron-right" size={15} color="#666" />
               </TouchableOpacity>
-              <View style={at.tip}><Text style={at.tipTxt}>💡 Record in a quiet room. Voice effects are temporarily preview-only while we finish a native audio pipeline.</Text></View>
+              <View style={at.tip}><Text style={at.tipTxt}>🎧 Plug in your earphones before tapping Record so the beat plays in your ears, not the mic.</Text></View>
+              <View style={at.tip}><Text style={at.tipTxt}>💡 Sing close to the mic in a quiet room. When you tap Done, the studio cleans the noise, tunes the pitch, polishes the tone, adds studio space, balances your voice with the beat and masters it.</Text></View>
 
               {/* ✅ NEW: Metronome / Count-in — professional studio click track */}
-              <MetronomePanel />
+              {/* metronome hidden: website Audio Studio has none */}
 
               {/* Auto-Tune card — honest about what happens: preview uses pitch correction, real effect is Cloudinary e_pitch at upload */}
+              {false && (
               <View style={at.atCard}>
                 <LinearGradient colors={autoTune ? ['#1a0a00', '#2a1200'] : ['#0d0d0d', '#141414']} style={at.atGrad}>
                   <View style={at.atHdr}>
@@ -3549,6 +3577,7 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
                   )}
                 </LinearGradient>
               </View>
+              )}
             </View>
           )}
 
@@ -3561,11 +3590,11 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
               <View style={at.beatSrcRow}>
                 <TouchableOpacity style={[at.beatSrcBtn, beatTab === 'search' && at.beatSrcBtnOn]} onPress={() => { setBeatTab('search'); handleBeatSearch(beatSearch, beatGenre, 1); }}>
                   <Feather name="search" size={13} color={beatTab === 'search' ? '#00ff88' : '#666'} />
-                  <Text style={[at.beatSrcTxt, beatTab === 'search' && { color: '#00ff88' }]}>Search Online</Text>
+                  <Text style={[at.beatSrcTxt, beatTab === 'search' && { color: '#00ff88' }]}>Free beats</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={[at.beatSrcBtn, beatTab === 'custom' && at.beatSrcBtnOn]} onPress={() => setBeatTab('custom')}>
                   <Feather name="upload" size={13} color={beatTab === 'custom' ? '#aa00ff' : '#666'} />
-                  <Text style={[at.beatSrcTxt, beatTab === 'custom' && { color: '#aa00ff' }]}>My Beats</Text>
+                  <Text style={[at.beatSrcTxt, beatTab === 'custom' && { color: '#aa00ff' }]}>From my phone</Text>
                 </TouchableOpacity>
               </View>
 
@@ -3683,6 +3712,11 @@ function AudioStudio({ visible, onClose, onDone }: AudioStudioProps) {
                     </View>
                   )}
                 </>
+              )}
+              {selBeat && (
+                <TouchableOpacity style={[at.loadMore, { marginTop: 14, borderColor: '#00ff88' }]} onPress={() => setTab('record')}>
+                  <Text style={[at.loadMoreTxt, { color: '#00ff88', fontWeight: '800' }]}>Next — record your voice ›</Text>
+                </TouchableOpacity>
               )}
             </View>
           )}
@@ -6766,7 +6800,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 )}
                 {studioEffectId && studioEffectId !== 'none' && (
                   <Text style={{ color: '#aa00ff', fontSize: 10, marginTop: 2 }}>
-                    Effect: {VOICE_EFFECTS.find(e => e.id === studioEffectId)?.name}
+                    Effect: {(studioEffectId === 'studio' ? 'Studio mix' : VOICE_EFFECTS.find(e => e.id === studioEffectId)?.name)}
                   </Text>
                 )}
               </View>
@@ -7111,7 +7145,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               <Ionicons name="mic" size={14} color="#00ff88" />
               <Text style={[ms.musicActiveName, { color: '#00ff88' }]}>Studio voice ready</Text>
               {studioEffectId && (
-                <Text style={ms.musicActiveArtist}>· {VOICE_EFFECTS.find(e => e.id === studioEffectId)?.name}</Text>
+                <Text style={ms.musicActiveArtist}>· {(studioEffectId === 'studio' ? 'Studio mix' : VOICE_EFFECTS.find(e => e.id === studioEffectId)?.name)}</Text>
               )}
             </View>
           )}

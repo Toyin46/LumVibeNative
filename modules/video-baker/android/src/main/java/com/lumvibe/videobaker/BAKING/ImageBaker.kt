@@ -77,9 +77,16 @@ class ImageBaker {
         val height = sourceBitmap.height
         val selectedEffect = VisualEffect.fromKey(options.effect)
 
-        val needsFace = EffectRequirements.needsFaceTracker(selectedEffect)
-        val needsHand = EffectRequirements.needsHandTracker(selectedEffect)
-        val needsSeg = EffectRequirements.needsSegmentation(selectedEffect)
+        // STAGE B: effects the C++ engine knows are baked by the engine. Trackers are created for
+        // the union of old + engine needs so the old renderer still works if the engine fails.
+        EngineManifest.ensureLoaded(context)
+        val engineId0: String? = EngineManifest.engineIdFor(options.effect)
+        val engineReq: Set<String> = if (engineId0 != null) EngineManifest.requires(engineId0) else emptySet()
+        val needsFace = EffectRequirements.needsFaceTracker(selectedEffect) || "face" in engineReq
+        val needsHand = EffectRequirements.needsHandTracker(selectedEffect) || "hand" in engineReq
+        val needsSeg = EffectRequirements.needsSegmentation(selectedEffect) || "segmentation" in engineReq
+        val liveFeeder = LiveSignalFeeder(staleAfterMs = Long.MAX_VALUE)
+        var engineBridge: LumVibeEngineBridge? = null
 
         val faceTracker = if (needsFace) FaceTracker(context) else null
         val handTracker = if (needsHand) HandTracker(context) else null
@@ -134,19 +141,34 @@ class ImageBaker {
             val handResult = handTracker?.detect(sourceBitmap, 0L)
             val handLandmarksList = handResult?.landmarks()
 
+            // STAGE B: build the engine on this offscreen context (falls back to the old renderer on any failure)
+            if (engineId0 != null) {
+                try {
+                    val b = LumVibeEngineBridge(context, "effects.manifest.json", shared = true)
+                    b.setCameraTexture(oesTexId)
+                    b.setFrameSize(width, height)
+                    if (b.setEffect(engineId0)) engineBridge = b else b.release()
+                } catch (t: Throwable) {
+                    android.util.Log.e("ImageBaker", "engine setup failed for $engineId0 - using old renderer", t)
+                    engineBridge = null
+                }
+            }
+            val legacyEffect = if (engineBridge != null) VisualEffect.NONE else selectedEffect
+
             renderer.brightness = options.brightness
             renderer.contrast = options.contrast
             renderer.saturation = options.saturation
             // Set before setEffect() — see VideoTranscoder.kt's identical note.
             renderer.fireVideoPath = options.fireVideoPath
-            renderer.setEffect(selectedEffect)
+            renderer.setEffect(legacyEffect)
             renderer.effectIntensity = options.effectIntensity
 
-            EffectRequirements.applyStaticFrame(renderer, selectedEffect, faceTracker, faceResult, handTracker, handLandmarksList)
+            EffectRequirements.applyStaticFrame(renderer, legacyEffect, faceTracker, faceResult, handTracker, handLandmarksList)
 
             if (needsSeg && segmentationTracker != null) {
                 val mask = segmentationTracker.maskBitmap(sourceBitmap, 0L)
                 if (mask != null) {
+                    if (engineBridge != null) liveFeeder.uploadMask(mask) // STAGE B
                     renderer.uploadSecondaryTexture(mask)
                     mask.recycle()
                 }
@@ -164,7 +186,19 @@ class ImageBaker {
                 }
             }
 
-            renderer.drawEffectFrame(oesTexId, texMatrix, 0f)
+            val eng = engineBridge
+            if (eng != null) {
+                // STAGE B: one engine frame from this photo's single detection result
+                liveFeeder.onFace(faceResult)
+                liveFeeder.onHands(handResult)
+                liveFeeder.frameAspect = width.toFloat() / height.coerceAtLeast(1)
+                eng.setTexMatrix(texMatrix)
+                liveFeeder.push(eng, 0f, 1f / 30f, 0f, 0L)
+                GLES20.glViewport(0, 0, width, height)
+                eng.renderFrame()
+            } else {
+                renderer.drawEffectFrame(oesTexId, texMatrix, 0f)
+            }
 
             if (!options.captionText.isNullOrBlank()) {
                 val capTexId = OverlayBuilder.buildCaptionTexture(width, height, options.captionText)
@@ -203,6 +237,8 @@ class ImageBaker {
             // renderer/GL resources first (still need a current EGL context to
             // delete GL objects cleanly), then the EGL context itself, then
             // plain Android objects that don't depend on GL being current.
+            engineBridge?.release() // STAGE B
+            liveFeeder.release()
             renderer?.release()
             pbufferSurface?.let { eglCore?.releaseSurface(it) }
             eglCore?.release()

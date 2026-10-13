@@ -36,6 +36,13 @@ public:
     virtual void bindCameraTexture(uint32_t program, uint32_t externalTextureId) = 0;
     virtual uint32_t loadTextureAsset(const std::string& path) = 0;
     virtual void drawFullscreenQuad() = 0;
+    // STAGE A FIX: the camera's SurfaceTexture transform (rotation/mirror) must reach the
+    // vertex shader's `uTexMatrix`; the engine never set it, so every effect sampled one texel.
+    // Default no-op keeps the iOS/Metal and Web backends compiling unchanged.
+    virtual void setUniformMat4(uint32_t /*program*/, const std::string& /*name*/, const float* /*m16*/) {}
+    // Centre-crop texture coordinates for the camera quad (4 corners, s,t each) so the live
+    // preview fills the screen without stretching, same as the legacy FrameRenderer.
+    virtual void setCameraTexCoords(const float* /*uv8*/) {}
 };
 
 // Direct port of ParticleSystem.kt — same physics, same MAX_PARTICLES
@@ -100,6 +107,12 @@ public:
     // without declaring it as an explicit binding.
     void setCameraTexture(uint32_t externalTextureId) { cameraTextureId_ = externalTextureId; }
 
+    // STAGE A: SurfaceTexture.getTransformMatrix() (16 floats, column-major) — applied to the
+    // `uTexMatrix` uniform in every renderFrame(). Defaults to identity.
+    void setTexMatrix(const float* m16) { if (m16) for (int i = 0; i < 16; ++i) texMatrix_[i] = m16[i]; }
+    // STAGE A: 8 floats (4 corners x s,t), forwarded to the backend's quad.
+    void setCameraTexCoords(const float* uv8) { if (backend_ && uv8) backend_->setCameraTexCoords(uv8); }
+
     // Runs the currently-selected effect: binds its program, resolves
     // every declared binding against the current signals, evaluates
     // triggers, steps any particle systems, and draws.
@@ -122,6 +135,7 @@ public:
     void registerSubsystem(const std::string& name);
 
 private:
+    float texMatrix_[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     std::shared_ptr<IRenderBackend> backend_;
     std::vector<EffectDefinitionNative> effects_;
     std::unordered_map<std::string, bool> availableSubsystems_;

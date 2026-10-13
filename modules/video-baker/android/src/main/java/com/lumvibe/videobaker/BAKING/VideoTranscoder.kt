@@ -140,7 +140,11 @@ class VideoTranscoder {
         // custom setter in FrameRenderer.kt also handles this if ever set
         // out of order, but this is the natural, intended order here).
         renderer.fireVideoPath = options.fireVideoPath
-        renderer.setEffect(VisualEffect.fromKey(options.effect))
+        // STAGE B: effects the C++ engine knows are baked by the engine (same shaders as the
+        // live preview and the website). The old renderer stays idle for them.
+        EngineManifest.ensureLoaded(context)
+        val engineId0: String? = EngineManifest.engineIdFor(options.effect)
+        renderer.setEffect(if (engineId0 != null) VisualEffect.NONE else VisualEffect.fromKey(options.effect))
 
         val captionTextureId = OverlayBuilder.buildCaptionTexture(width, height, options.captionText)
         val logoTexture = if (options.watermarkPngPath != null && options.watermarkUsername != null) {
@@ -194,8 +198,27 @@ class VideoTranscoder {
         var decoderDone = false
         var encoderDone = false
         val texMatrix = FloatArray(16)
-        val selectedEffect = VisualEffect.fromKey(options.effect)
-        val hasEffect = selectedEffect != VisualEffect.NONE
+
+        // STAGE B: build the engine on this (encoder) EGL context. Falls back to the old renderer
+        // if anything about the engine fails, so a bake never dies because of it.
+        val liveFeeder = LiveSignalFeeder(staleAfterMs = Long.MAX_VALUE)
+        val engineBridge: LumVibeEngineBridge? = if (engineId0 != null) {
+            try {
+                val b = LumVibeEngineBridge(context, "effects.manifest.json", shared = true)
+                b.setCameraTexture(decoderTextureId)
+                b.setFrameSize(width, height)
+                if (b.setEffect(engineId0)) b else { b.release(); null }
+            } catch (t: Throwable) {
+                android.util.Log.e("VideoTranscoder", "engine setup failed for $engineId0 - using old renderer", t)
+                null
+            }
+        } else null
+        if (engineId0 != null && engineBridge == null) renderer.setEffect(VisualEffect.fromKey(options.effect))
+        val engineReq: Set<String> = if (engineBridge != null) EngineManifest.requires(engineId0!!) else emptySet()
+        val engineNeedsMotion = engineBridge != null && EngineManifest.needsMotion(engineId0!!)
+
+        val selectedEffect = if (engineBridge != null) VisualEffect.NONE else VisualEffect.fromKey(options.effect)
+        val hasEffect = selectedEffect != VisualEffect.NONE || engineBridge != null
 
         // ---- Which per-frame data source does the selected effect need? ----
         // Generic dispatch replaces the old MOOD_RING-only hardcoded branch, so
@@ -227,12 +250,12 @@ class VideoTranscoder {
 
         val needsFaceTracker = selectedEffect in faceScoreEffects || selectedEffect in facePoseEffects ||
             selectedEffect in faceBoxEffects || selectedEffect in irisEffects || selectedEffect in blinkEffects ||
-            selectedEffect in mouthEffects || selectedEffect in faceLandmarkEffects
-        val needsHandTracker = selectedEffect in handGestureEffects
-        val needsSegmentation = selectedEffect in segmentationAudioEffects || selectedEffect in segmentationOnlyEffects
+            selectedEffect in mouthEffects || selectedEffect in faceLandmarkEffects || "face" in engineReq
+        val needsHandTracker = selectedEffect in handGestureEffects || "hand" in engineReq
+        val needsSegmentation = selectedEffect in segmentationAudioEffects || selectedEffect in segmentationOnlyEffects || "segmentation" in engineReq
         val needsAmplitude = selectedEffect in audioScoreEffects || selectedEffect in silenceEffects ||
-            selectedEffect in segmentationAudioEffects || selectedEffect in faceBoxEffects
-        val needsFrameReadback = needsFaceTracker || needsHandTracker || needsSegmentation || selectedEffect in stillnessEffects || selectedEffect in motionEffects
+            selectedEffect in segmentationAudioEffects || selectedEffect in faceBoxEffects || "audio" in engineReq
+        val needsFrameReadback = needsFaceTracker || needsHandTracker || needsSegmentation || selectedEffect in stillnessEffects || selectedEffect in motionEffects || engineNeedsMotion
 
         if (selectedEffect == VisualEffect.HAND_PORTAL && options.portalScenePngPath == null) {
             throw IllegalArgumentException("VisualEffect.HAND_PORTAL requires options.portalScenePngPath")
@@ -255,6 +278,18 @@ class VideoTranscoder {
         // when an audio-reactive effect is actually selected.
         val audioReader: AudioAmplitudeReader? =
             if (needsAmplitude) AudioAmplitudeReader.analyze(inputPath) else null
+
+        // STAGE B: one engine frame. Time comes from the video's own timeline (not wall clock).
+        var lastEngineSec = -1f
+        fun drawEngineFrame(eng: LumVibeEngineBridge, elapsedSec: Float) {
+            val dt = if (lastEngineSec < 0f) 1f / 30f else (elapsedSec - lastEngineSec).coerceIn(0.001f, 0.1f)
+            lastEngineSec = elapsedSec
+            val amp = audioReader?.amplitudeAt(elapsedSec) ?: 0f
+            eng.setTexMatrix(texMatrix)
+            liveFeeder.push(eng, elapsedSec, dt, amp, (elapsedSec * 1000f).toLong())
+            GLES20.glViewport(0, 0, width, height)
+            eng.renderFrame()
+        }
 
         // HAND_PORTAL's scene image is static  -  loaded and uploaded ONCE, before the
         // loop, unlike DEPTH_BLOOM/SPLIT_PRISM's mask which is re-uploaded every frame.
@@ -526,6 +561,7 @@ class VideoTranscoder {
 
                                 if (needsFaceTracker && faceTracker != null) {
                                     val result = faceTracker.detect(frameBitmap, timestampMs)
+                                    if (engineBridge != null) liveFeeder.onFace(result) // STAGE B
                                     when (selectedEffect) {
                                         VisualEffect.MOOD_RING -> {
                                             val smile = if (result != null) maxOf(
@@ -812,6 +848,7 @@ class VideoTranscoder {
 
                                 if (needsHandTracker && handTracker != null) {
                                     val result = handTracker.detect(frameBitmap, timestampMs)
+                                    if (engineBridge != null) liveFeeder.onHands(result) // STAGE B
                                     val hands = result?.landmarks()
                                     when (selectedEffect) {
                                         VisualEffect.HAND_PORTAL -> {
@@ -1009,6 +1046,7 @@ class VideoTranscoder {
                                 if (needsSegmentation && segmentationTracker != null) {
                                     val mask = segmentationTracker.maskBitmap(frameBitmap, timestampMs)
                                     if (mask != null) {
+                                        if (engineBridge != null) liveFeeder.uploadMask(mask) // STAGE B
                                         renderer.uploadSecondaryTexture(mask)
                                         mask.recycle()
                                     }
@@ -1114,6 +1152,17 @@ class VideoTranscoder {
                                     lastAvgLuma = luma
                                 }
 
+                                if (engineBridge != null) { // STAGE B
+                                    liveFeeder.frameAspect = frameBitmap.width.toFloat() / frameBitmap.height.coerceAtLeast(1)
+                                    if (engineNeedsMotion) {
+                                        val luma = averageLuma(frameBitmap)
+                                        val delta = if (lastAvgLuma != null) kotlin.math.abs(luma - lastAvgLuma!!) else 0f
+                                        if (delta > 0.01f) stillnessAccumSec = 0f else stillnessAccumSec += 1f / 30f
+                                        liveFeeder.stillnessSeconds = stillnessAccumSec
+                                        liveFeeder.motionMagnitude = (delta / 0.05f).coerceIn(0f, 1f)
+                                        lastAvgLuma = luma
+                                    }
+                                }
                                 frameBitmap.recycle()
 
                                 // VOICE_HALO and DEPTH_BLOOM need amplitude ON TOP OF the
@@ -1129,13 +1178,17 @@ class VideoTranscoder {
                                 // Redrawing through drawEffectFrame here would incorrectly apply
                                 // the freeze program (which expects a captured texture, not the
                                 // live decoder texture) even on non-frozen frames  -  skip it.
-                                if (selectedEffect !in blinkEffects) {
+                                if (engineBridge != null) {
+                                    drawEngineFrame(engineBridge, elapsedSec) // STAGE B
+                                } else if (selectedEffect !in blinkEffects) {
                                     renderer.drawEffectFrame(decoderTextureId, texMatrix, elapsedSec)
                                 }
                             } else if (audioReader != null && (selectedEffect in audioScoreEffects || selectedEffect in silenceEffects)) {
                                 val amplitude = audioReader.amplitudeAt(elapsedSec)
                                 renderer.effectIntensity = if (selectedEffect in silenceEffects) 1f - amplitude else amplitude
                                 renderer.drawEffectFrame(decoderTextureId, texMatrix, elapsedSec)
+                            } else if (engineBridge != null) {
+                                drawEngineFrame(engineBridge, elapsedSec) // STAGE B (effects that need no readback, e.g. beat_reactor)
                             } else {
                                 renderer.drawEffectFrame(decoderTextureId, texMatrix, elapsedSec)
                             }
@@ -1289,6 +1342,8 @@ class VideoTranscoder {
         muxer.release()
         decoder.stop(); decoder.release()
         encoder.stop(); encoder.release()
+        engineBridge?.release() // STAGE B
+        liveFeeder.release()
         renderer.release()
         faceTracker?.close()
         handTracker?.close()

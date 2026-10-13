@@ -70,6 +70,8 @@ class LiveEffectPreviewModule : Module() {
                     view.onFrameCapturedListener = { data -> sendEvent("onFrameCaptured", data) }
                 }
                 view.setEffect(VisualEffect.fromKey(key))
+                // STAGE A: effects the C++ engine knows are drawn by the engine instead.
+                view.setEngineEffectKey(key)
             }
 
             // "front" | "back"  -  same facing vocabulary create.tsx already uses

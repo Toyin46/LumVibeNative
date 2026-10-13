@@ -14,6 +14,14 @@ object AudioStudioNative {
         beat: ShortArray?, beatSamples: Int, beatRate: Int, beatChannels: Int,
     ): ByteBuffer?
 
+    /** STAGE C: the website's whole "Done" pipeline (clean + tune + studio chain + beat ducking + -14 LUFS master).
+     *  Same return contract as nativeProcess. On silence the error text is exactly "SILENT_VOICE". */
+    external fun nativeMasterSong(
+        latencyMs: Float,
+        voice: ShortArray, voiceSamples: Int, voiceRate: Int, voiceChannels: Int,
+        beat: ShortArray?, beatSamples: Int, beatRate: Int, beatChannels: Int,
+    ): ByteBuffer?
+
     external fun nativeRelease(buffer: ByteBuffer)
     external fun nativeLastError(): String
     external fun nativeHasRnnoise(): Boolean

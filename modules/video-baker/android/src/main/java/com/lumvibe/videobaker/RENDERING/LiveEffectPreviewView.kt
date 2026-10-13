@@ -514,6 +514,9 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             setOnFrameAvailableListener({ drawFrame() }, renderHandler)
         }
         cameraSurface = Surface(cameraSurfaceTexture)
+        camW = camSize.width
+        camH = camSize.height
+        applyEngineEffect() // STAGE A: (re)create the engine for the current effect, if it is an engine effect
 
         // NEW: mint a fresh generation for the camera this cycle is about to
         // open, and pass it through - openCamera()'s async callbacks stamp
@@ -549,6 +552,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             GlUtil.deleteTexture(cameraTexId)
             cameraTexId = -1
         }
+        releaseEngine() // STAGE A
         eglSurface?.let { eglCore?.releaseSurface(it) }
         eglSurface = null
         renderer = null
@@ -826,6 +830,111 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         r.particleCount = u.count
     }
 
+    // =====================================================================
+    // STAGE A: C++ EFFECT ENGINE PATH (shared EGL context)
+    // Effects the engine knows (see EngineManifest) are drawn by the same C++ shaders the website
+    // uses; everything else keeps using the old FrameRenderer path untouched.
+    // =====================================================================
+    private var engine: LumVibeEngineBridge? = null
+    private var engineEffectId: String? = null
+    private var engineTrackingNeeded = false
+    @Volatile private var pendingEngineEffectId: String? = null
+    private val liveFeeder = LiveSignalFeeder()
+    private var camW = 1
+    private var camH = 1
+    private var lastEngineFrameNs = 0L
+
+    /** Called from the module with the same key create.tsx sends as `effect`. */
+    fun setEngineEffectKey(rawKey: String?) {
+        EngineManifest.ensureLoaded(context)
+        pendingEngineEffectId = EngineManifest.engineIdFor(rawKey)
+        renderHandler?.post { applyEngineEffect() }
+    }
+
+    /** Render thread only. Safe to call before the GL objects exist - setupEgl() calls it again. */
+    private fun applyEngineEffect() {
+        val want = pendingEngineEffectId
+        val r = renderer
+        val core = eglCore
+        val surf = eglSurface
+        if (want == null || r == null || core == null || surf == null || cameraTexId == -1) {
+            engineEffectId = null
+            engineTrackingNeeded = false
+            return
+        }
+        try {
+            core.makeCurrent(surf)
+            if (engine == null) {
+                engine = LumVibeEngineBridge(context, "effects.manifest.json", shared = true).also {
+                    it.setCameraTexture(cameraTexId)
+                    it.setFrameSize(camW, camH)
+                }
+            }
+            val eng = engine!!
+            if (eng.setEffect(want)) {
+                engineEffectId = want
+                r.setEffect(VisualEffect.NONE) // old renderer stays idle while the engine draws
+                liveFeeder.frameAspect = surfaceW.toFloat() / surfaceH.coerceAtLeast(1)
+                val req = EngineManifest.requires(want)
+                engineTrackingNeeded = "face" in req || "hand" in req || "segmentation" in req || EngineManifest.needsMotion(want)
+                android.util.Log.i("LiveEffectPreview", "engine effect active: $want (requires=$req)")
+            } else {
+                android.util.Log.w("LiveEffectPreview", "engine rejected effect $want - falling back to old renderer")
+                engineEffectId = null
+                engineTrackingNeeded = false
+            }
+        } catch (t: Throwable) {
+            android.util.Log.e("LiveEffectPreview", "engine setup failed for $want - falling back to old renderer", t)
+            engineEffectId = null
+            engineTrackingNeeded = false
+            try { engine?.release() } catch (_: Throwable) {}
+            engine = null
+        }
+    }
+
+    private fun releaseEngine() {
+        try { engine?.release() } catch (_: Throwable) {}
+        engine = null
+        engineEffectId = null
+        engineTrackingNeeded = false
+        liveFeeder.release()
+    }
+
+    /**
+     * Draws one frame with the C++ engine into whatever framebuffer is currently bound.
+     * [display] = true for the on-screen pass (also feeds new signals); false for the
+     * recording pass (re-draws with the signals already pushed this frame).
+     */
+    private fun drawWithEngine(r: FrameRenderer, elapsedSec: Float, amp: Float, display: Boolean) {
+        val eng = engine
+        if (eng == null) { r.drawVideoFrame(cameraTexId, texMatrix); return }
+        try {
+            eng.setTexMatrix(texMatrix)
+            eng.setCameraTexCoords(r.cameraTexCoords())
+            if (display) {
+                // MediaPipe should look at the RAW camera image, not at the effect's own output
+                // (demon eyes drawn over your eyes would otherwise confuse the eye tracking).
+                if (engineTrackingNeeded &&
+                    System.currentTimeMillis() - lastTrackingSubmitMs >= trackingIntervalMs) {
+                    r.drawVideoFrame(cameraTexId, texMatrix)
+                    maybeSubmitForTracking()
+                }
+                val nowNs = System.nanoTime()
+                val dt = if (lastEngineFrameNs == 0L) 0.033f
+                         else ((nowNs - lastEngineFrameNs) / 1_000_000_000f).coerceIn(0.001f, 0.1f)
+                lastEngineFrameNs = nowNs
+                liveFeeder.push(eng, elapsedSec, dt, amp)
+            }
+            GLES20.glViewport(0, 0, surfaceW, surfaceH)
+            eng.renderFrame()
+        } catch (t: Throwable) {
+            android.util.Log.e("LiveEffectPreview", "engine draw failed - falling back to old renderer", t)
+            engineEffectId = null
+            engineTrackingNeeded = false
+            r.drawVideoFrame(cameraTexId, texMatrix)
+        }
+    }
+
     private fun drawFrame() {
         val eglC = eglCore ?: return
         val eglS = eglSurface ?: return
@@ -920,6 +1029,8 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             // comment) — this mirrors that same guard here.
             if (r.currentEffect == VisualEffect.BLINK_FREEZE) {
                 r.drawVideoFrame(cameraTexId, texMatrix)
+            } else if (engineEffectId != null) {
+                drawWithEngine(r, elapsedSec, amp, display = true)
             } else {
                 r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
             }
@@ -1006,7 +1117,8 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val encSurface = encoderEglSurface
         if (rec != null && rec.isRecording && encSurface != null) {
             eglC.makeCurrent(encSurface)
-            r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
+            if (engineEffectId != null) drawWithEngine(r, elapsedSec, amp, display = false)
+            else r.drawEffectFrame(cameraTexId, texMatrix, elapsedSec)
             eglC.setPresentationTime(encSurface, System.nanoTime())
             eglC.swapBuffers(encSurface)
             rec.drainVideo(endOfStream = false)
@@ -1069,10 +1181,12 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // actually needs  -  same gating VideoTranscoder already does correctly
         // for the bake path, just missing here until now.
         val effect = renderer?.currentEffect ?: VisualEffect.NONE
-        val wantsFace = EffectRequirements.needsFaceTracker(effect)
-        val wantsHand = EffectRequirements.needsHandTracker(effect)
-        val wantsSeg = EffectRequirements.needsSegmentation(effect)
-        val wantsMotion = effect in stillnessEffects || effect in motionEffects
+        val engId = engineEffectId // STAGE A: engine effects declare their needs in the manifest
+        val engReq = if (engId != null) EngineManifest.requires(engId) else emptySet()
+        val wantsFace = if (engId != null) "face" in engReq else EffectRequirements.needsFaceTracker(effect)
+        val wantsHand = if (engId != null) "hand" in engReq else EffectRequirements.needsHandTracker(effect)
+        val wantsSeg = if (engId != null) "segmentation" in engReq else EffectRequirements.needsSegmentation(effect)
+        val wantsMotion = if (engId != null) EngineManifest.needsMotion(engId) else (effect in stillnessEffects || effect in motionEffects)
         if (!wantsFace && !wantsHand && !wantsSeg && !wantsMotion) return
 
         val now = System.currentTimeMillis()
@@ -1112,7 +1226,12 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             val luma = averageLuma(bitmap)
             val frameDur = trackingIntervalMs / 1000f
             val delta = if (lastAvgLuma != null) kotlin.math.abs(luma - lastAvgLuma!!) else 0f
-            if (effect in stillnessEffects) {
+            if (engId != null) {
+                // STAGE A: feed both motion + stillness to the engine; each effect reads what it declared
+                if (delta > 0.01f) stillnessAccumSec = 0f else stillnessAccumSec += frameDur
+                liveFeeder.stillnessSeconds = stillnessAccumSec
+                liveFeeder.motionMagnitude = (delta / 0.05f).coerceIn(0f, 1f)
+            } else if (effect in stillnessEffects) {
                 if (delta > 0.01f) stillnessAccumSec = 0f else stillnessAccumSec += frameDur
                 renderer?.effectIntensity = (stillnessAccumSec / 3f).coerceIn(0f, 1f)
             } else {
@@ -1209,6 +1328,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     }
 
     private fun onFaceResult(result: FaceLandmarkerResult) {
+        liveFeeder.onFace(result) // STAGE A (also stores "no face" results so the engine sees face loss)
         val r = renderer ?: return
         faceResultCount++
         if (result.faceLandmarks().isEmpty()) return
@@ -1603,6 +1723,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     }
 
     private fun onHandResult(result: HandLandmarkerResult) {
+        liveFeeder.onHands(result) // STAGE A
         val r = renderer ?: return
         if (result.landmarks().isEmpty()) return
         val hand = result.landmarks()[0]
@@ -1897,6 +2018,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // callback directly.
         renderHandler?.post {
             r.uploadSecondaryTexture(mask)
+            if (engineEffectId != null) liveFeeder.uploadMask(mask) // STAGE A
             mask.recycle()
         }
     }
@@ -1931,6 +2053,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             cameraSurface = null
             cameraSurfaceTexture?.release()
             cameraSurfaceTexture = null
+            releaseEngine() // STAGE A
             eglSurface?.let { eglCore?.releaseSurface(it) }
             eglSurface = null
             eglCore?.release()

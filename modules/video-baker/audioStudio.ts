@@ -120,6 +120,8 @@ export function paramsFromStudio(o: BakeOptions): number[] {
 type NativeAudioStudio = {
   bakeAudioStudio(voicePath: string, beatPath: string | null, params: number[], outputPath: string):
     Promise<{ uri: string; durationSec: number; elapsedMs: number }>;
+  masterStudioSong(voicePath: string, beatPath: string | null, latencyMs: number, outputPath: string):
+    Promise<{ uri: string; durationSec: number; elapsedMs: number }>;
   hasNoiseModel(): boolean;
 };
 let native: NativeAudioStudio | null = null;
@@ -172,4 +174,31 @@ export async function bakeAudioStudio(args: {
   if (beatPath) params[LVA_PARAM.CANCEL_BLEED] = 1;           // beat + voice: take the beat's leak out of the mic recording first (same as the website)
   const out = `${FileSystem.cacheDirectory}lumvibe_song_${Date.now()}.m4a`;
   return getNative().bakeAudioStudio(stripFile(args.voiceUri), beatPath, params, stripFile(out));
+}
+
+/** Thrown by masterSong() when nothing can be heard in the recording (same case as the website's SILENT_VOICE). */
+export class SilentVoiceError extends Error {
+  constructor() { super("We couldn't hear your voice in that recording."); this.name = 'SilentVoiceError'; }
+}
+
+/**
+ * STAGE C — the website's "Done" button, exactly: noise removal + light pitch correction, studio
+ * vocal chain, beat EQ pocket + ducking under your voice, glue, -14 LUFS master, limiter.
+ * No settings: it is the same one-shot "pick a beat, sing, done" result as the website.
+ * `latencyMs` = how late the voice was recorded compared with the beat (0 if unknown).
+ * Resolves with a finished .m4a (AAC) in the cache folder. Rejects with SilentVoiceError on silence.
+ */
+export async function masterSong(args: {
+  voiceUri: string;
+  beatUri?: string | null;
+  latencyMs?: number;
+}): Promise<BakeResult> {
+  const beatPath = args.beatUri ? await ensureLocalFile(args.beatUri) : null;
+  const out = `${FileSystem.cacheDirectory}lumvibe_song_${Date.now()}.m4a`;
+  try {
+    return await getNative().masterStudioSong(stripFile(args.voiceUri), beatPath, args.latencyMs ?? 0, stripFile(out));
+  } catch (e: any) {
+    if (e?.code === 'ERR_SILENT_VOICE' || /SILENT_VOICE|couldn't hear your voice/i.test(String(e?.message ?? ''))) throw new SilentVoiceError();
+    throw e;
+  }
 }

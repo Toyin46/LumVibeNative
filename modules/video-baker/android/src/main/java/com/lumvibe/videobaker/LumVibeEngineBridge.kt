@@ -21,7 +21,10 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
  * fingerStates) — updateSignals() below now calls those helpers directly,
  * matching how VideoTranscoder.kt already uses your trackers.
  */
-class LumVibeEngineBridge(context: android.content.Context, manifestAssetPath: String) {
+// STAGE A: `shared = true` makes the engine draw into the CALLER's current EGL context
+// (LiveEffectPreviewView's own context) instead of creating a private one. In that mode every
+// call must be made on the view's render thread with that context current.
+class LumVibeEngineBridge(context: android.content.Context, manifestAssetPath: String, shared: Boolean = false) {
 
     private var handle: Long = 0L
     private var lastYawDegrees: Float = 0f
@@ -31,7 +34,7 @@ class LumVibeEngineBridge(context: android.content.Context, manifestAssetPath: S
         context.assets.open(manifestAssetPath).use { input ->
             manifestFile.outputStream().use { output -> input.copyTo(output) }
         }
-        handle = nativeCreate(manifestFile.absolutePath)
+        handle = if (shared) nativeCreateShared(manifestFile.absolutePath) else nativeCreate(manifestFile.absolutePath)
         check(handle != 0L) { "Failed to load effects manifest — check compile-manifest.ts output" }
     }
 
@@ -39,6 +42,32 @@ class LumVibeEngineBridge(context: android.content.Context, manifestAssetPath: S
     fun attachOffscreenSurface(width: Int, height: Int) = nativeAttachOffscreenSurface(handle, width, height)
     fun cameraTextureId(): Int = nativeGetCameraTextureId(handle)
     fun setEffect(effectId: String): Boolean = nativeSetEffect(handle, effectId)
+
+    // ---- STAGE A: shared-context API ----
+    fun setCameraTexture(textureId: Int) = nativeSetCameraTexture(handle, textureId)
+    fun setFrameSize(width: Int, height: Int) = nativeSetFrameSize(handle, width, height)
+    fun setTexMatrix(m16: FloatArray) = nativeSetTexMatrix(handle, m16)
+    fun setCameraTexCoords(uv8: FloatArray) = nativeSetCameraTexCoords(handle, uv8)
+
+    /** Forwards already-built signal arrays (see LiveSignalFeeder) straight to the native engine. */
+    fun pushRawSignals(
+        timeElapsedSec: Float, timeDeltaSec: Float,
+        faceSignal: FloatArray,
+        gazePoints: FloatArray, gazeAges: FloatArray, gazeCount: Int,
+        handSignals: FloatArray, handCount: Int,
+        fingerPoints: FloatArray, fingerAges: FloatArray, fingerCount: Int,
+        audioAmplitude: Float, motionMagnitude: Float, stillnessSeconds: Float,
+        bodyDetected: Boolean, bodyBox: FloatArray,
+        touchActive: Boolean, touchX: Float, touchY: Float,
+        maskTextureId: Int, faceMeshTextureId: Int,
+    ) = nativeUpdateSignals(
+        handle, timeElapsedSec, timeDeltaSec, faceSignal,
+        gazePoints, gazeAges, gazeCount, handSignals, handCount,
+        fingerPoints, fingerAges, fingerCount,
+        audioAmplitude, motionMagnitude, stillnessSeconds,
+        bodyDetected, bodyBox, touchActive, touchX, touchY,
+        maskTextureId, faceMeshTextureId,
+    )
 
     // Uploads a Bitmap to a new GL_TEXTURE_2D — same pattern
     // OverlayBuilder.kt's buildCaptionTexture/buildWatermarkLogo already
@@ -206,6 +235,11 @@ class LumVibeEngineBridge(context: android.content.Context, manifestAssetPath: S
     }
 
     private external fun nativeCreate(manifestPath: String): Long
+    private external fun nativeCreateShared(manifestPath: String): Long
+    private external fun nativeSetCameraTexture(handle: Long, textureId: Int)
+    private external fun nativeSetFrameSize(handle: Long, width: Int, height: Int)
+    private external fun nativeSetTexMatrix(handle: Long, matrix: FloatArray)
+    private external fun nativeSetCameraTexCoords(handle: Long, uv: FloatArray)
     private external fun nativeAttachWindowSurface(handle: Long, surface: Surface)
     private external fun nativeAttachOffscreenSurface(handle: Long, width: Int, height: Int)
     private external fun nativeGetCameraTextureId(handle: Long): Int

@@ -1,5 +1,6 @@
 #include "lumvibe/audio/Engine.h"
 #include "lumvibe/audio/Denoiser.h"
+#include "lumvibe/audio/ProMix.h"
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -35,6 +36,35 @@ int lva_process(const float* params, int paramCount,
     g_err = "out of memory (try a shorter recording)"; return 3;
   } catch (const std::exception& e) {
     g_err = e.what(); return 2;
+  } catch (...) {
+    g_err = "unknown error"; return 4;
+  }
+}
+
+int lva_master_song(float latencyMs,
+                    const float* voice, int voiceFrames, int voiceRate, int voiceChannels,
+                    const float* beat, int beatFrames, int beatRate, int beatChannels,
+                    lva_progress_cb cb, void* user,
+                    float** outPcm, int* outFrames, int* outRate, int* outChannels) {
+  g_err.clear();
+  if (!outPcm || !outFrames || !outRate || !outChannels) { g_err = "null output pointer"; return 1; }
+  *outPcm = nullptr; *outFrames = 0; *outRate = lva::kRate; *outChannels = 2;
+  try {
+    lva::PcmIn v{voice, voiceFrames, voiceRate, voiceChannels};
+    lva::PcmIn b{beat, beatFrames, beatRate, beatChannels};
+    lva::ProgressFn pf;
+    if (cb) pf = [cb, user](float f, const char* s) { cb(f, s, user); };
+    lva::Result r = lva::masterSong(v, (beat && beatFrames > 0) ? &b : nullptr, latencyMs, pf);
+    float* mem = (float*)std::malloc(r.pcm.size() * sizeof(float));
+    if (!mem) { g_err = "out of memory"; return 3; }
+    std::memcpy(mem, r.pcm.data(), r.pcm.size() * sizeof(float));
+    *outPcm = mem; *outFrames = r.frames;
+    return 0;
+  } catch (const std::bad_alloc&) {
+    g_err = "out of memory (try a shorter recording)"; return 3;
+  } catch (const std::exception& e) {
+    g_err = e.what();
+    return g_err == "SILENT_VOICE" ? 5 : 2;
   } catch (...) {
     g_err = "unknown error"; return 4;
   }

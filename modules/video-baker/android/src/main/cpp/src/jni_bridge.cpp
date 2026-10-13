@@ -19,6 +19,7 @@ struct EngineSession {
     std::unique_ptr<lumvibe::EffectEngine> engine;
     EGLSurface surface = EGL_NO_SURFACE;
     uint32_t cameraTextureId = 0;
+    bool shared = false; // STAGE A: true = draws into the CALLER's current EGL context (no own EGL)
 };
 
 extern "C" {
@@ -197,21 +198,74 @@ Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeUpdateSignals(
 JNIEXPORT void JNICALL
 Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeRenderFrame(JNIEnv*, jobject, jlong handle) {
     auto* session = reinterpret_cast<EngineSession*>(handle);
-    session->egl->makeCurrent(session->surface);
+    if (!session->shared) session->egl->makeCurrent(session->surface);
     session->engine->renderFrame();
 }
 
 JNIEXPORT void JNICALL
 Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeSwapBuffers(JNIEnv*, jobject, jlong handle) {
     auto* session = reinterpret_cast<EngineSession*>(handle);
+    if (session->shared || !session->egl) return;
     session->egl->swapBuffers(session->surface);
 }
 
 JNIEXPORT void JNICALL
 Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
     auto* session = reinterpret_cast<EngineSession*>(handle);
-    if (session->surface != EGL_NO_SURFACE) session->egl->releaseSurface(session->surface);
+    if (!session->shared && session->egl && session->surface != EGL_NO_SURFACE) session->egl->releaseSurface(session->surface);
     delete session;
+}
+
+
+// ===================== STAGE A: shared-context mode =====================
+// The live preview already owns an EGL context + window surface + camera
+// SurfaceTexture. In shared mode the engine creates NO EGL of its own: every call
+// below must be made on the view's render thread while that context is current, and
+// renderFrame() draws into whatever framebuffer the caller has bound (display or encoder).
+
+JNIEXPORT jlong JNICALL
+Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeCreateShared(JNIEnv* env, jobject, jstring manifestPath) {
+    auto* session = new EngineSession();
+    session->shared = true;
+    session->backend = std::make_shared<lumvibe::GLES2RenderBackend>();
+    session->engine = std::make_unique<lumvibe::EffectEngine>(session->backend);
+
+    const char* path = env->GetStringUTFChars(manifestPath, nullptr);
+    bool ok = session->engine->loadManifest(path);
+    env->ReleaseStringUTFChars(manifestPath, path);
+    if (!ok) { delete session; return 0; }
+    return reinterpret_cast<jlong>(session);
+}
+
+JNIEXPORT void JNICALL
+Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeSetCameraTexture(JNIEnv*, jobject, jlong handle, jint textureId) {
+    auto* session = reinterpret_cast<EngineSession*>(handle);
+    session->cameraTextureId = static_cast<uint32_t>(textureId);
+    session->engine->setCameraTexture(session->cameraTextureId);
+}
+
+JNIEXPORT void JNICALL
+Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeSetFrameSize(JNIEnv*, jobject, jlong handle, jint width, jint height) {
+    auto* session = reinterpret_cast<EngineSession*>(handle);
+    session->backend->setFrameSize(width, height);
+}
+
+JNIEXPORT void JNICALL
+Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeSetTexMatrix(JNIEnv* env, jobject, jlong handle, jfloatArray matrix) {
+    auto* session = reinterpret_cast<EngineSession*>(handle);
+    if (env->GetArrayLength(matrix) < 16) return;
+    jfloat* m = env->GetFloatArrayElements(matrix, nullptr);
+    session->engine->setTexMatrix(m);
+    env->ReleaseFloatArrayElements(matrix, m, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
+Java_com_lumvibe_videobaker_LumVibeEngineBridge_nativeSetCameraTexCoords(JNIEnv* env, jobject, jlong handle, jfloatArray uv) {
+    auto* session = reinterpret_cast<EngineSession*>(handle);
+    if (env->GetArrayLength(uv) < 8) return;
+    jfloat* c = env->GetFloatArrayElements(uv, nullptr);
+    session->engine->setCameraTexCoords(c);
+    env->ReleaseFloatArrayElements(uv, c, JNI_ABORT);
 }
 
 } // extern "C"

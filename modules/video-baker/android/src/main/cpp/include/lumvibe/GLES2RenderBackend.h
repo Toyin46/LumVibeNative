@@ -73,6 +73,15 @@ public:
         if (loc >= 0) glUniform2f(loc, v.x, v.y);
     }
 
+    void setUniformMat4(uint32_t program, const std::string& name, const float* m16) override {
+        GLint loc = glGetUniformLocation(program, name.c_str());
+        if (loc >= 0 && m16) glUniformMatrix4fv(loc, 1, GL_FALSE, m16);
+    }
+
+    void setCameraTexCoords(const float* uv8) override {
+        if (uv8) texCoords_.assign(uv8, uv8 + 8);
+    }
+
     void setUniformVec4(uint32_t program, const std::string& name, Vec4 v) override {
         GLint loc = glGetUniformLocation(program, name.c_str());
         if (loc >= 0) glUniform4f(loc, v.x, v.y, v.z, v.w);
