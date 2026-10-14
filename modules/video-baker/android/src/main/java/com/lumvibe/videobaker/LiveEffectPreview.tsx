@@ -31,6 +31,13 @@ export interface LiveEffectPreviewProps {
   facing?: 'front' | 'back';
   style?: ViewStyle;
   /**
+   * VIDEO MODE (compose screen): when set, the view plays this video file (looping) through the effect
+   * instead of opening the camera - so picking an effect on a recorded clip shows instantly.
+   */
+  videoUri?: string | null;
+  /** 0..1, only used in video mode (the clip's own sound). */
+  videoVolume?: number;
+  /**
    * Path to the downloaded/cached fire_loop.mp4 (from ensureFireVideoCached()
    * in fireVideoCache.ts). Only matters for MOUTH_FIRE/FIRE_BOOK — every
    * other effect ignores it entirely. Leave undefined/null until the caller

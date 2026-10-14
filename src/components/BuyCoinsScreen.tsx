@@ -26,7 +26,8 @@ import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 import { detectCurrency, convertFromNgn, formatNgn } from '../utils/currencyUtils';
 import { FLW_TEST_MODE } from '../utils/flutterwaveUtils';
-import { useScreenPadding } from '@/hooks/useScreenPadding'; 
+import { useScreenPadding } from '@/hooks/useScreenPadding';
+import AdWalletCard from './AdWalletCard';  // ✅ NEW: free coins from rewarded ads 
 
 const NGN_PER_COIN = 150;
 
@@ -291,6 +292,11 @@ export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
           <Text style={s.balanceSub}>coins available</Text>
           <Text style={s.balanceNgn}>{localBalance} {currency.code}</Text>
         </View>
+
+        {/* ✅ NEW: Ad Wallet — only on the main coin wallet, never on marketplace coins. */}
+        {config.walletType === 'profile' && (
+          <AdWalletCard accentColor={config.accentColor} onCoinsAdded={loadBalance} />
+        )}
 
         <View style={s.currencyBanner}>
           <Text style={s.currencyBannerText}>

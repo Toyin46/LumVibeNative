@@ -14,7 +14,6 @@
 
 import React, { memo, useEffect, useState } from 'react';
 import { View, Text, Image, StyleSheet, Dimensions, ActivityIndicator } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import mobileAds, {
   AdsConsent,
   AdEventType,
@@ -40,17 +39,11 @@ const REAL_REWARDED_UNIT_ID = 'ca-app-pub-4412719226192046/9101144095'; // rewar
 const NATIVE_UNIT_ID   = __DEV__ ? TestIds.NATIVE   : REAL_NATIVE_UNIT_ID;
 const REWARDED_UNIT_ID = __DEV__ ? TestIds.REWARDED : REAL_REWARDED_UNIT_ID;
 
-// ── REWARD SETTINGS (change these any time) ─────────────────────────────
-// Ads pay little in Nigeria (roughly ₦3 per ad), so users earn POINTS, not coins:
-//   1 ad = 1 point, 100 points = 1 coin  →  about 50% of what the ads earn you.
-// Check your real rewarded eCPM in AdMob after a week; if it is below about
-// $1.15, raise POINTS_PER_COIN so you never pay out more than you earn.
-export const REWARD_POINTS_PER_AD = 1;   // points a user gets per fully watched ad
-export const POINTS_PER_COIN      = 100; // points needed for 1 coin
-export const DAILY_REWARD_LIMIT   = 15;  // max rewarded ads per user per day (on this phone)
-export const REWARD_COOLDOWN_MS   = 30000; // wait between two rewarded ads (stops spam/bots)
-
-export const pointsToCoins = (points: number) => Math.floor(points / POINTS_PER_COIN);
+// ── REWARD RATES LIVE IN SUPABASE, NOT HERE ────────────────────────────
+// Points per ad, points per coin, daily limit and the wait between ads are
+// stored in the `ad_wallet_config` table and enforced by the server, so you
+// can change them any time with no new app build, e.g.:
+//   update ad_wallet_config set points_per_coin = 150;
 
 // ── START ADS ONCE PER APP SESSION ──────────────────────────────────────
 // Asks for ad consent where the law requires it (e.g. Europe/UK), then
@@ -156,43 +149,19 @@ function AdSlotInner({ fallback }: SlotProps) {
 export default memo(AdSlotInner);
 
 // ═════════════════════════════════════════════════════════════════════════
-//  PART 2 — REWARDED AD ("Watch an ad, get coins")
+//  PART 2 — REWARDED AD (the user taps a button, watches, earns points)
 // ═════════════════════════════════════════════════════════════════════════
+// This only loads and shows the ad. It does NOT give any reward itself: the
+// Ad Wallet card calls the server (credit_ad_point) after 'earned', and the
+// server enforces the daily limit and the wait between ads.
 export type RewardedResult =
-  | 'earned'       // user watched it fully → give the coins
-  | 'dismissed'    // user closed it early → NO coins
-  | 'unavailable'  // no ad right now / error / no internet → try again later
-  | 'limit'       // reached today's limit
-  | 'cooldown';    // too soon after the last ad: ask the user to wait a moment
-
-const todayKey = () => {
-  const d = new Date();
-  return `lv_rewarded_${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-};
-
-const LAST_KEY = 'lv_rewarded_last_ts';
-
-async function cooldownLeftMs(): Promise<number> {
-  try {
-    const last = parseInt((await AsyncStorage.getItem(LAST_KEY)) || '0', 10) || 0;
-    return Math.max(0, REWARD_COOLDOWN_MS - (Date.now() - last));
-  } catch { return 0; }
-}
-
-export async function rewardedWatchedToday(): Promise<number> {
-  try { return parseInt((await AsyncStorage.getItem(todayKey())) || '0', 10) || 0; }
-  catch { return 0; }
-}
-
-export async function rewardedLeftToday(): Promise<number> {
-  return Math.max(0, DAILY_REWARD_LIMIT - (await rewardedWatchedToday()));
-}
+  | 'earned'       // user watched it fully → ask the server to credit the point
+  | 'dismissed'    // user closed it early → NO reward
+  | 'unavailable'; // no ad right now / error / no internet → try again later
 
 export function showRewardedAd(): Promise<RewardedResult> {
   return new Promise<RewardedResult>((resolve) => {
     (async () => {
-      if ((await rewardedLeftToday()) <= 0) { resolve('limit'); return; }
-      if ((await cooldownLeftMs()) > 0) { resolve('cooldown'); return; }
       await initAdsOnce();
 
       const ad = RewardedAd.createForAdRequest(REWARDED_UNIT_ID);
@@ -215,18 +184,7 @@ export function showRewardedAd(): Promise<RewardedResult> {
         ad.show().catch(() => finish('unavailable'));
       }));
       unsubs.push(ad.addAdEventListener(RewardedAdEventType.EARNED_REWARD, () => { earned = true; }));
-      unsubs.push(ad.addAdEventListener(AdEventType.CLOSED, async () => {
-        if (earned) {
-          try {
-            const n = (await rewardedWatchedToday()) + 1;
-            await AsyncStorage.setItem(todayKey(), String(n));
-            await AsyncStorage.setItem(LAST_KEY, String(Date.now()));
-          } catch { /* ignore */ }
-          finish('earned');
-        } else {
-          finish('dismissed');
-        }
-      }));
+      unsubs.push(ad.addAdEventListener(AdEventType.CLOSED, () => finish(earned ? 'earned' : 'dismissed')));
       unsubs.push(ad.addAdEventListener(AdEventType.ERROR, () => finish('unavailable')));
 
       // If the ad has not loaded after 15 seconds, give up politely.
@@ -236,19 +194,10 @@ export function showRewardedAd(): Promise<RewardedResult> {
   });
 }
 
-/* ── HOW TO USE showRewardedAd() on a button (Free Coins / Ad Wallet screen) ──
-import { showRewardedAd, REWARD_POINTS_PER_AD, rewardedLeftToday } from '../components/AdSlot';
-
-const onWatchAd = async () => {
-  const result = await showRewardedAd();
-  if (result === 'earned')           { // add REWARD_POINTS_PER_AD point(s) to the Ad Wallet, show "+1 point"
-  } else if (result === 'dismissed') { Alert.alert('No points', 'Watch the whole ad to earn your point.');
-  } else if (result === 'limit')     { Alert.alert('Come back tomorrow', 'You have watched all of today\'s ads.');
-  } else if (result === 'cooldown')  { Alert.alert('One moment', 'Please wait a few seconds before the next ad.');
-  } else                             { Alert.alert('No ad right now', 'Please try again in a bit.'); }
-};
-// Button text: 'Watch an ad, earn 1 point'   •   Show: 'x ads left today'
-// NEVER call showRewardedAd() automatically (e.g. between videos). Only on a user tap.
+/* ── HOW IT IS USED ──────────────────────────────────────────────────────
+The Ad Wallet card (AdWalletCard.tsx) calls showRewardedAd() when the user
+TAPS its button. NEVER call showRewardedAd() automatically (e.g. between
+videos or on screen open).
 ────────────────────────────────────────────────────────────────────────── */
 
 

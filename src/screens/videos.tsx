@@ -34,7 +34,7 @@ import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/n
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
-import AdSlot from '@/components/AdSlot';
+import AdSlot from '../components/AdSlot';  // ✅ NEW: real AdMob native ad in the feed
 import { Asset } from 'expo-asset';
 // ✅ NEW: same native module create.tsx already uses for effects baking —
 // reusing it here for watermark baking adds nothing new to the native
@@ -1127,7 +1127,7 @@ const VideoPost = memo(function VideoPost({
                 <Feather name="cpu" size={20} color="#fff" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={cowatchStyles.optionTitle}> Match Me</Text>
+                <Text style={cowatchStyles.optionTitle}>AI Match Me</Text>
                 <Text style={cowatchStyles.optionSubtitle}>Let AI find someone with similar vibes to watch with.</Text>
               </View>
               <Feather name="chevron-right" size={20} color="#a78bfa" />
@@ -1718,34 +1718,18 @@ export default function VideosScreen() {
       return;
     }
     try {
-      const { data: freshSender } = await supabase.from('users').select('coins').eq('id', userId).single();
-      if ((freshSender?.coins || 0) < giftPackage.coins) {
-        Alert.alert('Insufficient coins', 'Balance changed. Please try again.');
+      // ✅ CHANGED: the server now does the whole gift in one safe step (checks the
+      // balance, takes the coins, credits the creator, writes history + notification).
+      // Run send_gift.sql in Supabase first.
+      const { data: giftRes, error: giftErr } = await supabase.rpc('send_gift', {
+        p_post_id: giftRecipientPost.id,
+        p_amount:  giftPackage.coins,
+        p_label:   `${giftPackage.name} ${giftPackage.icon}`,
+      });
+      if (giftErr || !giftRes?.success) {
+        Alert.alert('Could not send gift', giftRes?.error || 'Please try again.');
         return;
       }
-      await supabase.from('users')
-        .update({ coins: (freshSender?.coins || 0) - giftPackage.coins })
-        .eq('id', userId);
-
-      await supabase.rpc('increment_coins', {
-        target_user_id: giftRecipientPost.user_id,
-        coin_amount: giftPackage.coins,
-      });
-
-      const { data: freshPost } = await supabase.from('posts').select('coins_received').eq('id', giftRecipientPost.id).single();
-      await supabase.from('posts')
-        .update({ coins_received: (freshPost?.coins_received || 0) + giftPackage.coins })
-        .eq('id', giftRecipientPost.id);
-
-      await supabase.from('transactions').insert([
-        { user_id: userId, type: 'spent', amount: giftPackage.coins, description: `Sent ${giftPackage.name} ${giftPackage.icon} to @${giftRecipientPost.username}`, status: 'completed' },
-        { user_id: giftRecipientPost.user_id, type: 'received', amount: giftPackage.coins, description: `Received ${giftPackage.name} ${giftPackage.icon} from @${userProfile?.username}`, status: 'completed' },
-      ]);
-      await supabase.from('notifications').insert({
-        user_id: giftRecipientPost.user_id, type: 'gift', title: 'New Gift',
-        message: `@${userProfile?.username || 'Someone'} sent you ${giftPackage.name} ${giftPackage.icon} (${giftPackage.coins} coins)`,
-        from_user_id: userId, post_id: giftRecipientPost.id, is_read: false,
-      });
       setGiftModalVisible(false);
       const updateCoins = (p: Post) => p.id === giftRecipientPost.id ? { ...p, coins_received: p.coins_received + giftPackage.coins } : p;
       setPosts(prev => prev.map(updateCoins));
@@ -1759,6 +1743,7 @@ export default function VideosScreen() {
     if (!customGiftAmount.trim() || !giftRecipientPost || !userId) return;
     const amount = parseFloat(customGiftAmount);
     if (isNaN(amount) || amount < 10)       { Alert.alert('Invalid Amount', 'Minimum 10 coins'); return; }
+    if (!Number.isInteger(amount))          { Alert.alert('Invalid Amount', 'Please enter a whole number of coins'); return; }
     if (amount > 5000)                      { Alert.alert('Invalid Amount', 'Maximum 5,000 coins (₦750,000)'); return; }
     if (amount > (userProfile?.coins || 0)) {
       Alert.alert(t.videos.insufficientCoins, `You only have ${(userProfile?.coins || 0).toFixed(0)} coins.`, [
@@ -1768,34 +1753,16 @@ export default function VideosScreen() {
       return;
     }
     try {
-      const { data: freshSender2 } = await supabase.from('users').select('coins').eq('id', userId).single();
-      if ((freshSender2?.coins || 0) < amount) {
-        Alert.alert('Insufficient coins', 'Balance changed. Please try again.');
+      // ✅ CHANGED: same server-side gift as above.
+      const { data: giftRes2, error: giftErr2 } = await supabase.rpc('send_gift', {
+        p_post_id: giftRecipientPost.id,
+        p_amount:  amount,
+        p_label:   'custom gift',
+      });
+      if (giftErr2 || !giftRes2?.success) {
+        Alert.alert('Could not send gift', giftRes2?.error || 'Please try again.');
         return;
       }
-      await supabase.from('users')
-        .update({ coins: (freshSender2?.coins || 0) - amount })
-        .eq('id', userId);
-
-      await supabase.rpc('increment_coins', {
-        target_user_id: giftRecipientPost.user_id,
-        coin_amount: amount,
-      });
-
-      const { data: freshPost } = await supabase.from('posts').select('coins_received').eq('id', giftRecipientPost.id).single();
-      await supabase.from('posts')
-        .update({ coins_received: (freshPost?.coins_received || 0) + amount })
-        .eq('id', giftRecipientPost.id);
-
-      await supabase.from('transactions').insert([
-        { user_id: userId, type: 'spent', amount, description: `Sent custom gift (${amount} coins = ${coinsToNGN(amount)}) to @${giftRecipientPost.username}`, status: 'completed' },
-        { user_id: giftRecipientPost.user_id, type: 'received', amount, description: `Received custom gift (${amount} coins = ${coinsToNGN(amount)}) from @${userProfile?.username}`, status: 'completed' },
-      ]);
-      await supabase.from('notifications').insert({
-        user_id: giftRecipientPost.user_id, type: 'gift', title: 'New Gift',
-        message: `@${userProfile?.username || 'Someone'} sent a custom gift (${amount} coins)`,
-        from_user_id: userId, post_id: giftRecipientPost.id, is_read: false,
-      });
       setGiftModalVisible(false); setCustomGiftMode(false); setCustomGiftAmount('');
       const updateCoins = (p: Post) => p.id === giftRecipientPost.id ? { ...p, coins_received: p.coins_received + amount } : p;
       setPosts(prev => prev.map(updateCoins));
@@ -2064,6 +2031,7 @@ export default function VideosScreen() {
   };
 
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
+    // ✅ CHANGED: real AdMob native ad; falls back to your own promo card if no ad loads.
     if (isAd(item)) return <AdSlot key={item.id} adIndex={item.adIndex} fallback={<NativeAdPost adIndex={item.adIndex} />} />;
     if (isWinnerCard(item)) { if (weeklyWinners.length === 0) return null; return <WinnerCardVideo winners={weeklyWinners} onUserPress={handleUserPress} />; }
     return (

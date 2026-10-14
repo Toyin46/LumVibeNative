@@ -43,6 +43,8 @@ public:
     // Centre-crop texture coordinates for the camera quad (4 corners, s,t each) so the live
     // preview fills the screen without stretching, same as the legacy FrameRenderer.
     virtual void setCameraTexCoords(const float* /*uv8*/) {}
+    // vec3 uniforms (e.g. duotone_pulse's uColorA/uColorB) - constants of 3 values were silently dropped before.
+    virtual void setUniformVec3(uint32_t /*program*/, const std::string& /*name*/, float /*x*/, float /*y*/, float /*z*/) {}
 };
 
 // Direct port of ParticleSystem.kt — same physics, same MAX_PARTICLES
@@ -76,6 +78,7 @@ public:
     // from a real filesystem path. Used on Android/iOS, where the
     // manifest ships as a bundled app asset. Call once at startup.
     bool loadManifest(const std::string& jsonPath);
+    std::vector<std::string> effectIds() const { std::vector<std::string> v; for (const auto& e : effects_) v.push_back(e.id); return v; }
 
     // Same parsing, but from an already-in-memory JSON string — used on
     // Web, where there's no arbitrary filesystem to fopen() and the
@@ -111,7 +114,10 @@ public:
     // `uTexMatrix` uniform in every renderFrame(). Defaults to identity.
     void setTexMatrix(const float* m16) { if (m16) for (int i = 0; i < 16; ++i) texMatrix_[i] = m16[i]; }
     // STAGE A: 8 floats (4 corners x s,t), forwarded to the backend's quad.
-    void setCameraTexCoords(const float* uv8) { if (backend_ && uv8) backend_->setCameraTexCoords(uv8); }
+    void setCameraTexCoords(const float* uv8) {
+        if (uv8) for (int i = 0; i < 8; ++i) camUv_[i] = uv8[i];
+        if (backend_ && uv8) backend_->setCameraTexCoords(uv8);
+    }
 
     // Runs the currently-selected effect: binds its program, resolves
     // every declared binding against the current signals, evaluates
@@ -136,6 +142,8 @@ public:
 
 private:
     float texMatrix_[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    float camUv_[8] = {0,0,1,0, 0,1,1,1};
+    void computeCamMatrix(bool yDown, float out[16]) const;
     std::shared_ptr<IRenderBackend> backend_;
     std::vector<EffectDefinitionNative> effects_;
     std::unordered_map<std::string, bool> availableSubsystems_;

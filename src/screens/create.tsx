@@ -6589,6 +6589,16 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                     contentFit="cover"
                     nativeControls={false}
                   />
+                  {/* INSTANT EFFECT PREVIEW (like the website): the clip plays through the real effect engine the moment an effect is chosen */}
+                  {hasLiveGLEffect && !!mediaUri && (
+                    <LiveEffectPreview
+                      effect={activeFx?.glShaderEffect ?? null}
+                      videoUri={mediaUri}
+                      videoVolume={typeof originalVolume === 'number' ? Math.max(0, Math.min(1, originalVolume)) : 1}
+                      fireVideoPath={fireVideoPath}
+                      style={{ ...StyleSheet.absoluteFillObject, zIndex: 2 }}
+                    />
+                  )}
                   {/* ✅ NEW: TikTok-style end screen overlay */}
                   <VideoEndScreen
                     visible={showEndScreen}
@@ -6612,6 +6622,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                     style={[StyleSheet.absoluteFill, { zIndex: 5 }]}
                     activeOpacity={1}
                     onPress={() => {
+                      if (hasLiveGLEffect) return; // the live effect preview is already playing
                       // Same fix as onReplay above — if the clip already ended,
                       // toggling videoPlaying alone won't restart it without a seek.
                       if (!videoPlaying && videoPlayer.currentTime >= (videoPlayer.duration ?? 0) - 0.05) {
@@ -6621,7 +6632,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                       setVideoPlaying(v => !v);
                     }}
                   >
-                    {!videoPlaying && (
+                    {!videoPlaying && !hasLiveGLEffect && (
                       <View style={[ms.videoPlayOverlay, { zIndex: 6 }]}>
                         <View style={ms.videoPlayBtn}>
                           <Ionicons name="play" size={28} color="#fff" />
@@ -6645,7 +6656,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 <View style={[StyleSheet.absoluteFill, { backgroundColor: activeFilterDef.tintColor, zIndex: 10 }]} pointerEvents="none" />
               )}
               {/* FX tint overlay — zIndex 11 */}
-              {activeFxOverlay !== 'transparent' && (
+              {activeFxOverlay !== 'transparent' && !(hasLiveGLEffect && mediaType === 'video') && (
                 <View style={[StyleSheet.absoluteFill, { backgroundColor: activeFxOverlay, zIndex: 11 }]} pointerEvents="none" />
               )}
               {/* Cinematic bars */}
@@ -6907,6 +6918,9 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 style={[ms.fxCard, selectedFx === fx.id && ms.fxCardActive]}
                 onPress={() => {
                   setSelectedFx(fx.id);
+                  // INSTANT PREVIEW: the native live preview now plays the clip through the effect (with its own sound),
+                  // so the old player is paused to avoid double audio.
+                  if (fx.glShaderEffect && mediaType === 'video') setVideoPlaying(false);
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                   if (fx.glShaderEffect === 'hand_portal') pickPortalScene();
                   if (isFireEffect(fx)) ensureFireVideoReady();

@@ -1,6 +1,8 @@
 #include "lumvibe/EffectEngine.h"
 
 #include <algorithm>
+#include <cctype>
+#include <string>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -160,16 +162,131 @@ void EffectEngine::registerSubsystem(const std::string& name) {
     availableSubsystems_[name] = true;
 }
 
+// ===========================================================================
+// STAGE A2: SCREEN-SPACE SHADERS (same coordinate system as the website)
+//
+// The ported shaders place everything (eyes, hands, mask, effects) in `vTexCoord` and assume it is
+// the picture as the viewer sees it. On the website that is true. On Android vTexCoord used to be
+// the camera SENSOR space (rotated 90 degrees, mirrored, uncropped) which is why Demon Eyes / Eye
+// Laser / Gaze Trail landed on the forehead and the Aura mask was sideways.
+//
+// Fix, done once at compile time (no per-effect shader edits):
+//   * vertex shader: vTexCoord = the screen position   (y = 0 at the TOP for tracker effects, like
+//                    MediaPipe and like the website's "y-down" quad; y = 0 at the bottom otherwise)
+//   * fragment shader: every  texture2D(uTexture, X)  becomes  texture2D(uTexture, lvCam(X)),
+//                    lvCam() = camera transform * crop  (uniform uCamMatrix) -> the camera is still
+//                    sampled correctly, but everything else now lives in screen space.
+// ===========================================================================
+namespace {
+
+bool isIdentChar(char c) { return std::isalnum((unsigned char)c) || c == '_'; }
+
+// website rule: Trackers.need(def).length > 0
+bool effectIsYDown(const EffectDefinitionNative& def) {
+    for (const auto& r : def.requires_) if (r == "face" || r == "hand" || r == "body" || r == "segmentation") return true;
+    return def.fragmentShader.find("uMaskTexture") != std::string::npos;
+}
+
+std::string wrapCameraSamples(const std::string& fs) {
+    const std::string key = "texture2D(";
+    std::string out; out.reserve(fs.size() + 256);
+    size_t i = 0;
+    while (true) {
+        const size_t p = fs.find(key, i);
+        if (p == std::string::npos) { out.append(fs, i, std::string::npos); break; }
+        const size_t q = p + key.size();
+        size_t r = q;
+        while (r < fs.size() && std::isspace((unsigned char)fs[r])) ++r;
+        const bool isCam = fs.compare(r, 8, "uTexture") == 0 && !(r + 8 < fs.size() && isIdentChar(fs[r + 8]));
+        if (!isCam) { out.append(fs, i, q - i); i = q; continue; }
+        r += 8;
+        while (r < fs.size() && std::isspace((unsigned char)fs[r])) ++r;
+        if (r >= fs.size() || fs[r] != ',') { out.append(fs, i, q - i); i = q; continue; }
+        out.append(fs, i, r + 1 - i);                       // "...texture2D(uTexture,"
+        const size_t a = r + 1;
+        int depth = 0; size_t e = a, argEnd = std::string::npos;
+        while (e < fs.size()) {
+            const char c = fs[e];
+            if (c == '(') ++depth;
+            else if (c == ')') { if (depth == 0) break; --depth; }
+            else if (c == ',' && depth == 0 && argEnd == std::string::npos) argEnd = e;   // 3rd arg (bias) is left alone
+            ++e;
+        }
+        const size_t uvEnd = argEnd == std::string::npos ? e : argEnd;
+        out += " lvCam(" + fs.substr(a, uvEnd - a) + ")";
+        i = uvEnd;                                           // the rest (bias / ")") is copied by the next round
+    }
+    // helper goes right after the vTexCoord varying declaration
+    const std::string decl = "vTexCoord;";
+    const size_t d = out.find(decl);
+    if (d != std::string::npos) {
+        static const char* kHelper =
+            "\n#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+            "uniform highp mat4 uCamMatrix;\n"
+            "highp vec2 lvCam(highp vec2 s){return (uCamMatrix*vec4(s,0.0,1.0)).xy;}\n"
+            "#else\n"
+            "uniform mediump mat4 uCamMatrix;\n"
+            "vec2 lvCam(vec2 s){return (uCamMatrix*vec4(s,0.0,1.0)).xy;}\n"
+            "#endif\n";
+        out.insert(d + decl.size(), kHelper);
+    }
+    return out;
+}
+
+std::string replaceAll(std::string s, const std::string& from, const std::string& to) {
+    size_t p = 0;
+    while ((p = s.find(from, p)) != std::string::npos) { s.replace(p, from.size(), to); p += to.size(); }
+    return s;
+}
+
+std::string screenVertexShader(const EffectDefinitionNative& def, bool yDown) {
+    const std::string uv = yDown ? "vec2(aPosition.x*0.5+0.5,0.5-aPosition.y*0.5)"
+                                 : "vec2(aPosition.x*0.5+0.5,0.5+aPosition.y*0.5)";
+    if (def.vertexShader.empty()) {
+        return "attribute vec4 aPosition;attribute vec4 aTexCoord;"
+               "varying highp vec2 vTexCoord;void main(){gl_Position=aPosition;vTexCoord=" + uv + ";}";
+    }
+    // custom vertex shaders (shake / zoom): the image must move WITH the geometry, so vTexCoord
+    // comes from the un-shifted quad position.
+    std::string vs = def.vertexShader;
+    vs = replaceAll(vs, "vTexCoord = (uTexMatrix * aTexCoord).xy;", "vTexCoord = " + uv + ";");
+    vs = replaceAll(vs, "vTexCoord = aTexCoord.xy;", "vTexCoord = " + uv + ";");
+    return vs;
+}
+
+} // namespace
+
+// camera transform for ONE effect: uCamMatrix * (screenX, screenY) -> camera texture coordinates.
+// = surfaceTexture.getTransformMatrix() * (centre-crop of the live view); the Y flip depends on the
+// effect's coordinate convention (see above).
+void EffectEngine::computeCamMatrix(bool yDown, float out[16]) const {
+    const float u0 = camUv_[0], v0 = camUv_[1], u1 = camUv_[2], v1 = camUv_[5];
+    const float du = u1 - u0, dv = v1 - v0;
+    float C[16] = {0};                        // column-major crop matrix
+    C[0] = du;                                // sx -> u
+    C[5] = yDown ? -dv : dv;                  // sy -> v
+    C[10] = 1.f;
+    C[12] = u0;
+    C[13] = yDown ? v1 : v0;
+    C[15] = 1.f;
+    for (int col = 0; col < 4; ++col)
+        for (int row = 0; row < 4; ++row) {
+            float s = 0.f;
+            for (int k = 0; k < 4; ++k) s += texMatrix_[k * 4 + row] * C[col * 4 + k];
+            out[col * 4 + row] = s;
+        }
+}
+
 bool EffectEngine::setEffect(const std::string& effectId) {
     if (!isEffectAvailable(effectId)) return false;
     const auto* def = findEffect(effectId);
     if (compiledPrograms_.find(effectId) == compiledPrograms_.end()) {
-        const std::string vs = def->vertexShader.empty()
-            ? "uniform mat4 uTexMatrix;attribute vec4 aPosition;attribute vec4 aTexCoord;"
-              "varying mediump vec2 vTexCoord;void main(){gl_Position=aPosition;"
-              "vTexCoord=(uTexMatrix*aTexCoord).xy;}"
-            : def->vertexShader;
-        compiledPrograms_[effectId] = backend_->compileProgram(vs, def->fragmentShader);
+        const bool yDown = effectIsYDown(*def);
+        const std::string vs = screenVertexShader(*def, yDown);
+        const std::string fs = wrapCameraSamples(def->fragmentShader);
+        const uint32_t prog = backend_->compileProgram(vs, fs);
+        if (prog == 0) return false;     // never leave a black screen: the caller falls back to the old renderer
+        compiledPrograms_[effectId] = prog;
         for (const auto& ps : def->particleSystems) {
             particleSystems_[def->id + ":" + ps.id] =
                 std::make_unique<ParticleSystem>(ps.gravity, ps.maxParticles);
@@ -383,9 +500,17 @@ void EffectEngine::applyBindings(uint32_t program, const EffectDefinitionNative&
             case ResolvedValue::Vec2Arr: backend_->setUniformVec2Array(program, uniformName, v.v2Arr.data(), (int)v.v2Arr.size()); break;
         }
     }
+    // Same rule as the website: a shader that declares uIntensity but whose manifest never sets it
+    // gets 1.0 (not 0). Without this Old Film (vintage_flicker) drew nothing useful.
+    if (def.fragmentShader.find("uIntensity") != std::string::npos &&
+        def.bindings.find("uIntensity") == def.bindings.end() &&
+        def.constants.find("uIntensity") == def.constants.end()) {
+        backend_->setUniformFloat(program, "uIntensity", 1.0f);
+    }
     for (const auto& [uniformName, values] : def.constants) {
         if (values.size() == 1) backend_->setUniformFloat(program, uniformName, values[0]);
         else if (values.size() == 2) backend_->setUniformVec2(program, uniformName, {values[0], values[1]});
+        else if (values.size() == 3) backend_->setUniformVec3(program, uniformName, values[0], values[1], values[2]);   // Duotone Pulse colours
         else if (values.size() == 4) backend_->setUniformVec4(program, uniformName, {values[0], values[1], values[2], values[3]});
     }
     // Units 0 and 1 are reserved for the camera frame and segmentation
@@ -518,7 +643,12 @@ void EffectEngine::renderFrame() {
     if (!def) return;
     uint32_t program = compiledPrograms_[currentEffectId_];
     backend_->useProgram(program);
-    backend_->setUniformMat4(program, "uTexMatrix", texMatrix_);
+    backend_->setUniformMat4(program, "uTexMatrix", texMatrix_);   // (only used by legacy custom shaders)
+    {
+        float cam[16];
+        computeCamMatrix(effectIsYDown(*def), cam);
+        backend_->setUniformMat4(program, "uCamMatrix", cam);
+    }
     applyBindings(program, *def);
     evaluateTriggers(*def);
     if (freezeFrameAge_ >= 0.f) {

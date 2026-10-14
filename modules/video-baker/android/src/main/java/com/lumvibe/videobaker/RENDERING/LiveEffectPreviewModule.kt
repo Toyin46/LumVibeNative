@@ -76,6 +76,14 @@ class LiveEffectPreviewModule : Module() {
 
             // "front" | "back"  -  same facing vocabulary create.tsx already uses
             // for the DualCameraView/DeepARCameraView facing prop.
+            // VIDEO SOURCE MODE (compose screen): play this video file through the effect instead of the camera.
+            Prop("videoUri") { view: LiveEffectPreviewView, uri: String? ->
+                view.setVideoSource(uri)
+            }
+            Prop("videoVolume") { view: LiveEffectPreviewView, v: Float? ->
+                view.setVideoVolume(v ?: 1f)
+            }
+
             Prop("facing") { view: LiveEffectPreviewView, facing: String ->
                 view.setFacing(facing)
             }

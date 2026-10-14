@@ -586,7 +586,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
               {step === 'camera' && room && (
                 <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
                   <View style={[s.dot, { backgroundColor: isRecording ? '#ff453a' : ACCENT }]} />
-                  <Text style={s.headerSub}>{isRecording ? `Recording LIVE  ·  ${mmss(recSec)}` : 'Ready'}</Text>
+                  <Text style={s.headerSub}>{isRecording ? `Recording LIVE  ·  ${mmss(recSec)}` : 'Ready v2'}</Text>
                 </View>
               )}
             </View>

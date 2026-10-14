@@ -444,7 +444,11 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // harmless (same system service instance).
         cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val camIdForSizing = findCameraId(pendingFacing)
-        val camSize = if (camIdForSizing != null) {
+        val videoPath = pendingVideoPath
+        val videoDisplay = if (videoPath != null) probeVideoDisplaySize(videoPath) else null
+        val camSize = if (videoDisplay != null) {
+            videoDisplay
+        } else if (camIdForSizing != null) {
             chooseCameraOutputSize(camIdForSizing, surfaceW, surfaceH)
         } else {
             Size(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))
@@ -524,7 +528,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // before touching anything, so a stale callback from a superseded
         // cycle can't corrupt current state.
         val myGeneration = ++setupGeneration
-        openCamera(myGeneration)
+        if (videoDisplay != null && videoPath != null) startVideoPlayer(videoPath) else openCamera(myGeneration)
     }
 
     // FIX (EGL crash): released here, BEFORE setupEgl() creates the
@@ -804,6 +808,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     }
 
     private fun reopenCamera() {
+        if (pendingVideoPath != null) return   // video mode: no camera
         captureSession?.close()
         cameraDevice?.close()
         captureSession = null
@@ -828,6 +833,69 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         r.particleLifeRemaining = u.lifeRemaining
         r.particleColorIndices = u.colorIndices
         r.particleCount = u.count
+    }
+
+    // =====================================================================
+    // VIDEO SOURCE MODE (compose screen): same view, same engine, but the picture comes from a
+    // video FILE (MediaPlayer -> SurfaceTexture) instead of the camera, so choosing an effect on a
+    // recorded clip shows up instantly, exactly like the website's preview.
+    // =====================================================================
+    @Volatile private var pendingVideoPath: String? = null
+    @Volatile private var pendingVideoVolume = 1f
+    private var videoPlayer: android.media.MediaPlayer? = null
+    private var videoAmp: AudioAmplitudeReader? = null
+
+    /** null/blank = camera mode (default). A path/uri = play that video in a loop instead of opening the camera. */
+    fun setVideoSource(path: String?) {
+        val clean = path?.takeIf { it.isNotBlank() }
+        if (clean == pendingVideoPath) return
+        pendingVideoPath = clean
+        renderHandler?.post { setupSurface = null; setupEgl() }   // rebuild with / without the video source
+    }
+
+    fun setVideoVolume(v: Float) {
+        pendingVideoVolume = v.coerceIn(0f, 1f)
+        renderHandler?.post { try { videoPlayer?.setVolume(pendingVideoVolume, pendingVideoVolume) } catch (_: Throwable) {} }
+    }
+
+    /** Size of the video AS DISPLAYED (rotation applied) - what the centre-crop maths needs. */
+    private fun probeVideoDisplaySize(path: String): Size? = try {
+        val mmr = android.media.MediaMetadataRetriever()
+        mmr.setDataSource(context, android.net.Uri.parse(path))
+        val w = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+        val h = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+        val rot = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+        mmr.release()
+        if (w > 0 && h > 0) (if (rot == 90 || rot == 270) Size(h, w) else Size(w, h)) else null
+    } catch (t: Throwable) {
+        android.util.Log.e("LiveEffectPreview", "could not read video size for $path", t)
+        null
+    }
+
+    private fun startVideoPlayer(path: String) {
+        try {
+            val mp = android.media.MediaPlayer()
+            mp.setSurface(cameraSurface)
+            mp.setDataSource(context, android.net.Uri.parse(path))
+            mp.isLooping = true
+            mp.setVolume(pendingVideoVolume, pendingVideoVolume)
+            mp.setOnPreparedListener { it.start() }
+            mp.setOnErrorListener { _, what, extra ->
+                android.util.Log.e("LiveEffectPreview", "video preview error what=$what extra=$extra"); true
+            }
+            mp.prepareAsync()
+            videoPlayer = mp
+            // beat/voice-reactive effects follow the clip's own soundtrack (same reader the baker uses)
+            Thread { try { videoAmp = AudioAmplitudeReader.analyze(android.net.Uri.parse(path).path ?: path) } catch (_: Throwable) { videoAmp = null } }.start()
+        } catch (t: Throwable) {
+            android.util.Log.e("LiveEffectPreview", "video preview failed to start", t)
+        }
+    }
+
+    private fun releaseVideoPlayer() {
+        try { videoPlayer?.release() } catch (_: Throwable) {}
+        videoPlayer = null
+        videoAmp = null
     }
 
     // =====================================================================
@@ -867,7 +935,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
             if (engine == null) {
                 engine = LumVibeEngineBridge(context, "effects.manifest.json", shared = true).also {
                     it.setCameraTexture(cameraTexId)
-                    it.setFrameSize(camW, camH)
+                    it.setFrameSize(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1)) // screen size: shaders now work in screen space
                 }
             }
             val eng = engine!!
@@ -893,6 +961,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
     }
 
     private fun releaseEngine() {
+        releaseVideoPlayer()
         try { engine?.release() } catch (_: Throwable) {}
         engine = null
         engineEffectId = null
@@ -909,6 +978,7 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         val eng = engine
         if (eng == null) { r.drawVideoFrame(cameraTexId, texMatrix); return }
         try {
+            eng.setFrameSize(surfaceW.coerceAtLeast(1), surfaceH.coerceAtLeast(1))
             eng.setTexMatrix(texMatrix)
             eng.setCameraTexCoords(r.cameraTexCoords())
             if (display) {
@@ -950,7 +1020,10 @@ class LiveEffectPreviewView @JvmOverloads constructor(
         // declarations above for why), read every frame - cheap, just a
         // volatile float read, no thread hop needed since LiveAudioReader's
         // own read thread already did the smoothing work.
-        val amp = liveAudioReader?.currentAmplitude() ?: 0f
+        val vp = videoPlayer
+        val amp = if (vp != null) {
+            try { videoAmp?.amplitudeAt(vp.currentPosition / 1000f) ?: 0f } catch (_: Throwable) { 0f }
+        } else (liveAudioReader?.currentAmplitude() ?: 0f)
         if (r.currentEffect in audioDirectEffects) {
             r.effectIntensity = amp
         } else if (r.currentEffect in audioInvertedEffects) {

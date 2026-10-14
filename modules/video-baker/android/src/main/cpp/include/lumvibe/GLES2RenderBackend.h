@@ -73,6 +73,11 @@ public:
         if (loc >= 0) glUniform2f(loc, v.x, v.y);
     }
 
+    void setUniformVec3(uint32_t program, const std::string& name, float x, float y, float z) override {
+        GLint loc = glGetUniformLocation(program, name.c_str());
+        if (loc >= 0) glUniform3f(loc, x, y, z);
+    }
+
     void setUniformMat4(uint32_t program, const std::string& name, const float* m16) override {
         GLint loc = glGetUniformLocation(program, name.c_str());
         if (loc >= 0 && m16) glUniformMatrix4fv(loc, 1, GL_FALSE, m16);
@@ -147,16 +152,20 @@ public:
         GLint aPosition = glGetAttribLocation(currentProgram_, "aPosition");
         GLint aTexCoord = glGetAttribLocation(currentProgram_, "aTexCoord");
 
-        glVertexAttribPointer(aPosition, 2, GL_FLOAT, GL_FALSE, 0, vertexCoords_.data());
-        glEnableVertexAttribArray(aPosition);
-
-        glVertexAttribPointer(aTexCoord, 2, GL_FLOAT, GL_FALSE, 0, texCoords_.data());
-        glEnableVertexAttribArray(aTexCoord);
+        // aTexCoord may be optimised away (screen-space shaders derive vTexCoord from aPosition).
+        if (aPosition >= 0) {
+            glVertexAttribPointer(aPosition, 2, GL_FLOAT, GL_FALSE, 0, vertexCoords_.data());
+            glEnableVertexAttribArray(aPosition);
+        }
+        if (aTexCoord >= 0) {
+            glVertexAttribPointer(aTexCoord, 2, GL_FLOAT, GL_FALSE, 0, texCoords_.data());
+            glEnableVertexAttribArray(aTexCoord);
+        }
 
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-        glDisableVertexAttribArray(aPosition);
-        glDisableVertexAttribArray(aTexCoord);
+        if (aPosition >= 0) glDisableVertexAttribArray(aPosition);
+        if (aTexCoord >= 0) glDisableVertexAttribArray(aTexCoord);
     }
 
 #if defined(__ANDROID__)
