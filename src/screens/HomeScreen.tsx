@@ -30,6 +30,7 @@ import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/n
 import { useAudioPlayer, useAudioPlayerStatus, AudioModule } from 'expo-audio';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
+import AdSlot from '@/components/AdSlot';
 import NetInfo from '@react-native-community/netinfo';
 
 // ✅ NEW: when a caught error is network-shaped (or the device is
@@ -2261,7 +2262,7 @@ export default function HomeScreen() {
   };
 
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
-    if (isAd(item)) return <NativeAdPost adIndex={item.adIndex} />;
+    if (isAd(item)) return <AdSlot key={item.id} adIndex={item.adIndex} fallback={<NativeAdPost adIndex={item.adIndex} />} />;
     if (isWinnerCard(item)) {
       if (weeklyWinners.length === 0) return null;
       return <WinnerCardInFeed winners={weeklyWinners} onUserPress={handleUserPress} />;

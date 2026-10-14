@@ -34,6 +34,7 @@ import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/n
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
+import AdSlot from '@/components/AdSlot';
 import { Asset } from 'expo-asset';
 // ✅ NEW: same native module create.tsx already uses for effects baking —
 // reusing it here for watermark baking adds nothing new to the native
@@ -2063,7 +2064,7 @@ export default function VideosScreen() {
   };
 
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
-    if (isAd(item)) return <NativeAdPost adIndex={item.adIndex} />;
+    if (isAd(item)) return <AdSlot key={item.id} adIndex={item.adIndex} fallback={<NativeAdPost adIndex={item.adIndex} />} />;
     if (isWinnerCard(item)) { if (weeklyWinners.length === 0) return null; return <WinnerCardVideo winners={weeklyWinners} onUserPress={handleUserPress} />; }
     return (
       <VideoPost

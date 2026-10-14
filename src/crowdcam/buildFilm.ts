@@ -8,6 +8,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { listClips, contributorNames, CrowdClipRow, CROWD_CLOUD_NAME } from './crowdCamApi';
 import { parseWav, computeEnvelope, audioStats, syncClips, SyncResult, SyncMethod } from './syncEngine';
+import { detectBeats, timelineEnvelope, BeatGrid } from './beatGrid';
 import { planFilm, chooseBaseAudioClip, DirectorOptions } from './autoDirector';
 import { buildFilmUrl, audioUrlFor, angleThumbUrl, waitForFilm } from './cloudinaryFilm';
 
@@ -30,6 +31,8 @@ export interface RoomAnalysis {
   rows: CrowdClipRow[];
   synced: SyncResult;
   silentClipIds: string[];
+  /** each clip's loudness pattern, kept so the beat can be found without downloading anything again */
+  envs?: Record<string, Float32Array>;
 }
 
 export interface FilmResult {
@@ -40,11 +43,25 @@ export interface FilmResult {
   shots: number;
   angles: Angle[];
   usedBaseAudio: boolean;
+  /** which soundtrack the film has: one clip's room sound, the host's song, or each piece's own audio */
+  soundtrack?: 'room' | 'song' | 'clips';
+  /** tempo the cuts follow, or null if cuts are not on a beat */
+  beatBpm?: number | null;
+  /** something the host should know (for example: the soundtrack had to be dropped) */
+  note?: string;
 }
+
+/** What plays under the film. 'room' = best clip's real sound. 'song' = a song that is already on Cloudinary. */
+export type SoundChoice = { mode: 'room' } | { mode: 'song'; publicId: string; title?: string };
 
 export interface RenderOptions extends DirectorOptions {
   /** EXPERIMENTAL one-soundtrack mode. Default false until tested on real clips. */
   useBaseAudio?: boolean;
+  /**
+   * Host's choice. If given: cuts land on the beat (when a clear beat is found) and ONE soundtrack plays.
+   * If left out, Crowd Cam works exactly as before (random cuts, each piece keeps its own audio).
+   */
+  sound?: SoundChoice;
   onStage?: (stage: BuildStage, detail?: string) => void;
 }
 
@@ -75,6 +92,19 @@ async function loadClipAudio(publicId: string) {
   return { env: computeEnvelope(samples, sampleRate), rms: audioStats(samples).rms };
 }
 
+const songEnvCache = new Map<string, Float32Array>();
+async function loadSongEnvelope(publicId: string): Promise<Float32Array> {
+  const hit = songEnvCache.get(publicId);
+  if (hit) return hit;
+  let res: Response;
+  try { res = await fetchWithRetry(audioUrlFor(CROWD_CLOUD_NAME, publicId, true)); }
+  catch { res = await fetchWithRetry(audioUrlFor(CROWD_CLOUD_NAME, publicId, false)); }
+  const { samples, sampleRate } = parseWav(await res.arrayBuffer());
+  const env = computeEnvelope(samples, sampleRate);
+  songEnvCache.set(publicId, env);
+  return env;
+}
+
 /** the numbers behind the sync decisions, as plain text (for support / tuning) */
 export function debugSummary(a: RoomAnalysis): string {
   const f = (x: { score: number; prominence: number } | null) => (x ? `${x.score.toFixed(2)}/${x.prominence.toFixed(1)}` : '-');
@@ -96,17 +126,19 @@ export async function analyzeRoom(roomId: string, onStage?: (s: BuildStage, deta
 
   const inputs: { id: string; env: Float32Array; recordedAtMs?: number }[] = [];
   const silent: string[] = [];
+  const envs: Record<string, Float32Array> = {};
   for (let i = 0; i < rows.length; i++) {
     stage('audio', `${i + 1}/${rows.length}`);
     const { env, rms } = await loadClipAudio(rows[i].cloudinary_public_id); // one at a time = low memory
     if (rms < SILENT_RMS) silent.push(rows[i].id);
     const t = Date.parse(rows[i].recorded_at);
+    envs[rows[i].id] = env;
     inputs.push({ id: rows[i].id, env, recordedAtMs: Number.isFinite(t) ? t : undefined });
   }
 
   stage('syncing');
   const synced = syncClips(inputs);
-  const analysis: RoomAnalysis = { roomId, rows, synced, silentClipIds: silent };
+  const analysis: RoomAnalysis = { roomId, rows, synced, silentClipIds: silent, envs };
   if (synced.clips.length < 2) {
     throw Object.assign(
       new Error("Couldn't line the clips up by sound, and there were no start times to fall back on."),
@@ -119,24 +151,53 @@ export async function analyzeRoom(roomId: string, onStage?: (s: BuildStage, deta
 export async function renderFilm(a: RoomAnalysis, opts: RenderOptions = {}): Promise<FilmResult> {
   const stage = opts.onStage ?? (() => {});
   stage('cutting');
-  const plan = planFilm(a.synced.clips, opts);
+  const sound = opts.sound;
+  const silentSet = new Set(a.silentClipIds);
+
+  // 1) find a beat to cut on (only when the host chose a soundtrack mode)
+  let grid: BeatGrid | null = null;
+  if (sound) {
+    try {
+      if (sound.mode === 'song') grid = detectBeats(await loadSongEnvelope(sound.publicId), 'film');
+      else if (a.envs) grid = detectBeats(timelineEnvelope(a.synced.clips.filter(c => !silentSet.has(c.id)), a.envs), 'event');
+    } catch { grid = null; /* no beat found: cut the old random way */ }
+  }
+  const plan = planFilm(a.synced.clips, { ...opts, beatGrid: grid });
   if (plan.segments.length === 0) throw new Error('Nothing to cut.');
 
+  // 2) pick the soundtrack
   const publicIds: Record<string, string> = {};
   a.rows.forEach(r => { publicIds[r.id] = r.cloudinary_public_id; });
-  const base = opts.useBaseAudio ? chooseBaseAudioClip(a.synced.clips, plan) : null;
-  const filmUrl = buildFilmUrl({
+  const wantsRoom = sound ? sound.mode === 'room' : !!opts.useBaseAudio;
+  const base = wantsRoom ? chooseBaseAudioClip(a.synced.clips.filter(c => !silentSet.has(c.id)), plan) : null;
+  const songId = sound && sound.mode === 'song' ? sound.publicId : null;
+  const urlWith = (audio: boolean) => buildFilmUrl({
     cloudName: CROWD_CLOUD_NAME,
     publicIds,
     segments: plan.segments,
-    baseAudioClipId: base?.id ?? null,
+    baseAudioClipId: audio ? base?.id ?? null : null,
+    songPublicId: audio ? songId : null,
   });
+  let filmUrl = urlWith(true);
+  let usedBase = !!base;
+  let usedSong = !!songId;
+  let note: string | undefined;
 
   stage('rendering');
   try {
     await waitForFilm(filmUrl, { onTick: s => stage('rendering', `${s}s`) });
   } catch (e: any) {
-    throw Object.assign(e instanceof Error ? e : new Error(String(e)), { details: filmUrl });
+    // the one-soundtrack layer is the new, untested part: if Cloudinary refuses it, build the film the way it always worked
+    const refused = String(e?.message || '').startsWith('Cloudinary could not');
+    if (refused && (usedBase || usedSong)) {
+      filmUrl = urlWith(false);
+      note = usedSong ? "The song couldn't be added, so each camera's own sound is used." : "One steady soundtrack didn't work, so each camera's own sound is used.";
+      usedBase = false; usedSong = false;
+      try { await waitForFilm(filmUrl, { onTick: s => stage('rendering', `${s}s`) }); }
+      catch (e2: any) { throw Object.assign(e2 instanceof Error ? e2 : new Error(String(e2)), { details: filmUrl }); }
+    } else {
+      throw Object.assign(e instanceof Error ? e : new Error(String(e)), { details: filmUrl });
+    }
   }
 
   stage('downloading');
@@ -162,5 +223,5 @@ export async function renderFilm(a: RoomAnalysis, opts: RenderOptions = {}): Pro
 
   const contributors = await contributorNames(a.roomId);
   stage('done');
-  return { filmUrl, localUri: dl.uri, contributors, durationSec: plan.durationSec, shots: plan.segments.length, angles, usedBaseAudio: !!base };
+  return { filmUrl, localUri: dl.uri, contributors, durationSec: plan.durationSec, shots: plan.segments.length, angles, usedBaseAudio: usedBase, soundtrack: usedSong ? 'song' : usedBase ? 'room' : 'clips', beatBpm: plan.beatBpm ?? null, note };
 }

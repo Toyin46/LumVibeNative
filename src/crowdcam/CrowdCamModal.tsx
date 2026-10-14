@@ -28,11 +28,12 @@ import {
   createRoom, joinRoom, getRoom, setRoomStatus, watchRoom,
   listPeople, uploadClip, openLiveChannel,
 } from './crowdCamApi';
-import { analyzeRoom, renderFilm, debugSummary, BuildStage, FilmResult, RoomAnalysis } from './buildFilm';
+import { analyzeRoom, renderFilm, debugSummary, BuildStage, FilmResult, RoomAnalysis, SoundChoice } from './buildFilm';
 // Effects under the record button (same live GL effects + same recorder as the normal camera in create.tsx)
 import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview';
 import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview';
 import { CROWD_FX, crowdFxById } from './crowdFx';
+import SongPicker from './SongPicker';
 
 // ── Crowd Cam shows the SAME effects as the camera in create.tsx (and the website): every effect below, minus the hidden ones.
 // Entries already in ./crowdFx keep their cover image; the rest get an emoji tile. To bring a hidden effect back, delete its name from CROWD_HIDDEN.
@@ -102,6 +103,12 @@ interface Props {
   visible: boolean;
   onClose: () => void;
   onFilmReady: (r: CrowdFilmResult) => void;
+  /**
+   * OPTIONAL override. Normally NOT needed: Crowd Cam has its own built-in song picker (SongPicker.tsx).
+   * Pass this only if you want to open your own picker instead; it must return { publicId, title }
+   * where publicId is the song's Cloudinary public id.
+   */
+  pickSong?: () => Promise<{ publicId: string; title?: string } | null>;
 }
 
 const STAGE_TEXT: Record<BuildStage, string> = {
@@ -163,7 +170,7 @@ function FilmPreview({ uri, playing, onToggle }: { uri: string; playing: boolean
 }
 
 // ── the screen ───────────────────────────────────────────────
-export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) {
+export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong }: Props) {
   const { user } = useAuthStore();
   const userId: string | undefined = (user as any)?.id;
 
@@ -186,6 +193,9 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
   const [camReady, setCamReady] = useState(false);
   const [result, setResult] = useState<FilmResult | null>(null);
   const [seed, setSeed] = useState(1);
+  const [soundMode, setSoundMode] = useState<'room' | 'song'>('room');
+  const [song, setSong] = useState<{ publicId: string; title?: string } | null>(null);
+  const [songPickerOpen, setSongPickerOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [recordedAtDate, setRecordedAtDate] = useState<Date>(new Date());
 
@@ -240,6 +250,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     setPeople([]); setFrames({}); setIsRecording(false); setRecSec(0);
     setUploadPct(0); setUploadErr(null); setBuildText(''); setBuilding(false);
     setCamReady(false); setResult(null); setSeed(1); setPlaying(false);
+    setSoundMode('room'); setSong(null); setSongPickerOpen(false);
     recordingRef.current = false; pendingFile.current = null; analysisRef.current = null;
   }, []);
   useEffect(() => { if (!visible) resetAll(); }, [visible, resetAll]);
@@ -469,7 +480,8 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     try {
       const onStage = (st: BuildStage, d?: string) => setBuildText(STAGE_TEXT[st] + (d ? ` ${d}` : ''));
       if (!reuse || !analysisRef.current) analysisRef.current = await analyzeRoom(room.id, onStage);
-      const film = await renderFilm(analysisRef.current, { seed: nextSeed, maxFilmSec: MAX_FILM_SEC, onStage });
+      const sound: SoundChoice = soundMode === 'song' && song ? { mode: 'song', publicId: song.publicId, title: song.title } : { mode: 'room' };
+      const film = await renderFilm(analysisRef.current, { seed: nextSeed, maxFilmSec: MAX_FILM_SEC, onStage, sound });
       setSeed(nextSeed);
       setResult(film);
       setPlaying(false);
@@ -481,6 +493,38 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
     setBuilding(false);
     setBuildText('');
   };
+
+  const chooseSong = async () => {
+    if (!pickSong) { setSongPickerOpen(true); return; } // built-in picker
+    try {
+      const picked = await pickSong();
+      if (picked?.publicId) { setSong(picked); setSoundMode('song'); }
+    } catch (e: any) { Alert.alert('Could not add the song', String(e?.message || '')); }
+  };
+
+  // the host picks the soundtrack BEFORE the film is built, because the cuts follow its beat
+  const SoundPicker = isHost && !building ? (
+    <View style={{ marginBottom: 12 }}>
+      <Text style={s.soundCap}>Soundtrack</Text>
+      <View style={s.soundRow}>
+        <TouchableOpacity style={[s.soundChip, soundMode === 'room' && s.soundChipOn]} onPress={() => setSoundMode('room')}>
+          <Ionicons name="mic-outline" size={15} color={soundMode === 'room' ? '#000' : ACCENT} />
+          <Text style={[s.soundChipTxt, soundMode === 'room' && { color: '#000' }]}>  Room sound</Text>
+        </TouchableOpacity>
+        {(
+          <TouchableOpacity style={[s.soundChip, soundMode === 'song' && s.soundChipOn]} onPress={() => (song && soundMode !== 'song' ? setSoundMode('song') : chooseSong())}>
+            <Ionicons name="musical-notes-outline" size={15} color={soundMode === 'song' ? '#000' : ACCENT} />
+            <Text style={[s.soundChipTxt, soundMode === 'song' && { color: '#000' }]} numberOfLines={1}>  {song ? (song.title || 'Your song') : 'Add a song'}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      <Text style={s.hint}>
+        {soundMode === 'song' && song
+          ? "The song plays under the whole film and the cuts follow its beat. Tap it again to change."
+          : "One steady soundtrack from the room, and the cuts follow its beat."}
+      </Text>
+    </View>
+  ) : null;
 
   const continueToPost = () => {
     if (!result) return;
@@ -756,6 +800,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
                 </View>
               ) : (
                 <View style={{ paddingHorizontal: 20, paddingBottom: 28 }}>
+                  {SoundPicker}
                   <TouchableOpacity style={[s.primary, uploadedCount < 2 && s.dim]} disabled={uploadedCount < 2} onPress={() => makeFilm(1, false)}>
                     <Text style={s.primaryTxt}>Make the film</Text>
                   </TouchableOpacity>
@@ -820,6 +865,11 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
                 </View>
               </View>
 
+              <Text style={s.hint}>
+                {result.beatBpm ? `Cuts follow the beat (about ${Math.round(result.beatBpm)} BPM).` : 'No steady beat found, so the cuts are spread out evenly.'}
+              </Text>
+              {!!result.note && <Text style={s.warn}>{result.note}</Text>}
+
               {result.angles.some(a => a.method === 'start-time') && (
                 <Text style={s.warn}>
                   Some cameras were lined up by start time because their sound didn't match. They may be slightly off (marked with a clock).
@@ -843,6 +893,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
                 <Ionicons name={playing ? 'pause' : 'play'} size={16} color={ACCENT} />
                 <Text style={s.secondaryTxt}>  {playing ? 'Pause film' : 'Watch full film'}</Text>
               </TouchableOpacity>
+              {SoundPicker}
               <TouchableOpacity style={[s.ghost, building && s.dim]} disabled={building} onPress={() => makeFilm(seed + 1, true)}>
                 {building ? <ActivityIndicator color={ACCENT} /> : <Text style={s.ghostTxt}>Try a different cut</Text>}
               </TouchableOpacity>
@@ -850,6 +901,13 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady }: Props) 
             </ScrollView>
           </View>
         )}
+
+        {/* built-in song picker, drawn on top of everything inside Crowd Cam */}
+        <SongPicker
+          visible={songPickerOpen}
+          onClose={() => setSongPickerOpen(false)}
+          onPick={picked => { setSong(picked); setSoundMode('song'); setSongPickerOpen(false); }}
+        />
       </View>
     </Modal>
   );
@@ -912,6 +970,11 @@ const s = StyleSheet.create({
   fxThumbOn: { borderColor: ACCENT },
   fxCheck: { position: 'absolute', top: 3, right: 3, width: 16, height: 16, borderRadius: 8, backgroundColor: ACCENT, alignItems: 'center', justifyContent: 'center' },
   fxName: { color: '#7f958c', fontSize: 10, fontWeight: '600', marginTop: 4, textAlign: 'center' },
+  soundCap: { color: '#9bb0a8', fontSize: 12, fontWeight: '700', marginBottom: 6, textAlign: 'center' },
+  soundRow: { flexDirection: 'row', justifyContent: 'center', gap: 10 },
+  soundChip: { flexDirection: 'row', alignItems: 'center', paddingVertical: 9, paddingHorizontal: 14, borderRadius: 20, borderWidth: 1, borderColor: EDGE, maxWidth: '55%' },
+  soundChipOn: { backgroundColor: ACCENT, borderColor: ACCENT },
+  soundChipTxt: { color: ACCENT, fontSize: 13, fontWeight: '700' },
   hint: { color: '#7f958c', fontSize: 12, textAlign: 'center', marginTop: 8 },
 
   codeStrip: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: EDGE, backgroundColor: CARD, borderRadius: 18, paddingVertical: 10, paddingHorizontal: 12, marginTop: 10 },

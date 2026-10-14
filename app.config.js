@@ -72,7 +72,7 @@ export default {
       // ✅ NEW: Play requires a new version code for every upload — your
       // last one used code 1, so this build must be 2 or higher. Bump this
       // by 1 every time you build again after this.
-      "versionCode": 2
+      "versionCode": 3
     },
     "plugins": [
       "expo-audio",
@@ -109,7 +109,10 @@ export default {
       // The two Firebase packages below DO ship real config plugins
       // (no such error was thrown for either of them) and stay as-is.
       "@react-native-firebase/app",
-      "@react-native-firebase/messaging"
+      "@react-native-firebase/messaging",
+      // ✅ NEW: Google AdMob (feed native ads + rewarded ads). Native code, so this
+      // needs a NEW EAS build — an `eas update` cannot add it.
+      ["react-native-google-mobile-ads", { "androidAppId": "ca-app-pub-4412719226192046~4684668191" }]
     ]
   }
 };

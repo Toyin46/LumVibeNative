@@ -20,6 +20,11 @@ export interface FilmUrlOptions {
    * Test on 2 clips first. Leave undefined to keep each piece's own audio.
    */
   baseAudioClipId?: string | null;
+  /**
+   * If set, every piece is muted and this song (a Cloudinary public id) plays under the whole film.
+   * Wins over baseAudioClipId.
+   */
+  songPublicId?: string | null;
 }
 
 /** folders in a public id are written with ":" inside a layer */
@@ -30,7 +35,7 @@ export function buildFilmUrl(o: FilmUrlOptions): string {
   const w = o.width ?? 720;
   const h = o.height ?? 1280;
   if (o.segments.length === 0) throw new Error('No segments to build a film from');
-  const mute = !!o.baseAudioClipId;
+  const mute = !!o.baseAudioClipId || !!o.songPublicId;
 
   const pidOf = (clipId: string) => {
     const p = o.publicIds[clipId];
@@ -38,23 +43,30 @@ export function buildFilmUrl(o: FilmUrlOptions): string {
     return p;
   };
 
+  // fill the frame; a "punch" piece is filled 20% bigger and cropped back to size = a gentle zoom-in
+  const fit = (punch: boolean | undefined, quality: string): string[] => {
+    if (!punch) return [`c_fill,w_${w},h_${h}${quality}`];
+    return [`c_fill,w_${Math.round(w * 1.2)},h_${Math.round(h * 1.2)}${quality}`, `c_crop,w_${w},h_${h},g_center`];
+  };
+
   const parts: string[] = [];
   const first = o.segments[0];
   parts.push(`so_${num(first.srcStartSec)},eo_${num(first.srcEndSec)}`);
-  parts.push(`c_fill,w_${w},h_${h},q_auto:good`);
+  parts.push(...fit(first.punch, ',q_auto:good'));
   if (mute) parts.push('e_volume:mute');
 
   for (let i = 1; i < o.segments.length; i++) {
     const s = o.segments[i];
     parts.push(`fl_splice,l_video:${layerId(pidOf(s.clipId))}`);
     parts.push(`so_${num(s.srcStartSec)},eo_${num(s.srcEndSec)}`);
-    parts.push(`c_fill,w_${w},h_${h}`);
+    parts.push(...fit(s.punch, ''));
     if (mute) parts.push('e_volume:mute');
     parts.push('fl_layer_apply');
   }
 
-  if (mute && o.baseAudioClipId) {
-    parts.push(`l_audio:${layerId(pidOf(o.baseAudioClipId))}`);
+  const soundtrack = o.songPublicId ?? o.baseAudioClipId;
+  if (mute && soundtrack) {
+    parts.push(`l_audio:${layerId(o.songPublicId ? o.songPublicId : pidOf(o.baseAudioClipId as string))}`);
     parts.push('fl_layer_apply');
   }
 

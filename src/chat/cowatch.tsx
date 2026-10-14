@@ -68,6 +68,7 @@ import { broadcastToUserChannel } from '../lib/globalIncomingSignal';
 import { useAuthStore } from '../store/authStore';
 import { notifyCowatchInvite, notifyCowatchCancelled } from '../lib/notifications';
 import { sendBroadcastOnce } from '../lib/realtimeSend';
+import AdSlot from '@/components/AdSlot';
 import { shareWatchLink } from '../lib/linkRoom';
 
 // ✅ NEW: how long the app may stay in the background during a watch party
@@ -3689,7 +3690,7 @@ export default function CowatchScreen() {
               />
             }
             renderItem={({ item, index }) => {
-              if (isAd(item)) return <NativeAdCard adIndex={item.adIndex} itemHeight={feedHeight} />;
+              if (isAd(item)) return <AdSlot key={item.id} adIndex={item.adIndex} fallback={<NativeAdPost adIndex={item.adIndex} />} />;
               return (
                 <FeedPostCard
                   post={item as FeedPost}
