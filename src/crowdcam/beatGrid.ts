@@ -23,7 +23,7 @@ export interface BeatGrid {
 const MIN_BPM = 70;
 const MAX_BPM = 180;
 const MIN_ANALYSE_SEC = 8;
-const MAX_ANALYSE_SEC = 120;
+const MAX_ANALYSE_SEC = 600; // a whole song (up to 10 min) is analysed, so a part picked late in the song still gets its beat
 /** below this the beat is not trusted. Calibrated on synthetic audio only: TUNE with real clips. */
 export const MIN_BEAT_STRENGTH = 1.2;
 
@@ -110,6 +110,34 @@ function bestPhase(o: Float32Array, from: number, to: number, bpm: number): Comb
   return best;
 }
 
+/** biggest moment = the 1.5 s window with the most "got louder" energy between two sample positions */
+function peakMoment(o: Float32Array, from: number, to: number): number | null {
+  const w = Math.round(1.5 * FINE_HZ);
+  const n = to - from;
+  if (n <= 3 * w) return null;
+  let run = 0, bestRun = -1, bestAt = from;
+  for (let i = from; i < to; i++) {
+    run += o[i];
+    if (i - from >= w) run -= o[i - w];
+    if (i - from >= w - 1 && run > bestRun) { bestRun = run; bestAt = i - w + 1; }
+  }
+  return Math.round((bestAt / FINE_HZ) * 100) / 100;
+}
+
+/**
+ * The host picked only a PART of a song (fromSec..toSec). Find the beat on the WHOLE song (more reliable),
+ * then keep just the beats inside the part and re-time them so 0 = the start of the part (= the start of the film).
+ * Returns null if the part holds fewer than 4 beats.
+ */
+export function windowGrid(grid: BeatGrid, env: Float32Array, fromSec: number, toSec: number): BeatGrid | null {
+  const beats = grid.beats.filter(b => b >= fromSec - 0.001 && b <= toSec).map(b => Math.round((b - fromSec) * 1000) / 1000);
+  if (beats.length < 4) return null;
+  const o = onsetStrength(env.length > MAX_ANALYSE_SEC * FINE_HZ ? env.subarray(0, MAX_ANALYSE_SEC * FINE_HZ) : env);
+  const a = Math.max(0, Math.floor(fromSec * FINE_HZ)), b = Math.min(o.length, Math.floor(toSec * FINE_HZ));
+  const peak = b > a ? peakMoment(o, a, b) : null;
+  return { ...grid, beats, peakSec: peak === null ? null : Math.round((peak - fromSec) * 100) / 100 };
+}
+
 export function detectBeats(env: Float32Array, domain: 'event' | 'film'): BeatGrid | null {
   const e = env.length > MAX_ANALYSE_SEC * FINE_HZ ? env.subarray(0, MAX_ANALYSE_SEC * FINE_HZ) : env;
   if (e.length < MIN_ANALYSE_SEC * FINE_HZ) return null;
@@ -138,17 +166,6 @@ export function detectBeats(env: Float32Array, domain: 'event' | 'film'): BeatGr
   const beats: number[] = [];
   for (let pos = full.phase; pos < n; pos += period) beats.push(Math.round((pos / FINE_HZ) * 1000) / 1000);
 
-  // biggest moment = the 1.5 s window with the most "got louder" energy
-  let peakSec: number | null = null;
-  const w = Math.round(1.5 * FINE_HZ);
-  if (n > 3 * w) {
-    let run = 0, bestRun = -1, bestAt = 0;
-    for (let i = 0; i < n; i++) {
-      run += o[i];
-      if (i >= w) run -= o[i - w];
-      if (i >= w - 1 && run > bestRun) { bestRun = run; bestAt = i - w + 1; }
-    }
-    peakSec = Math.round((bestAt / FINE_HZ) * 100) / 100;
-  }
+  const peakSec = peakMoment(o, 0, n);
   return { bpm: Math.round(full.bpm * 10) / 10, beats, strength: Math.round(full.strength * 100) / 100, peakSec, domain };
 }

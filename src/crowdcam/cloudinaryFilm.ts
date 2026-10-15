@@ -25,6 +25,9 @@ export interface FilmUrlOptions {
    * Wins over baseAudioClipId.
    */
   songPublicId?: string | null;
+  /** play only this part of the song (seconds into the song). Leave out = from the start. */
+  songStartSec?: number | null;
+  songEndSec?: number | null;
 }
 
 /** folders in a public id are written with ":" inside a layer */
@@ -67,6 +70,10 @@ export function buildFilmUrl(o: FilmUrlOptions): string {
   const soundtrack = o.songPublicId ?? o.baseAudioClipId;
   if (mute && soundtrack) {
     parts.push(`l_audio:${layerId(o.songPublicId ? o.songPublicId : pidOf(o.baseAudioClipId as string))}`);
+    if (o.songPublicId && o.songEndSec && o.songEndSec > (o.songStartSec ?? 0)) {
+      // only the part the host picked: start/end offsets on the audio layer itself
+      parts.push(`so_${Math.round((o.songStartSec ?? 0) * 100) / 100},eo_${Math.round(o.songEndSec * 100) / 100}`);
+    }
     parts.push('fl_layer_apply');
   }
 

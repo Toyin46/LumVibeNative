@@ -33,7 +33,7 @@ import { analyzeRoom, renderFilm, debugSummary, BuildStage, FilmResult, RoomAnal
 import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview';
 import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview';
 import { CROWD_FX, crowdFxById } from './crowdFx';
-import SongPicker from './SongPicker';
+import SongPicker, { fmtTime, type PickedSong } from './SongPicker';
 
 // ── Crowd Cam shows the SAME effects as the camera in create.tsx (and the website): every effect below, minus the hidden ones.
 // Entries already in ./crowdFx keep their cover image; the rest get an emoji tile. To bring a hidden effect back, delete its name from CROWD_HIDDEN.
@@ -108,7 +108,7 @@ interface Props {
    * Pass this only if you want to open your own picker instead; it must return { publicId, title }
    * where publicId is the song's Cloudinary public id.
    */
-  pickSong?: () => Promise<{ publicId: string; title?: string } | null>;
+  pickSong?: () => Promise<PickedSong | null>;
 }
 
 const STAGE_TEXT: Record<BuildStage, string> = {
@@ -194,8 +194,9 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
   const [result, setResult] = useState<FilmResult | null>(null);
   const [seed, setSeed] = useState(1);
   const [soundMode, setSoundMode] = useState<'room' | 'song'>('room');
-  const [song, setSong] = useState<{ publicId: string; title?: string } | null>(null);
+  const [song, setSong] = useState<PickedSong | null>(null);
   const [songPickerOpen, setSongPickerOpen] = useState(false);
+  const [editingPart, setEditingPart] = useState(false); // true = the picker opens straight on the trim screen
   const [playing, setPlaying] = useState(false);
   const [recordedAtDate, setRecordedAtDate] = useState<Date>(new Date());
 
@@ -250,7 +251,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
     setPeople([]); setFrames({}); setIsRecording(false); setRecSec(0);
     setUploadPct(0); setUploadErr(null); setBuildText(''); setBuilding(false);
     setCamReady(false); setResult(null); setSeed(1); setPlaying(false);
-    setSoundMode('room'); setSong(null); setSongPickerOpen(false);
+    setSoundMode('room'); setSong(null); setSongPickerOpen(false); setEditingPart(false);
     recordingRef.current = false; pendingFile.current = null; analysisRef.current = null;
   }, []);
   useEffect(() => { if (!visible) resetAll(); }, [visible, resetAll]);
@@ -480,7 +481,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
     try {
       const onStage = (st: BuildStage, d?: string) => setBuildText(STAGE_TEXT[st] + (d ? ` ${d}` : ''));
       if (!reuse || !analysisRef.current) analysisRef.current = await analyzeRoom(room.id, onStage);
-      const sound: SoundChoice = soundMode === 'song' && song ? { mode: 'song', publicId: song.publicId, title: song.title } : { mode: 'room' };
+      const sound: SoundChoice = soundMode === 'song' && song ? { mode: 'song', publicId: song.publicId, title: song.title, startSec: song.startSec, endSec: song.endSec } : { mode: 'room' };
       const film = await renderFilm(analysisRef.current, { seed: nextSeed, maxFilmSec: MAX_FILM_SEC, onStage, sound });
       setSeed(nextSeed);
       setResult(film);
@@ -495,7 +496,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
   };
 
   const chooseSong = async () => {
-    if (!pickSong) { setSongPickerOpen(true); return; } // built-in picker
+    if (!pickSong) { setEditingPart(false); setSongPickerOpen(true); return; } // built-in picker
     try {
       const picked = await pickSong();
       if (picked?.publicId) { setSong(picked); setSoundMode('song'); }
@@ -520,9 +521,16 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
       </View>
       <Text style={s.hint}>
         {soundMode === 'song' && song
-          ? "The song plays under the whole film and the cuts follow its beat. Tap it again to change."
+          ? (song.endSec
+              ? `Plays ${fmtTime(song.startSec ?? 0)} to ${fmtTime(song.endSec)} of the song, and the cuts follow its beat. The film is that long.`
+              : "The song plays under the whole film and the cuts follow its beat.")
           : "One steady soundtrack from the room, and the cuts follow its beat."}
       </Text>
+      {soundMode === 'song' && !!song?.previewUri && (
+        <TouchableOpacity onPress={() => { setEditingPart(true); setSongPickerOpen(true); }}>
+          <Text style={s.changePart}>✂  Change part</Text>
+        </TouchableOpacity>
+      )}
     </View>
   ) : null;
 
@@ -586,7 +594,7 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
               {step === 'camera' && room && (
                 <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
                   <View style={[s.dot, { backgroundColor: isRecording ? '#ff453a' : ACCENT }]} />
-                  <Text style={s.headerSub}>{isRecording ? `Recording LIVE  ·  ${mmss(recSec)}` : 'Ready v2'}</Text>
+                  <Text style={s.headerSub}>{isRecording ? `Recording LIVE  ·  ${mmss(recSec)}` : 'Ready'}</Text>
                 </View>
               )}
             </View>
@@ -905,8 +913,10 @@ export default function CrowdCamModal({ visible, onClose, onFilmReady, pickSong 
         {/* built-in song picker, drawn on top of everything inside Crowd Cam */}
         <SongPicker
           visible={songPickerOpen}
-          onClose={() => setSongPickerOpen(false)}
-          onPick={picked => { setSong(picked); setSoundMode('song'); setSongPickerOpen(false); }}
+          maxSec={MAX_FILM_SEC}
+          editSong={editingPart ? song : null}
+          onClose={() => { setSongPickerOpen(false); setEditingPart(false); }}
+          onPick={picked => { setSong(picked); setSoundMode('song'); setSongPickerOpen(false); setEditingPart(false); }}
         />
       </View>
     </Modal>
@@ -970,6 +980,7 @@ const s = StyleSheet.create({
   fxThumbOn: { borderColor: ACCENT },
   fxCheck: { position: 'absolute', top: 3, right: 3, width: 16, height: 16, borderRadius: 8, backgroundColor: ACCENT, alignItems: 'center', justifyContent: 'center' },
   fxName: { color: '#7f958c', fontSize: 10, fontWeight: '600', marginTop: 4, textAlign: 'center' },
+  changePart: { color: ACCENT, fontSize: 13, fontWeight: '800', textAlign: 'center', marginTop: 8 },
   soundCap: { color: '#9bb0a8', fontSize: 12, fontWeight: '700', marginBottom: 6, textAlign: 'center' },
   soundRow: { flexDirection: 'row', justifyContent: 'center', gap: 10 },
   soundChip: { flexDirection: 'row', alignItems: 'center', paddingVertical: 9, paddingHorizontal: 14, borderRadius: 20, borderWidth: 1, borderColor: EDGE, maxWidth: '55%' },

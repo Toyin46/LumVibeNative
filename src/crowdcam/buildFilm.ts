@@ -8,7 +8,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { listClips, contributorNames, CrowdClipRow, CROWD_CLOUD_NAME } from './crowdCamApi';
 import { parseWav, computeEnvelope, audioStats, syncClips, SyncResult, SyncMethod } from './syncEngine';
-import { detectBeats, timelineEnvelope, BeatGrid } from './beatGrid';
+import { detectBeats, timelineEnvelope, windowGrid, BeatGrid } from './beatGrid';
 import { planFilm, chooseBaseAudioClip, DirectorOptions } from './autoDirector';
 import { buildFilmUrl, audioUrlFor, angleThumbUrl, waitForFilm } from './cloudinaryFilm';
 
@@ -52,7 +52,10 @@ export interface FilmResult {
 }
 
 /** What plays under the film. 'room' = best clip's real sound. 'song' = a song that is already on Cloudinary. */
-export type SoundChoice = { mode: 'room' } | { mode: 'song'; publicId: string; title?: string };
+export type SoundChoice =
+  | { mode: 'room' }
+  // startSec/endSec = the part of the song the host picked (seconds into the song). Left out = the whole song.
+  | { mode: 'song'; publicId: string; title?: string; startSec?: number; endSec?: number };
 
 export interface RenderOptions extends DirectorOptions {
   /** EXPERIMENTAL one-soundtrack mode. Default false until tested on real clips. */
@@ -154,15 +157,24 @@ export async function renderFilm(a: RoomAnalysis, opts: RenderOptions = {}): Pro
   const sound = opts.sound;
   const silentSet = new Set(a.silentClipIds);
 
+  // the picked part of the song also sets how long the film is (the film is never longer than its music)
+  const songStart = sound && sound.mode === 'song' ? Math.max(0, sound.startSec ?? 0) : 0;
+  const songEnd = sound && sound.mode === 'song' && sound.endSec && sound.endSec > songStart ? sound.endSec : 0;
+  const partSec = songEnd ? songEnd - songStart : 0;
+
   // 1) find a beat to cut on (only when the host chose a soundtrack mode)
   let grid: BeatGrid | null = null;
   if (sound) {
     try {
-      if (sound.mode === 'song') grid = detectBeats(await loadSongEnvelope(sound.publicId), 'film');
+      if (sound.mode === 'song') {
+        const env = await loadSongEnvelope(sound.publicId);
+        grid = detectBeats(env, 'film');                      // beat of the WHOLE song (more reliable)
+        if (grid && songEnd) grid = windowGrid(grid, env, songStart, songEnd); // then only the picked part, re-timed to start at 0
+      }
       else if (a.envs) grid = detectBeats(timelineEnvelope(a.synced.clips.filter(c => !silentSet.has(c.id)), a.envs), 'event');
     } catch { grid = null; /* no beat found: cut the old random way */ }
   }
-  const plan = planFilm(a.synced.clips, { ...opts, beatGrid: grid });
+  const plan = planFilm(a.synced.clips, { ...opts, maxFilmSec: partSec ? Math.min(opts.maxFilmSec ?? partSec, partSec) : opts.maxFilmSec, beatGrid: grid });
   if (plan.segments.length === 0) throw new Error('Nothing to cut.');
 
   // 2) pick the soundtrack
@@ -177,6 +189,8 @@ export async function renderFilm(a: RoomAnalysis, opts: RenderOptions = {}): Pro
     segments: plan.segments,
     baseAudioClipId: audio ? base?.id ?? null : null,
     songPublicId: audio ? songId : null,
+    songStartSec: audio && songEnd ? songStart : null,
+    songEndSec: audio && songEnd ? songEnd : null,
   });
   let filmUrl = urlWith(true);
   let usedBase = !!base;
