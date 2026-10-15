@@ -24,8 +24,8 @@ import mobileAds, {
   NativeAssetType,
   NativeMediaView,
   NativeMediaAspectRatio,
+  NativeAd,
   TestIds,
-  useNativeAd,
 } from 'react-native-google-mobile-ads';
 
 const { height: SCREEN_H } = Dimensions.get('window');
@@ -80,13 +80,30 @@ function AdSlotInner({ fallback }: SlotProps) {
     return () => { alive = false; clearTimeout(t); };
   }, []);
 
-  const { status, nativeAd } = useNativeAd({
-    adUnitId: NATIVE_UNIT_ID,
-    autoLoad: ready,
-    requestOptions: { aspectRatio: NativeMediaAspectRatio.PORTRAIT },
-  });
+  // ✅ CHANGED: the `useNativeAd` hook only exists in react-native-google-mobile-ads 17+.
+  // This app uses 16.3.4 (17 needs a newer React Native), so the ad is loaded
+  // with NativeAd.createForAdRequest, which works in 16 and in 17.
+  const [nativeAd, setNativeAd] = useState<NativeAd | null>(null);
+  const [failed, setFailed] = useState(false);
 
-  if (status === 'no-fill' || status === 'error' || (!nativeAd && gaveUp)) {
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    let loaded: NativeAd | null = null;
+    NativeAd.createForAdRequest(NATIVE_UNIT_ID, { aspectRatio: NativeMediaAspectRatio.PORTRAIT })
+      .then((ad) => {
+        if (!alive) { try { (ad as any).destroy?.(); } catch { /* ignore */ } return; }
+        loaded = ad;
+        setNativeAd(ad);
+      })
+      .catch(() => { if (alive) setFailed(true); });
+    return () => {
+      alive = false;
+      if (loaded) { try { (loaded as any).destroy?.(); } catch { /* ignore */ } }
+    };
+  }, [ready]);
+
+  if (failed || (!nativeAd && gaveUp)) {
     return fallback;
   }
 
