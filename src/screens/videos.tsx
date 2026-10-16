@@ -35,6 +35,7 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
 import AdSlot from '../components/AdSlot';  // ✅ NEW: real AdMob native ad in the feed
+import ChallengeBanner, { EntryChip } from '../challenge/ChallengeBanner';
 import { Asset } from 'expo-asset';
 // ✅ NEW: same native module create.tsx already uses for effects baking —
 // reusing it here for watermark baking adds nothing new to the native
@@ -967,6 +968,8 @@ const VideoPost = memo(function VideoPost({
         )}
       </TouchableOpacity>
 
+      <EntryChip postId={String(item.id)} top={topOffset + 6} left={72} />
+
       {/* ✅ NEW: Three-dot menu button — top right */}
       <TouchableOpacity
         style={[styles.menuDotBtn, { top: topOffset }]}
@@ -1469,7 +1472,7 @@ export default function VideosScreen() {
         weeklyWinnersRef.current = hydrated;
         return;
       }
-      const { data: topUsers } = await supabase.from('users').select('id, username, display_name, avatar_url, points').order('points', { ascending: false }).limit(3);
+      const { data: topUsers } = await supabase.from('users').select('id, username, display_name, avatar_url, points').eq('is_official', false).order('points', { ascending: false }).limit(3);
       if (topUsers && topUsers.length > 0) {
         const derived: WeeklyWinner[] = topUsers.map((u: any, idx: number) => ({ rank: (idx + 1) as 1|2|3, user_id: u.id, username: u.username || 'unknown', display_name: u.display_name || 'Unknown', avatar_url: u.avatar_url, weekly_points: u.points || 0, week_start: weekStart.toISOString() }));
         setWeeklyWinners(derived);
@@ -2115,6 +2118,8 @@ export default function VideosScreen() {
           </View>
         }
       />
+
+      <ChallengeBanner top={HEADER_HEIGHT + 56} />
 
       {/* ✅ NEW: LUMVIBE header + Vibe/Following tabs — fixed on top, safe-area aware for any device */}
       <View style={[styles.topHeaderWrap, { height: HEADER_HEIGHT }]} pointerEvents="box-none">

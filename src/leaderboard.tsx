@@ -230,7 +230,7 @@ export default function LeaderboardScreen() {
       const orderColumn = filter === 'all' ? 'points' : 'weekly_points';
       const { data, error } = await supabase.from('users')
         .select('id, username, display_name, avatar_url, points, weekly_points')
-        .order(orderColumn, { ascending: false }).limit(50);
+        .eq('is_official', false).order(orderColumn, { ascending: false }).limit(50);
       if (error) throw error;
       const rankedUsers: LeaderboardUser[] = (data || []).map((user: any, index: number) => ({
         id: user.id, username: user.username || 'unknown', display_name: user.display_name || 'Unknown',

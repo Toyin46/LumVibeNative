@@ -27,6 +27,7 @@ import { useAuthStore } from './store/authStore';
 import { supabase } from './config/supabase';
 // FIX: expo-av is deprecated — replaced with expo-video's hook-based player.
 import { useVideoPlayer, VideoView } from 'expo-video';
+import EntryVoteBar from './challenge/EntryVoteBar';
 import type { RootStackParamList } from './navigation/types';
 
 type PostDetailRouteProp = RouteProp<RootStackParamList, 'PostDetail'>;
@@ -387,6 +388,8 @@ export default function ViewPostScreen() {
           <Feather name="share-2" size={22} color="#fff" />
         </TouchableOpacity>
       </View>
+
+      <EntryVoteBar postId={id} />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.postHeader}>

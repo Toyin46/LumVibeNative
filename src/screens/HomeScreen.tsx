@@ -1612,7 +1612,7 @@ export default function HomeScreen() {
         });
         setWeeklyWinners(hydrated); weeklyWinnersRef.current = hydrated; setWinnersAreOfficial(true); return;
       }
-      const { data: topUsers } = await supabase.from('users').select('id, username, display_name, avatar_url, points').order('points', { ascending: false }).limit(3);
+      const { data: topUsers } = await supabase.from('users').select('id, username, display_name, avatar_url, points').eq('is_official', false).order('points', { ascending: false }).limit(3);
       if (topUsers && topUsers.length > 0) {
         const derived: WeeklyWinner[] = topUsers.map((u: any, idx: number) => ({ rank: (idx + 1) as 1 | 2 | 3, user_id: u.id, username: u.username || 'unknown', display_name: u.display_name || 'Unknown', avatar_url: u.avatar_url, weekly_points: u.points || 0, week_start: weekStart.toISOString() }));
         setWeeklyWinners(derived); weeklyWinnersRef.current = derived; setWinnersAreOfficial(false);
