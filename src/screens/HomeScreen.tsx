@@ -26,6 +26,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // FIX 1: relative paths replace @/ aliases
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
+import * as MediaLibrary from 'expo-media-library';
+import * as FileSystem from 'expo-file-system/legacy';
+import { Asset } from 'expo-asset';
+import { bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker';
 import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/notificationHelpers';
 import { useAudioPlayer, useAudioPlayerStatus, AudioModule } from 'expo-audio';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
@@ -886,7 +890,7 @@ const feedAdStyles = StyleSheet.create({
 
 // ─── POST CARD ────────────────────────────────────────────────────────────────
 const PostCard = memo(({
-  item, user, onLike, onComment, onSave, onGift, onFollow, onUserPress, onShare, onDelete, onReport, isVisible, onView, followStatusMap, isTopWinner
+  item, user, onLike, onComment, onSave, onGift, onFollow, onUserPress, onShare, onDelete, onReport, onSaveMedia, isVisible, onView, followStatusMap, isTopWinner
 }: {
   item: Post; user: any; onLike: (post: Post) => void; onComment: (post: Post) => void;
   onSave: (post: Post) => void; onGift: (post: Post) => void;
@@ -894,10 +898,12 @@ const PostCard = memo(({
   onUserPress: (userId: string) => void; onShare: (post: Post) => void;
   onDelete: (post: Post) => void;
   onReport: (post: Post) => void; // ✅ NEW
+  onSaveMedia: (post: Post) => void; // ✅ NEW: download with watermark
   isVisible: boolean; onView: (postId: string) => void;
   followStatusMap: Map<string, boolean>; isTopWinner?: boolean;
 }) => {
   const { t } = useTranslation();
+  const [menuVisible, setMenuVisible] = useState(false); // ✅ NEW: three-dot sheet, same design as Videos
   const navigation = useNavigation<any>(); // FIX 4: replaces useRouter
   const isFollowing    = followStatusMap.get(item.user_id) || false;
   const [checkingFollow, setCheckingFollow] = useState(false);
@@ -1240,7 +1246,7 @@ const PostCard = memo(({
         <View style={styles.headerRightContainer}>
           <Text style={styles.timestamp}>{formatTime(item.created_at)}</Text>
           {isOwnPost
-            ? <TouchableOpacity style={styles.optionsButton} onPress={handlePostOptions} activeOpacity={0.7}>
+            ? <TouchableOpacity style={styles.optionsButton} onPress={() => setMenuVisible(true)} activeOpacity={0.7}>
                 <Feather name="more-horizontal" size={24} color="#fff" />
               </TouchableOpacity>
             : (
@@ -1248,7 +1254,7 @@ const PostCard = memo(({
                 {/* ✅ NEW: Report button for other users' posts */}
                 <TouchableOpacity
                   style={styles.optionsButton}
-                  onPress={() => onReport(item)}
+                  onPress={() => setMenuVisible(true)}
                   activeOpacity={0.7}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
@@ -1356,8 +1362,80 @@ const PostCard = memo(({
             <Image source={require('../assets/images/adaptive-icon.png')} style={styles.watermarkLogo} resizeMode="contain" />
             <View><Text style={styles.watermarkText}>LumVibe</Text><Text style={styles.watermarkUsername}>@{item.username}</Text></View>
           </Animated.View>
+          {/* ✅ NEW: standalone download button — same as the Videos screen, single tap */}
+          <TouchableOpacity
+            style={homeMenuStyles.downloadBtn}
+            onPress={() => onSaveMedia(item)}
+            activeOpacity={0.8}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Feather name="download" size={20} color="#fff" />
+          </TouchableOpacity>
         </View>
       )}
+
+      {/* ✅ NEW: Three-dot menu sheet — Save / Share / Report / Delete, same design as the Videos screen */}
+      <Modal visible={menuVisible} transparent animationType="slide" onRequestClose={() => setMenuVisible(false)}>
+        <TouchableOpacity style={homeMenuStyles.backdrop} activeOpacity={1} onPress={() => setMenuVisible(false)}>
+          <View style={homeMenuStyles.sheet}>
+            <View style={homeMenuStyles.handle} />
+
+            {item.media_url && item.media_type === 'image' && (
+              <TouchableOpacity style={homeMenuStyles.row} activeOpacity={0.7} onPress={() => { setMenuVisible(false); setTimeout(() => onSaveMedia(item), 200); }}>
+                <View style={homeMenuStyles.iconWrap}><Feather name="download" size={20} color="#00ff88" /></View>
+                <View style={homeMenuStyles.rowText}>
+                  <Text style={homeMenuStyles.rowTitle}>Save Photo</Text>
+                  <Text style={homeMenuStyles.rowSub}>Download with watermark</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity style={homeMenuStyles.row} activeOpacity={0.7} onPress={() => { setMenuVisible(false); setTimeout(() => onShare(item), 200); }}>
+              <View style={homeMenuStyles.iconWrap}><Feather name="share-2" size={20} color="#fff" /></View>
+              <View style={homeMenuStyles.rowText}>
+                <Text style={homeMenuStyles.rowTitle}>Share</Text>
+                <Text style={homeMenuStyles.rowSub}>Share this post with friends</Text>
+              </View>
+            </TouchableOpacity>
+
+            {!isOwnPost && (
+              <TouchableOpacity style={homeMenuStyles.row} activeOpacity={0.7} onPress={() => { setMenuVisible(false); setTimeout(() => onReport(item), 200); }}>
+                <View style={homeMenuStyles.iconWrap}><Feather name="flag" size={20} color="#ff4444" /></View>
+                <View style={homeMenuStyles.rowText}>
+                  <Text style={[homeMenuStyles.rowTitle, { color: '#ff4444' }]}>Report</Text>
+                  <Text style={homeMenuStyles.rowSub}>Let us know what's wrong</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {isOwnPost && (
+              <TouchableOpacity
+                style={homeMenuStyles.row}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setMenuVisible(false);
+                  setTimeout(() => {
+                    Alert.alert('Delete Post', 'Permanently delete your post and all its likes, comments, and coins? This cannot be undone.', [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Delete', style: 'destructive', onPress: () => onDelete(item) },
+                    ]);
+                  }, 200);
+                }}
+              >
+                <View style={homeMenuStyles.iconWrap}><Feather name="trash-2" size={20} color="#ff4444" /></View>
+                <View style={homeMenuStyles.rowText}>
+                  <Text style={[homeMenuStyles.rowTitle, { color: '#ff4444' }]}>Delete Post</Text>
+                  <Text style={homeMenuStyles.rowSub}>Permanently remove this post</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity style={homeMenuStyles.cancelBtn} onPress={() => setMenuVisible(false)} activeOpacity={0.7}>
+              <Text style={homeMenuStyles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* VIBE BADGE */}
       {item.vibe_type && VIBE_TYPES[item.vibe_type] && (
@@ -2228,6 +2306,57 @@ export default function HomeScreen() {
     } catch (e: any) { await loadFeed(); }
   }, [userId]);
 
+  // ✅ NEW: Save Photo — same behaviour as videos.tsx. The watermark (logo + LumVibe + @username) is baked into
+  // the DOWNLOADED copy only; the original on the server and the feed are never touched.
+  const handleSaveMedia = useCallback(async (post: Post) => {
+    if (!post.media_url || post.media_type !== 'image') return;
+    const needsBake = !!post.has_watermark;
+    Alert.alert(
+      'Save Photo',
+      needsBake ? 'Save this photo? Your watermark will be added to the downloaded copy.' : 'Save this photo?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Save', onPress: async () => {
+          try {
+            const { status } = await MediaLibrary.requestPermissionsAsync();
+            if (status !== 'granted') { Alert.alert('Permission needed', 'Allow access to your photos so LumVibe can save to your gallery.'); return; }
+            const cacheDir = (FileSystem as any).cacheDirectory ?? (FileSystem as any).documentDirectory ?? '';
+            const ext = (post.media_url!.split('?')[0].match(/\.(jpe?g|png|webp)$/i)?.[1] || 'jpg').toLowerCase();
+            const stamp = `lumvibe_${post.id}_${Date.now()}`;
+            const cleanUri = `${cacheDir}clean_${stamp}.${ext}`;
+            let finalUri = cleanUri;
+            const dl = await FileSystem.downloadAsync(post.media_url!, cleanUri);
+            if (dl.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
+            if (needsBake) {
+              try {
+                const logoAsset = Asset.fromModule(require('../assets/images/adaptive-icon.png'));
+                if (!logoAsset.downloaded) await logoAsset.downloadAsync();
+                const logoDest = `${cacheDir}watermark_logo.png`;
+                await FileSystem.copyAsync({ from: logoAsset.localUri || logoAsset.uri, to: logoDest });
+                const safeUser = (post.username || '').replace(/[^a-zA-Z0-9_]/g, '').substring(0, 28);
+                const outUri = `${cacheDir}${stamp}.jpg`;
+                const baked = await bakeImage(cleanUri.replace('file://', ''), outUri.replace('file://', ''), {
+                  watermarkPngPath: logoDest.replace('file://', ''),
+                  watermarkUsername: safeUser,
+                });
+                finalUri = baked.startsWith('file://') ? baked : `file://${baked}`;
+                FileSystem.deleteAsync(cleanUri, { idempotent: true }).catch(() => {});
+              } catch (bakeErr) {
+                // Never lose the download: if baking fails, save the clean copy instead.
+                console.warn('Download-time watermark bake failed, saving unwatermarked copy:', bakeErr);
+                finalUri = cleanUri;
+              }
+            }
+            const asset = await MediaLibrary.createAssetAsync(finalUri);
+            await MediaLibrary.createAlbumAsync('LumVibe', asset, false);
+            FileSystem.deleteAsync(finalUri, { idempotent: true }).catch(() => {});
+            Alert.alert('✅ Saved!', needsBake ? 'Photo saved with watermark to your LumVibe gallery.' : 'Photo saved to your LumVibe gallery.');
+          } catch (e: any) { Alert.alert('Error', 'Failed to save photo: ' + (e.message || 'Unknown error')); }
+        }},
+      ]
+    );
+  }, []);
+
   const handleShare = useCallback(async (post: Post) => {
     try {
       const deepLink = `https://lumvibe.site/post/${post.id}`;
@@ -2272,7 +2401,7 @@ export default function HomeScreen() {
       <PostCard
         item={item as Post} user={user} onLike={handleLike} onComment={handleComment}
         onSave={handleSave} onGift={handleGift} onFollow={handleFollow}
-        onUserPress={handleUserPress} onShare={handleShare} onDelete={handleDeletePost} onReport={handleReport}
+        onUserPress={handleUserPress} onShare={handleShare} onDelete={handleDeletePost} onReport={handleReport} onSaveMedia={handleSaveMedia}
         isVisible={visiblePostId === (item as Post).id} onView={handleView}
         followStatusMap={followStatusMap} isTopWinner={isTopWinner}
       />
@@ -2657,4 +2786,19 @@ const styles = StyleSheet.create({
   commentInput:           { flex: 1, backgroundColor: '#1a1a1a', color: '#fff', fontSize: 14, padding: 12, borderRadius: 20, maxHeight: 100 },
   sendCommentButton:      { width: 40, height: 40, borderRadius: 20, backgroundColor: '#00ff88', justifyContent: 'center', alignItems: 'center' },
   sendCommentButtonDisabled: { opacity: 0.5 },
+});
+
+// ─── THREE-DOT MENU + DOWNLOAD BUTTON (same look as the Videos screen) ───────────
+const homeMenuStyles = StyleSheet.create({
+  backdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  sheet:       { backgroundColor: '#111', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 36 },
+  handle:      { width: 40, height: 4, backgroundColor: '#333', borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 8 },
+  row:         { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: '#1a1a1a', gap: 14 },
+  iconWrap:    { width: 40, height: 40, borderRadius: 20, backgroundColor: '#1a1a1a', justifyContent: 'center', alignItems: 'center' },
+  rowText:     { flex: 1 },
+  rowTitle:    { color: '#fff', fontSize: 15, fontWeight: '600' },
+  rowSub:      { color: '#666', fontSize: 12, marginTop: 2 },
+  cancelBtn:   { marginHorizontal: 20, marginTop: 12, paddingVertical: 14, backgroundColor: '#1a1a1a', borderRadius: 14, alignItems: 'center' },
+  cancelText:  { color: '#fff', fontSize: 15, fontWeight: '600' },
+  downloadBtn: { position: 'absolute', top: 12, left: 12, zIndex: 30, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
 });
