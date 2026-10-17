@@ -1159,9 +1159,7 @@ async function postComment(postId: string, userId: string, content: string, pare
     const { data: postRow } = await supabase
       .from('posts').select('comments_count, user_id').eq('id', postId).single();
     if (postRow) {
-      await supabase.from('posts')
-        .update({ comments_count: (postRow.comments_count || 0) + 1 })
-        .eq('id', postId);
+      // comments_count is now kept correct by the database (sync_comment_count trigger); no manual update here.
       if (postRow.user_id && postRow.user_id !== userId) {
         const multipliers = await getOwnerBadgeMultipliers(postRow.user_id);
         const { data: ownerData } = await supabase
@@ -3337,7 +3335,7 @@ export default function CowatchScreen() {
 
   const handleShare = useCallback(async (post: FeedPost) => {
     try {
-      const deepLink = `https://lumvibe.site/post/${post.id}`;
+      const deepLink = `https://lively-sun-4c51.lumvibe86.workers.dev/p/${post.id}`;
       await Share.share({ message: `Check out this post by @${post.username} on LumVibe!\n\n${post.caption || ''}\n\n${deepLink}`, title: `Post by @${post.username}` });
     } catch (e) { console.error('Share error:', e); }
   }, []);

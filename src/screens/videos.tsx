@@ -1899,19 +1899,13 @@ export default function VideosScreen() {
     try {
       if (isFollowing) {
         await supabase.from('follows').delete().eq('follower_id', userId).eq('following_id', targetUserId);
-        const { data: cu } = await supabase.from('users').select('following_count').eq('id', userId).single();
-        const { data: tu } = await supabase.from('users').select('followers_count').eq('id', targetUserId).single();
-        if (cu) await supabase.from('users').update({ following_count: Math.max(0, (cu.following_count || 0) - 1) }).eq('id', userId);
-        if (tu) await supabase.from('users').update({ followers_count: Math.max(0, (tu.followers_count || 0) - 1) }).eq('id', targetUserId);
+        // Follower / following counts are now kept correct by the database (sync_follow_counts trigger); no manual update here.
         setFollowStatusMap(prev => { const m = new Map(prev); m.set(targetUserId, false); return m; });
       } else {
         const { data: existingFollow } = await supabase.from('follows').select('id').eq('follower_id', userId).eq('following_id', targetUserId).maybeSingle();
         if (existingFollow) return;
         await supabase.from('follows').insert({ follower_id: userId, following_id: targetUserId });
-        const { data: cu } = await supabase.from('users').select('following_count').eq('id', userId).single();
-        const { data: tu } = await supabase.from('users').select('followers_count').eq('id', targetUserId).single();
-        if (cu) await supabase.from('users').update({ following_count: (cu.following_count || 0) + 1 }).eq('id', userId);
-        if (tu) await supabase.from('users').update({ followers_count: (tu.followers_count || 0) + 1 }).eq('id', targetUserId);
+        // Follower / following counts are now kept correct by the database (sync_follow_counts trigger); no manual update here.
         // ✅ FIX: same duplicate-insert issue — create_follow_notification()
         // already creates this row. Removed the duplicate; now sends the
         // actual push notification.
@@ -1925,7 +1919,7 @@ export default function VideosScreen() {
 
   const handleShare = useCallback(async (post: Post) => {
     try {
-      const deepLink = `https://lumvibe.site/video/${post.id}`;
+      const deepLink = `https://lively-sun-4c51.lumvibe86.workers.dev/p/${post.id}`;  // preview card (thumbnail + title) in WhatsApp; the link then opens the video page
       const result = await Share.share({ message: `Check out this video by @${post.username} on LumVibe!\n\n${post.caption || ''}\n\n${deepLink}`, title: `Video by @${post.username}` });
       if (result.action === Share.sharedAction && post.user_id !== userId) {
         try { const { data: ownerData } = await supabase.from('users').select('points').eq('id', post.user_id).single(); if (ownerData) { const multipliers = await getOwnerBadgeMultipliers(post.user_id); await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.sharePoints }).eq('id', post.user_id); } } catch (e) {}

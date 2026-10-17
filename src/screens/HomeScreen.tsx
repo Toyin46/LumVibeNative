@@ -2104,20 +2104,14 @@ export default function HomeScreen() {
       if (isFollowing) {
         const { error } = await supabase.from('follows').delete().eq('follower_id', userId).eq('following_id', targetUserId);
         if (error) throw error;
-        const { data: cu } = await supabase.from('users').select('following_count').eq('id', userId).single();
-        const { data: tu } = await supabase.from('users').select('followers_count').eq('id', targetUserId).single();
-        if (cu) await supabase.from('users').update({ following_count: Math.max(0, (cu.following_count || 0) - 1) }).eq('id', userId);
-        if (tu) await supabase.from('users').update({ followers_count: Math.max(0, (tu.followers_count || 0) - 1) }).eq('id', targetUserId);
+        // Follower / following counts are now kept correct by the database (sync_follow_counts trigger); no manual update here.
         setFollowStatusMap(prev => { const m = new Map(prev); m.set(targetUserId, false); return m; });
       } else {
         const { data: existingFollow } = await supabase.from('follows').select('id').eq('follower_id', userId).eq('following_id', targetUserId).maybeSingle();
         if (existingFollow) return;
         const { error } = await supabase.from('follows').insert({ follower_id: userId, following_id: targetUserId });
         if (error) { if (error.code === '23505') return; throw error; }
-        const { data: cu } = await supabase.from('users').select('following_count').eq('id', userId).single();
-        const { data: tu } = await supabase.from('users').select('followers_count').eq('id', targetUserId).single();
-        if (cu) await supabase.from('users').update({ following_count: (cu.following_count || 0) + 1 }).eq('id', userId);
-        if (tu) await supabase.from('users').update({ followers_count: (tu.followers_count || 0) + 1 }).eq('id', targetUserId);
+        // Follower / following counts are now kept correct by the database (sync_follow_counts trigger); no manual update here.
         // ✅ FIX: same duplicate-insert issue as handleLike above — the
         // create_follow_notification() DB trigger already creates this row
         // automatically. Removed the duplicate; now actually sends the
@@ -2359,7 +2353,7 @@ export default function HomeScreen() {
 
   const handleShare = useCallback(async (post: Post) => {
     try {
-      const deepLink = `https://lumvibe.site/post/${post.id}`;
+      const deepLink = `https://lively-sun-4c51.lumvibe86.workers.dev/p/${post.id}`;  // preview card (thumbnail + title) in WhatsApp; the link then opens the post page
       const result = await Share.share({ message: `Check out this post by @${post.username} on LumVibe!\n\n${post.caption || ''}\n\n${deepLink}`, title: `Post by @${post.username}` });
       if (result.action === Share.sharedAction && post.user_id !== userId) {
         try {

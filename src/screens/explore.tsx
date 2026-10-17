@@ -312,10 +312,7 @@ export default function ExploreScreen() {
         const { error } = await supabase.from('follows').delete()
           .eq('follower_id', userId).eq('following_id', targetUser.id);
         if (error) throw error;
-        const { data: ud } = await supabase.from('users').select('followers_count').eq('id', targetUser.id).single();
-        await supabase.from('users').update({ followers_count: Math.max(0, (ud?.followers_count || 0) - 1) }).eq('id', targetUser.id);
-        const { data: me } = await supabase.from('users').select('following_count').eq('id', userId).single();
-        await supabase.from('users').update({ following_count: Math.max(0, (me?.following_count || 0) - 1) }).eq('id', userId);
+        // Follower / following counts are now kept correct by the database (sync_follow_counts trigger); no manual update here.
         const newSet = new Set(followingUsers); newSet.delete(targetUser.id); setFollowingUsers(newSet);
         const updater = (u: UserProfile) => u.id === targetUser.id
           ? { ...u, followers_count: Math.max(0, u.followers_count - 1), isFollowing: false } : u;
@@ -324,10 +321,7 @@ export default function ExploreScreen() {
       } else {
         const { error } = await supabase.from('follows').insert({ follower_id: userId, following_id: targetUser.id });
         if (error) { if (error.code === '23505') return; throw error; }
-        const { data: ud } = await supabase.from('users').select('followers_count').eq('id', targetUser.id).single();
-        await supabase.from('users').update({ followers_count: (ud?.followers_count || 0) + 1 }).eq('id', targetUser.id);
-        const { data: me } = await supabase.from('users').select('following_count').eq('id', userId).single();
-        await supabase.from('users').update({ following_count: (me?.following_count || 0) + 1 }).eq('id', userId);
+        // Follower / following counts are now kept correct by the database (sync_follow_counts trigger); no manual update here.
         // ✅ FIX: same duplicate-insert issue found in HomeScreen.tsx — the
         // create_follow_notification() DB trigger already creates this row
         // automatically. Removed the duplicate; now sends the actual push
