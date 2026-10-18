@@ -4,10 +4,6 @@ project(lumvibe_engine)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ADDED: Google Play requires native libraries to support 16 KB memory pages.
-# This must stay ABOVE add_library and add_subdirectory so it applies to both
-# liblumvibe_engine.so and liblumvibe_audio.so.
-add_link_options(-Wl,-z,max-page-size=16384)
 
 # CHANGED: no longer needs network access to build. JSON parsing uses the
 # vendored, dependency-free MiniJson.h (engine-native/include/lumvibe/)
