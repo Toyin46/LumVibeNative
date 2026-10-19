@@ -13,7 +13,7 @@ export default {
   "expo": {
     "name": "LumVibeNative",
     "slug": "LumVibeNative",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "scheme": "lumvibenative",
     "orientation": "portrait",
     "icon": "./src/assets/images/icon.png",
@@ -72,7 +72,7 @@ export default {
       // ✅ NEW: Play requires a new version code for every upload — your
       // last one used code 1, so this build must be 2 or higher. Bump this
       // by 1 every time you build again after this.
-      "versionCode": 5
+      "versionCode": 6
     },
     "plugins": [
       "expo-audio",
