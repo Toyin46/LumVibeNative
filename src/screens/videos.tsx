@@ -2029,7 +2029,7 @@ export default function VideosScreen() {
 
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
     // ✅ CHANGED: real AdMob native ad; falls back to your own promo card if no ad loads.
-    if (isAd(item)) return <AdSlot key={item.id} adIndex={item.adIndex} fallback={<NativeAdPost adIndex={item.adIndex} />} />;
+    if (isAd(item)) return <AdSlot key={item.id} variant="page" adIndex={item.adIndex} fallback={<NativeAdPost adIndex={item.adIndex} />} />;
     if (isWinnerCard(item)) { if (weeklyWinners.length === 0) return null; return <WinnerCardVideo winners={weeklyWinners} onUserPress={handleUserPress} />; }
     return (
       <VideoPost
