@@ -13,7 +13,7 @@ export default {
   "expo": {
     "name": "LumVibeNative",
     "slug": "LumVibeNative",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "scheme": "lumvibenative",
     "orientation": "portrait",
     "icon": "./src/assets/images/icon.png",
@@ -54,7 +54,11 @@ export default {
         "android.permission.FOREGROUND_SERVICE_PHONE_CALL",
         "android.permission.WAKE_LOCK",
         "android.permission.VIBRATE",
-        "android.permission.POST_NOTIFICATIONS"
+        "android.permission.POST_NOTIFICATIONS",
+        // ✅ NEW: needed by AdMob. Without it Android 13+ gives ads a blank advertising
+        // ID, and Play Console refuses the release because the Advertising ID declaration
+        // says the app uses it.
+        "com.google.android.gms.permission.AD_ID"
       ],
       // ✅ NEW (Play Console flagged these as undeclared): expo-media-library
       // adds these two automatically, whether the app needs them or not.
@@ -72,7 +76,7 @@ export default {
       // ✅ NEW: Play requires a new version code for every upload — your
       // last one used code 1, so this build must be 2 or higher. Bump this
       // by 1 every time you build again after this.
-      "versionCode": 6
+      "versionCode": 7
     },
     "plugins": [
       "expo-audio",
