@@ -45,6 +45,11 @@ const REAL_REWARDED_UNIT_ID = 'ca-app-pub-4412719226192046/9101144095'; // rewar
 const NATIVE_UNIT_ID   = __DEV__ ? TestIds.NATIVE   : REAL_NATIVE_UNIT_ID;
 const REWARDED_UNIT_ID = __DEV__ ? TestIds.REWARDED : REAL_REWARDED_UNIT_ID;
 
+// ── NATIVE AD KILL SWITCH ───────────────────────────────────────────────
+// false = the feeds show your own promo card and the native-ad code never runs
+// (rewarded ads are not affected). Set to true again once the native-ad crash is fixed.
+const NATIVE_ADS_ENABLED = false;
+
 // ── REWARD RATES LIVE IN SUPABASE, NOT HERE ────────────────────────────
 // Points per ad, points per coin, daily limit and the wait between ads are in the
 // `ad_wallet_config` table and enforced by the server (see ad_wallet.sql).
@@ -180,7 +185,11 @@ function AdSlotInner({ fallback, variant = 'feed' }: SlotProps) {
   );
 }
 
-export default memo(AdSlotInner);
+function AdSlotDisabled({ fallback }: SlotProps) {
+  return fallback;
+}
+
+export default NATIVE_ADS_ENABLED ? memo(AdSlotInner) : AdSlotDisabled;
 
 // ═════════════════════════════════════════════════════════════════════════
 //  PART 2 — REWARDED AD (the user taps a button, watches, earns points)
@@ -250,6 +259,6 @@ const s = StyleSheet.create({
 
   mediaWrap:   { width: '100%', backgroundColor: '#000' },
 
-  body:        { color: '#ccc', fontSize: 13, lineHeight: 19, paddingHorizontal: 12, paddingTop: 12 },
+  body:        { color: '#ccc', fontSize: 13, lineHeight: 19, marginHorizontal: 12, marginTop: 12 },
   cta:         { marginHorizontal: 12, marginTop: 12, marginBottom: 12, paddingVertical: 12, textAlign: 'center', borderRadius: 12, borderWidth: 1.5, borderColor: ACCENT, color: ACCENT, fontSize: 14, fontWeight: '800', overflow: 'hidden' },
 });
