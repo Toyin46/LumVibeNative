@@ -22,6 +22,7 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from './config/supabase';
 import { useTranslation } from './locales/LanguageContext';
 import type { RootStackParamList } from './navigation/types';
+import { getWeeklyBoard } from './weekly/weeklyApi';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -199,6 +200,8 @@ export default function LeaderboardScreen() {
   const [previousWinners, setPreviousWinners] = useState<WeeklyWinner[]>([]);
   const [loading,         setLoading]         = useState(true);
   const [filter,          setFilter]          = useState<'week'|'month'|'all'>('week');
+  const [weekly,          setWeekly]          = useState<any>(null);   // Weekly Top 10 state (points / voting / closed)
+  const votesMode = filter === 'week' && !!weekly && weekly.phase !== 'points';
 
   useEffect(() => { loadLeaderboard(); loadPreviousWinners(); }, [filter]);
 
@@ -227,6 +230,16 @@ export default function LeaderboardScreen() {
   const loadLeaderboard = async () => {
     setLoading(true);
     try {
+      // Thursday..Saturday the weekly tab narrows to the 10 finalists, ranked by votes.
+      const wb: any = await getWeeklyBoard();
+      setWeekly(wb);
+      if (filter === 'week' && wb && wb.phase !== 'points') {
+        setUsers((wb.rows || []).map((r: any) => ({
+          id: r.user_id, username: r.username || 'unknown', display_name: r.display_name || r.username || 'Unknown',
+          avatar_url: r.avatar_url || '', points: r.votes || 0, weekly_points: r.votes || 0, rank: r.rank,
+        })));
+        return;
+      }
       const orderColumn = filter === 'all' ? 'points' : 'weekly_points';
       const { data, error } = await supabase.from('users')
         .select('id, username, display_name, avatar_url, points, weekly_points')
@@ -267,7 +280,7 @@ export default function LeaderboardScreen() {
         </View>
         <View style={styles.pointsContainer}>
           <Text style={[styles.pointsValue, isTop3 && cfg ? { color: cfg.color } : {}]}>{pts.toLocaleString()}</Text>
-          <Text style={styles.pointsLabel}>{t.leaderboard.pointsLabel}</Text>
+          <Text style={styles.pointsLabel}>{votesMode ? 'votes' : t.leaderboard.pointsLabel}</Text>
         </View>
       </TouchableOpacity>
     );
@@ -275,9 +288,17 @@ export default function LeaderboardScreen() {
 
   const ListHeader = () => (
     <View>
+      {weekly && (
+        <TouchableOpacity activeOpacity={0.85} onPress={() => (navigation as any).navigate('Weekly')}
+          style={{ marginHorizontal: 16, marginBottom: 12, padding: 14, borderRadius: 16, backgroundColor: weekly.phase === 'voting' ? '#00ff88' : '#06210F', borderWidth: 1, borderColor: '#0E3D22' }}>
+          <Text style={{ textAlign: 'center', fontWeight: '800', fontSize: 15, color: weekly.phase === 'voting' ? '#000' : '#9DFFCF' }}>
+            {weekly.phase === 'voting' ? '🗳️ Weekly Top 10 voting is live. Vote now →' : weekly.phase === 'closed' ? '🏆 See this week\'s results →' : '🔥 Weekly Top 10: see the countdown →'}
+          </Text>
+        </TouchableOpacity>
+      )}
       {previousWinners.length > 0 && <PreviousWinnersBanner winners={previousWinners} onUserPress={handleUserPress} />}
       {filter !== 'all' && <View style={styles.countdownWrapper}><CountdownTimer /></View>}
-      {users.length >= 1 && <TopThreePodium winners={users} onUserPress={handleUserPress} filter={filter} />}
+      {!votesMode && users.length >= 1 && <TopThreePodium winners={users} onUserPress={handleUserPress} filter={filter} />}
       <View style={styles.listDivider}>
         <View style={styles.dividerLine} />
         <Text style={styles.dividerText}>Full Rankings</Text>

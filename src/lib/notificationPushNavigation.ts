@@ -35,7 +35,7 @@ type KnownPushType = 'like' | 'comment' | 'follow' | 'mention' | 'coin' | 'messa
   // never added here, so TypeScript rejected comparing data.type against
   // them. 'call'/'missed_call' are handled by callPushNavigation.ts
   // separately, not this switch, so they're deliberately not added here.
-  | 'new_post' | 'achievement' | 'leaderboard_result';
+  | 'new_post' | 'achievement' | 'leaderboard_result' | 'weekly_finalist' | 'weekly_update';
 
 function navigateForPushData(
   navigationRef: React.RefObject<NavigationContainerRef<any> | null>,
@@ -179,10 +179,10 @@ function navigateForPushData(
     // immediately, same "land exactly where it matters" treatment as
     // achievement/badge above.
     case 'leaderboard_result':
-      nav.navigate('Main', {
-        screen: 'Profile',
-        params: { openLeaderboardModal: true },
-      });
+    // Weekly Top 10: "you're a finalist" (Thursday) and the results both open the Weekly screen.
+    case 'weekly_finalist':
+    case 'weekly_update':
+      nav.navigate('Weekly');
       break;
 
     // Anything else (including 'call', or no type at all) is deliberately

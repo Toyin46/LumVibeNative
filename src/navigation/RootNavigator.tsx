@@ -22,6 +22,7 @@ import SearchScreen              from '../search';
 import UserProfileScreen         from '../user/[id]';
 import PostDetailScreen          from '../post-detail';
 import ChallengeScreen           from '../challenge/ChallengeScreen';
+import WeeklyScreen              from '../weekly/WeeklyScreen';
 import SettingsScreen            from '../settings';
 import PrivacyScreen             from '../privacy';
 import TermsScreen               from '../terms';
@@ -101,6 +102,7 @@ export function RootNavigator() {
           <Stack.Screen name="Premium"             component={PremiumScreen as any} />
           <Stack.Screen name="Story"               component={StoryScreen} />
           <Stack.Screen name="Challenge"           component={ChallengeScreen as any} />
+          <Stack.Screen name="Weekly"              component={WeeklyScreen as any} />
         </>
       ) : (
         <Stack.Screen name="Auth" component={AuthStack as any} />

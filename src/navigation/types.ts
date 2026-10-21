@@ -21,6 +21,7 @@ export type RootStackParamList = {
   ApplySubscriptions:  undefined;
   Premium:             undefined;
   Challenge:           { slug?: string } | undefined;
+  Weekly:              undefined;
   // NEW: real standalone entry point for "add a story" — see story.tsx.
   // Accepts an optional context (which chat/group/circle it was launched
   // from) so create.tsx can offer the private/public choice and tag the

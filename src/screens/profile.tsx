@@ -293,6 +293,21 @@ const BADGES = [
       achieved: stats.followers_count >= 100,
     }),
   },
+  {
+    id: 'weekly_champion',
+    name: 'Weekly Champion',
+    icon: '🏆',
+    description: 'Win the LumVibe Weekly Top 10',
+    reward: 'Champion badge on your profile + recognition',
+    rewardDetail: 'Make the Top 10 on Thursday, collect the most votes, and win the week. Your 🏆 badge shows on your profile. It is awarded automatically.',
+    bonusPoints: 0,
+    getProgress: (_stats: any, _userCount: number) => ({
+      current: 0,
+      total: 1,
+      label: 'Make the weekly Top 10 and win the vote 🏆',
+      achieved: false,
+    }),
+  },
 ];
 
 const THEMES: Record<string, { background: string; card: string; primary: string; text: string }> = {
@@ -499,6 +514,15 @@ function FounderBadgePill({ isFounder, primaryColor }: { isFounder: boolean; pri
       <MaterialCommunityIcons name="crown" size={16} color="#ffd700" />
       <Text style={[s.founderPillText, { color: primaryColor }]}>{label}</Text>
     </Animated.View>
+  );
+}
+
+function ChampionPill({ wins }: { wins?: number }) {
+  return (
+    <View style={s.championPill}>
+      <Text style={{ fontSize: 16 }}>🏆</Text>
+      <Text style={s.championPillText}>{'Weekly\nChampion'}</Text>
+    </View>
   );
 }
 
@@ -869,6 +893,7 @@ export default function ProfileScreen() {
   const [followers,    setFollowers]    = useState<Follower[]>([]);
   const [following,    setFollowing]    = useState<Follower[]>([]);
   const [leaderboardData, setLeaderboardData] = useState<AppUser[]>([]);
+  const [leaderboardPhase, setLeaderboardPhase] = useState<string>('points');
 
   // ── Gamification ──
   const [points,           setPoints]           = useState(0);
@@ -1365,12 +1390,15 @@ export default function ProfileScreen() {
   const loadLeaderboard = async () => {
     setLoadingLeaderboard(true);
     try {
-      const { data } = await supabase
-        .from('users')
-        .select('id, username, display_name, avatar_url, points, level, is_premium')
-        .order('points', { ascending: false })
-        .limit(20);
-      setLeaderboardData(data || []);
+      // Weekly board from the database: weekly points, then the Top 10 by votes, then results (official account never ranks).
+      const { data: b } = await supabase.rpc('get_weekly_board');
+      const rows: any[] = (b && (b as any).rows) || [];
+      const ph = (b && (b as any).phase) || 'points';
+      setLeaderboardPhase(ph);
+      setLeaderboardData(rows.slice(0, 20).map((r: any) => ({
+        id: r.user_id, username: r.username, display_name: r.display_name || r.username, avatar_url: r.avatar_url,
+        points: ph === 'points' ? (r.points || 0) : (r.votes || 0), level: 0, is_premium: false,
+      })) as any);
     } catch {}
     finally { setLoadingLeaderboard(false); }
   };
@@ -2179,6 +2207,11 @@ export default function ProfileScreen() {
                     <FounderBadgePill isFounder={earnedBadgeIds.includes('founding_member')} primaryColor={theme.primary} />
                   </View>
                 )}
+                {earnedBadgeIds.includes('weekly_champion') && (
+                  <View style={s.championPillWrap}>
+                    <ChampionPill />
+                  </View>
+                )}
                 <View style={s.avatarContainer}>
                   <TouchableOpacity onPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
                     {hasGlowingAvatar
@@ -2328,6 +2361,11 @@ export default function ProfileScreen() {
                 {(earnedBadgeIds.includes('founding_member') || earnedBadgeIds.includes('early_adopter')) && (
                   <View style={s.founderPillWrap}>
                     <FounderBadgePill isFounder={earnedBadgeIds.includes('founding_member')} primaryColor={theme.primary} />
+                  </View>
+                )}
+                {earnedBadgeIds.includes('weekly_champion') && (
+                  <View style={s.championPillWrap}>
+                    <ChampionPill />
                   </View>
                 )}
                 <TouchableOpacity onPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
@@ -2944,6 +2982,12 @@ export default function ProfileScreen() {
               <TouchableOpacity onPress={() => setLeaderboardModalVisible(false)}><Feather name="x" size={24} color="#fff" /></TouchableOpacity>
             </View>
             <LeaderboardCountdown />
+            <TouchableOpacity activeOpacity={0.85} onPress={() => { setLeaderboardModalVisible(false); navigation.navigate('Weekly'); }}
+              style={{ marginHorizontal: 16, marginBottom: 10, padding: 12, borderRadius: 14, backgroundColor: leaderboardPhase === 'voting' ? '#00ff88' : '#06210F', borderWidth: 1, borderColor: '#0E3D22' }}>
+              <Text style={{ textAlign: 'center', fontWeight: '800', color: leaderboardPhase === 'voting' ? '#000' : '#9DFFCF' }}>
+                {leaderboardPhase === 'voting' ? '🗳️ Weekly Top 10 voting is live. Vote now →' : leaderboardPhase === 'closed' ? "🏆 See this week's results →" : '🔥 Weekly Top 10: see the countdown →'}
+              </Text>
+            </TouchableOpacity>
             {loadingLeaderboard
               ? <ActivityIndicator size="large" color="#00ff88" style={{ marginTop: 20 }} />
               : <FlatList
@@ -2967,8 +3011,8 @@ export default function ProfileScreen() {
                       <Text style={s.leaderUsername}>@{item.username}</Text>
                     </View>
                     <View style={s.leaderStats}>
-                      <Text style={s.leaderLevel}>Lvl {item.level}</Text>
-                      <Text style={s.leaderPts}>{item.points} pts</Text>
+                      <Text style={s.leaderLevel}>{leaderboardPhase === 'points' ? 'This week' : 'Top 10'}</Text>
+                      <Text style={s.leaderPts}>{item.points} {leaderboardPhase === 'points' ? 'pts' : 'votes'}</Text>
                     </View>
                   </TouchableOpacity>
                 )}
@@ -3370,6 +3414,9 @@ const s = StyleSheet.create({
   waveBg:              { position: 'absolute', top: 0, left: 0, right: 0, height: 220, borderRadius: 0 },
   avatarSection:        { alignItems: 'center', paddingTop: 8, marginBottom: 10, position: 'relative' },
   founderPillWrap:      { position: 'absolute', left: 20, top: 4 },
+  championPillWrap:     { position: 'absolute', right: 20, top: 4 },
+  championPill:         { width: 66, alignItems: 'center', paddingVertical: 8, paddingHorizontal: 6, borderRadius: 14, borderWidth: 1.5, borderColor: '#ffd700', backgroundColor: 'rgba(255,215,0,0.08)' },
+  championPillText:     { fontSize: 10, fontWeight: '700', textAlign: 'center', marginTop: 4, lineHeight: 12, color: '#ffd700' },
   founderPill:          { width: 66, alignItems: 'center', paddingVertical: 8, paddingHorizontal: 6, borderRadius: 14, borderWidth: 1.5, backgroundColor: '#0d1f16' },
   founderPillText:      { fontSize: 10, fontWeight: '700', textAlign: 'center', marginTop: 4, lineHeight: 12 },
   nameRowCenter:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 2 },

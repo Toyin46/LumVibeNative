@@ -62,7 +62,7 @@ const NATIVE_ADS_ENABLED = true;
 //         the real AdMob error (e.g. "googleMobileAds/error-code-no-fill").
 //         Use this to diagnose in a release build where you cannot see console logs.
 // false = hidden. SET THIS TO false once you have read the error.
-const SHOW_AD_DEBUG = true;
+const SHOW_AD_DEBUG = false;
 
 // ── REWARD RATES LIVE IN SUPABASE, NOT HERE ─────────────────────────────
 // Points per ad, points per coin, daily limit and the wait between ads are in

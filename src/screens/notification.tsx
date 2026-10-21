@@ -297,6 +297,12 @@ export default function NotificationsScreen() {
         navigation.navigate('Main', { screen: 'Profile' } as never);
         break;
 
+      // Weekly Top 10 reminders / "you're a finalist" open the Weekly screen
+      case 'weekly_finalist':
+      case 'weekly_update':
+        navigation.navigate('Weekly' as never);
+        break;
+
       default:
         navigation.navigate('Notification' as never);
         break;
@@ -315,7 +321,9 @@ export default function NotificationsScreen() {
       case 'subscription':        return { name: 'star',          color: '#ffd700' };
       case 'marketplace':         return { name: 'bag-handle',    color: '#00ff88' };
       case 'referral_commission': return { name: 'cash',          color: '#ffd700' };
-      case 'achievement':         return { name: 'trophy',        color: '#ffd700' };
+      case 'achievement':
+      case 'weekly_finalist':
+      case 'weekly_update':       return { name: 'trophy',        color: '#ffd700' };
       case 'cowatch_invite':      return { name: 'film',          color: '#00e676' };
       case 'message':             return { name: 'mail',          color: '#00b4d8' };
       default:                    return { name: 'notifications', color: '#00ff88' };
