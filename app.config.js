@@ -84,7 +84,7 @@ export default {
       "expo-secure-store",
       "expo-video",
       "expo-web-browser",
-      ["expo-build-properties", {"android": {"buildArchs": ["armeabi-v7a", "arm64-v8a"]}}]
+      ["expo-build-properties", {"android": {"buildArchs": ["armeabi-v7a", "arm64-v8a"]}}],
       ["@livekit/react-native-expo-plugin", { "android": { "audioType": "communication" } }],
       "@config-plugins/react-native-webrtc",
       // ✅ CHANGED: was the bare "expo-notifications". Now also creates the small
