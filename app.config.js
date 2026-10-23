@@ -28,7 +28,7 @@ export default {
     },
     "extra": {
       "eas": {
-        "projectId": "7c7127f1-b98d-4e09-b44b-68b0a05a434d"
+        "projectId": "931882e6-0576-4ca1-94e8-2dd90d17f784"
       },
       "livekitUrl": "wss://lumvibe-fn3kjths.livekit.cloud" 
     },
