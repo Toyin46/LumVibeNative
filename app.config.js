@@ -76,7 +76,7 @@ export default {
       // ✅ NEW: Play requires a new version code for every upload — your
       // last one used code 1, so this build must be 2 or higher. Bump this
       // by 1 every time you build again after this.
-      "versionCode": 7
+      "versionCode": 8
     },
     "plugins": [
       "expo-audio",
@@ -84,6 +84,7 @@ export default {
       "expo-secure-store",
       "expo-video",
       "expo-web-browser",
+      ["expo-build-properties", {"android": {"buildArchs": ["armeabi-v7a", "arm64-v8a"]}}]
       ["@livekit/react-native-expo-plugin", { "android": { "audioType": "communication" } }],
       "@config-plugins/react-native-webrtc",
       // ✅ CHANGED: was the bare "expo-notifications". Now also creates the small
