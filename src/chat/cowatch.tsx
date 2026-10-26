@@ -493,14 +493,14 @@ const GIFT_PACKAGES = [
 // ── Native Ad Slots (LumVibe branded) ─────────────────────────
 const NATIVE_AD_SLOTS = [
   {
-    advertiser:  'LumVibe Premium',
-    caption:     '🚀 Go Premium — zero ads, exclusive creator badges, and priority support. Upgrade now!',
+    advertiser:  'LumVibe Weekly',
+    caption:     '🏆 Post this week to make Thursday\'s Top 10 and win the Weekly Champion badge. Invite your friends to vote for you!',
     gradient:    ['#001a0d', '#0d1a0d', '#001a0d'] as const,
     accentColor: C.green,
-    ctaLabel:    'Get Premium',
-    ctaRoute:    '/buy-coins',
-    bgEmoji:     '💎',
-    tagline:     'Unlock the full LumVibe experience',
+    ctaLabel:    'See the Top 10',
+    ctaRoute:    '/Weekly',
+    bgEmoji:     '🏆',
+    tagline:     'Post. Get seen. Win the week.',
   },
   {
     advertiser:  'LumVibe Coins',

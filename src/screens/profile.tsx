@@ -208,9 +208,9 @@ const BADGES = [
     name: 'Founding Member',
     icon: '👑',
     description: 'One of the first 100 users ever',
-    reward: '3x view points forever + 100 bonus points',
-    rewardDetail: 'You earn 6 pts per view instead of 2 pts permanently! Plus an instant 100 point bonus.',
-    bonusPoints: 100,
+    reward: '3x view points forever',
+    rewardDetail: 'You earn 6 pts per view instead of 2 pts permanently!',
+    bonusPoints: 0,
     getProgress: (_stats: any, userCount: number) => ({
       current: Math.min(userCount, 100),
       total: 100,
@@ -223,9 +223,9 @@ const BADGES = [
     name: 'Early Adopter',
     icon: '🚀',
     description: 'One of the first 1000 users',
-    reward: '2x view points forever + 50 bonus points',
-    rewardDetail: 'You earn 4 pts per view instead of 2 pts permanently! Plus an instant 50 point bonus.',
-    bonusPoints: 50,
+    reward: '2x view points forever',
+    rewardDetail: 'You earn 4 pts per view instead of 2 pts permanently!',
+    bonusPoints: 0,
     getProgress: (_stats: any, userCount: number) => ({
       current: Math.min(userCount, 1000),
       total: 1000,
@@ -1192,8 +1192,8 @@ export default function ProfileScreen() {
       }
 
       const criteria = [
-        { id: 'founding_member', bonusPoints: 100, check: () => mySignupRank <= 100 },
-        { id: 'early_adopter',   bonusPoints: 50,  check: () => mySignupRank <= 1000 },
+        { id: 'founding_member', bonusPoints: 0, check: () => mySignupRank <= 100 },
+        { id: 'early_adopter',   bonusPoints: 0,  check: () => mySignupRank <= 1000 },
         { id: 'streak_7',        bonusPoints: 50,  check: () => (uRes.data?.current_streak || 0) >= 7 },
         { id: 'streak_30',       bonusPoints: 200, check: () => (uRes.data?.current_streak || 0) >= 30 },
         { id: 'posts_10',        bonusPoints: 100, check: () => (pcRes.count || 0) >= 10 },

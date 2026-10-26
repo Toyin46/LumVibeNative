@@ -467,7 +467,7 @@ interface Comment {
 }
 
 interface AdItem       { id: string; isAd: true; adIndex: number; }
-interface WeeklyWinner { rank: 1 | 2 | 3; user_id: string; username: string; display_name: string; avatar_url?: string; weekly_points: number; week_start: string; }
+interface WeeklyWinner { rank: 1 | 2 | 3; user_id: string; username: string; display_name: string; avatar_url?: string; weekly_points: number; unit?: 'pts' | 'votes'; week_start: string; }
 interface WinnerCardItem { id: string; isWinnerCard: true; winners: WeeklyWinner[]; }
 type FeedItem = Post | AdItem | WinnerCardItem;
 function isAd(item: FeedItem): item is AdItem { return 'isAd' in item && item.isAd === true; }
@@ -531,7 +531,7 @@ function WinnersBanner({ winners, onUserPress, isOfficial }: { winners: WeeklyWi
                   : <View style={[winnerStyles.bannerAvatar, winnerStyles.bannerAvatarPlaceholder, { borderColor: cfg.color }]}><Feather name="user" size={22} color={cfg.color} /></View>}
                 <Text style={[winnerStyles.bannerName, { color: cfg.color }]} numberOfLines={1}>{winner.display_name}</Text>
                 <Text style={winnerStyles.bannerUsername} numberOfLines={1}>@{winner.username}</Text>
-                <Text style={winnerStyles.bannerPoints}>{winner.weekly_points.toLocaleString()} pts</Text>
+                <Text style={winnerStyles.bannerPoints}>{winner.weekly_points.toLocaleString()} {winner.unit || 'pts'}</Text>
               </TouchableOpacity>
             );
           })}
@@ -565,14 +565,14 @@ function WinnerCardInFeed({ winners, onUserPress }: { winners: WeeklyWinner[]; o
               </View>
               <View style={[winnerStyles.feedCardPoints, { borderColor: cfg.color }]}>
                 <Text style={[winnerStyles.feedCardPointsText, { color: cfg.color }]}>{winner.weekly_points.toLocaleString()}</Text>
-                <Text style={winnerStyles.feedCardPointsLabel}>pts</Text>
+                <Text style={winnerStyles.feedCardPointsLabel}>{winner.unit || 'pts'}</Text>
               </View>
             </TouchableOpacity>
           );
         })}
         <View style={winnerStyles.feedCardFooter}>
           <Text style={winnerStyles.feedCardFooterText}>🔄 {t.videos.resetsInfo}</Text>
-          <Text style={winnerStyles.feedCardPointsGuide}>Post +50 · View +2 · Like +10 · Comment +15 · Share +30</Text>
+          <Text style={winnerStyles.feedCardPointsGuide}>Post +10 · Like +1 · Comment +3 · Share +2</Text>
         </View>
       </LinearGradient>
     </View>
@@ -757,15 +757,15 @@ const winnerStyles = StyleSheet.create({
 // ─── AD POST (Instagram/Twitter-style native card — looks like a real PostCard) ─
 const NATIVE_AD_SLOTS_FEED = [
   {
-    advertiser:  'LumVibe Premium',
+    advertiser:  'LumVibe Weekly',
     username:    'lumvibe',
-    caption:     '🚀 Go Premium — zero ads, exclusive creator badges, and priority support. Upgrade now!',
+    caption:     '🏆 Post this week to make Thursday\'s Top 10 and win the Weekly Champion badge. Invite your friends to vote for you!',
     gradient:    ['#001a0d', '#0d1a0d', '#001a0d'] as const,
     accentColor: '#00ff88',
-    ctaLabel:    'Get Premium',
-    ctaRoute:    '/buy-coins',
-    bgEmoji:     '💎',
-    tagline:     'Unlock the full LumVibe experience',
+    ctaLabel:    'See the Top 10',
+    ctaRoute:    '/Weekly',
+    bgEmoji:     '🏆',
+    tagline:     'Post. Get seen. Win the week.',
   },
   {
     advertiser:  'LumVibe Coins',
@@ -1690,11 +1690,14 @@ export default function HomeScreen() {
         });
         setWeeklyWinners(hydrated); weeklyWinnersRef.current = hydrated; setWinnersAreOfficial(true); return;
       }
-      const { data: topUsers } = await supabase.from('users').select('id, username, display_name, avatar_url, points').eq('is_official', false).order('points', { ascending: false }).limit(3);
-      if (topUsers && topUsers.length > 0) {
-        const derived: WeeklyWinner[] = topUsers.map((u: any, idx: number) => ({ rank: (idx + 1) as 1 | 2 | 3, user_id: u.id, username: u.username || 'unknown', display_name: u.display_name || 'Unknown', avatar_url: u.avatar_url, weekly_points: u.points || 0, week_start: weekStart.toISOString() }));
+      // Same weekly board as the Leaderboard and Weekly screens: weekly points, then votes during Top 10 voting week.
+      const { data: board } = await supabase.rpc('get_weekly_board');
+      const boardRows: any[] = (board as any)?.rows || [];
+      if (boardRows.length > 0) {
+        const byVotes = (board as any).phase !== 'points';
+        const derived: WeeklyWinner[] = boardRows.slice(0, 3).map((u: any, idx: number) => ({ rank: (idx + 1) as 1 | 2 | 3, user_id: u.user_id, username: u.username || 'unknown', display_name: u.display_name || u.username || 'Unknown', avatar_url: u.avatar_url, weekly_points: (byVotes ? u.votes : u.points) || 0, unit: byVotes ? 'votes' : 'pts', week_start: (board as any).week_start }));
         setWeeklyWinners(derived); weeklyWinnersRef.current = derived; setWinnersAreOfficial(false);
-      }
+      } else if (board) { setWeeklyWinners([]); weeklyWinnersRef.current = []; }
     } catch (e) { console.error('Error loading weekly winners:', e); }
   };
 

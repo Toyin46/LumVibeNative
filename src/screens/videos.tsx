@@ -53,11 +53,21 @@ async function fetchWithTimeout(input: RequestInfo, init?: RequestInit, ms = 150
   } catch (e) { clearTimeout(timer); throw e; }
 }
 
+// ── Data saver ───────────────────────────────────────────────────────────
+// On mobile data the app asks for a smaller picture (max 720px wide, lower bitrate); on Wi-Fi it keeps full quality
+// (up to 1080px). c_limit never enlarges a small video. If the smaller version is ever unavailable the player falls
+// back to the original file automatically (see raw_media_url / onError below), so nothing stops playing.
+let NET_IS_CELLULAR = false;
+NetInfo.fetch().then(s => { NET_IS_CELLULAR = s.type === 'cellular'; }).catch(() => {});
+NetInfo.addEventListener(s => { NET_IS_CELLULAR = s.type === 'cellular'; });
+
 function cdnVideoUrl(url: string | null | undefined): string {
   if (!url) return '';
   if (url.includes('cloudinary.com') && url.includes('/upload/') && !url.includes('q_auto')) {
     const idx = url.indexOf('/upload/');
-    return url.slice(0, idx + 8) + 'q_auto,vc_auto/' + url.slice(idx + 8);
+    const isVideo = url.includes('/video/upload/');
+    const t = !isVideo ? 'q_auto,vc_auto' : (NET_IS_CELLULAR ? 'q_auto:eco,vc_auto,w_720,c_limit' : 'q_auto:good,vc_auto,w_1080,c_limit');
+    return url.slice(0, idx + 8) + t + '/' + url.slice(idx + 8);
   }
   return url;
 }
@@ -104,6 +114,8 @@ async function ensureVideoCached(remoteUrl: string): Promise<string | null> {
       videoDiskCache.delete(remoteUrl); // file vanished (OS cache pressure) — re-download below
     } catch { videoDiskCache.delete(remoteUrl); }
   }
+
+  if (NET_IS_CELLULAR) return null;   // data saver: don't download a second copy of the video over mobile data (it still plays normally)
 
   if (videoDownloadsInFlight.has(remoteUrl)) {
     await videoDownloadsInFlight.get(remoteUrl);
@@ -285,7 +297,7 @@ const REPORT_CATEGORIES = [
 // ─── INTERFACES ───────────────────────────────────────────────────────────────
 interface Post {
   id: string; user_id: string; username: string; display_name: string;
-  user_photo_url?: string; media_url?: string; caption: string;
+  user_photo_url?: string; media_url?: string; raw_media_url?: string; caption: string;
   likes_count: number; comments_count: number; views_count: number;
   coins_received: number; liked_by: string[]; location?: string;
   music_name?: string; music_artist?: string;
@@ -316,7 +328,7 @@ interface Comment {
   parent_comment?: { username: string; display_name: string; text: string };
 }
 interface AdItem        { id: string; isAd: true; adIndex: number }
-interface WeeklyWinner  { rank: 1|2|3; user_id: string; username: string; display_name: string; avatar_url?: string; weekly_points: number; week_start: string }
+interface WeeklyWinner  { rank: 1|2|3; user_id: string; username: string; display_name: string; avatar_url?: string; weekly_points: number; unit?: 'pts' | 'votes'; week_start: string }
 interface WinnerCardItem { id: string; isWinnerCard: true; winners: WeeklyWinner[] }
 type FeedItem = Post | AdItem | WinnerCardItem;
 function isAd(item: FeedItem): item is AdItem { return 'isAd' in item && (item as AdItem).isAd === true; }
@@ -450,12 +462,12 @@ const WinnersVideoOverlay = memo(function WinnersVideoOverlay({ winners, onUserP
                 {winner.avatar_url ? <Image source={{ uri: winner.avatar_url }} style={[winnerStyles.overlayAvatar, { borderColor: cfg.color }]} /> : <View style={[winnerStyles.overlayAvatar, winnerStyles.avatarFallback, { borderColor: cfg.color }]}><Feather name="user" size={20} color={cfg.color} /></View>}
                 <Text style={[winnerStyles.overlayName, { color: cfg.color }]} numberOfLines={1}>{winner.display_name}</Text>
                 <Text style={winnerStyles.overlayUsername} numberOfLines={1}>@{winner.username}</Text>
-                <Text style={winnerStyles.overlayPoints}>{winner.weekly_points.toLocaleString()} pts</Text>
+                <Text style={winnerStyles.overlayPoints}>{winner.weekly_points.toLocaleString()} {winner.unit || 'pts'}</Text>
               </TouchableOpacity>
             );
           })}
         </ScrollView>
-        <Text style={winnerStyles.overlayFooter}>Post +50 · View +2 · Like +10 · Comment +15 · Share +30 · Resets Sunday</Text>
+        <Text style={winnerStyles.overlayFooter}>Post +10 · Like +1 · Comment +3 · Share +2 · Resets Sunday</Text>
       </LinearGradient>
     </View>
   );
@@ -483,7 +495,7 @@ const WinnerCardVideo = memo(function WinnerCardVideo({ winners, onUserPress }: 
               </View>
               <View style={[winnerStyles.cardPoints, { borderColor: cfg.color }]}>
                 <Text style={[winnerStyles.cardPointsNum, { color: cfg.color }]}>{winner.weekly_points.toLocaleString()}</Text>
-                <Text style={winnerStyles.cardPointsLabel}>pts</Text>
+                <Text style={winnerStyles.cardPointsLabel}>{winner.unit || 'pts'}</Text>
               </View>
             </TouchableOpacity>
           );
@@ -528,15 +540,15 @@ const winnerStyles = StyleSheet.create({
 // ─── AD POST ──────────────────────────────────────────────────────────────────
 const NATIVE_AD_SLOTS = [
   {
-    advertiser: 'LumVibe Premium',
+    advertiser: 'LumVibe Weekly',
     username:   'lumvibe',
     avatar:     null as null,
-    caption:    '🚀 Unlock Premium — no ads, exclusive badges & more. Upgrade today!',
+    caption:    '🏆 Post this week to make Thursday\'s Top 10 and win the Weekly Champion badge. Invite your friends to vote for you!',
     gradient:   ['#0d0d0d', '#001a0d', '#0d0d0d'] as const,
     accentColor:'#00ff88',
-    ctaLabel:   'Get Premium',
-    ctaRoute:   '/buy-coins',
-    bgEmoji:    '💎',
+    ctaLabel:   'See the Top 10',
+    ctaRoute:   '/Weekly',
+    bgEmoji:    '🏆',
   },
   {
     advertiser: 'LumVibe Coins',
@@ -667,6 +679,7 @@ const VideoPost = memo(function VideoPost({
   // state, so a failed/offline video shows a clear message instead of a
   // silent black screen or a raw console-only error.
   const [playableUri, setPlayableUri] = useState<string>(item.media_url || '');
+  const [usedRawFallback, setUsedRawFallback] = useState(false);
   const [videoError,  setVideoError]  = useState(false);
   // ✅ NEW: three-dot menu state
   const [menuVisible,      setMenuVisible]      = useState(false);
@@ -899,6 +912,10 @@ const VideoPost = memo(function VideoPost({
             onEnd={handleEnd}
             onError={(err) => {
               console.log('Video error:', err);
+              // Data saver safety net: if the smaller version isn't ready/available, play the original file instead of failing.
+              if (!usedRawFallback && item.raw_media_url && item.raw_media_url !== item.media_url && playableUri === item.media_url) {
+                setUsedRawFallback(true); setPlayableUri(item.raw_media_url); return;
+              }
               // ✅ FIX: this only logged before — a failed video (no
               // internet, bad cache, expired URL, etc.) just showed a
               // silent black screen forever with zero indication of what
@@ -908,6 +925,7 @@ const VideoPost = memo(function VideoPost({
             ignoreSilentSwitch="ignore"
             playInBackground={false}
             playWhenInactive={false}
+            bufferConfig={{ minBufferMs: 3000, maxBufferMs: 10000, bufferForPlaybackMs: 1500, bufferForPlaybackAfterRebufferMs: 3000 }}
           />
         ) : videoError ? (
           // ✅ NEW: clear, specific message instead of a black screen or a
@@ -1472,12 +1490,15 @@ export default function VideosScreen() {
         weeklyWinnersRef.current = hydrated;
         return;
       }
-      const { data: topUsers } = await supabase.from('users').select('id, username, display_name, avatar_url, points').eq('is_official', false).order('points', { ascending: false }).limit(3);
-      if (topUsers && topUsers.length > 0) {
-        const derived: WeeklyWinner[] = topUsers.map((u: any, idx: number) => ({ rank: (idx + 1) as 1|2|3, user_id: u.id, username: u.username || 'unknown', display_name: u.display_name || 'Unknown', avatar_url: u.avatar_url, weekly_points: u.points || 0, week_start: weekStart.toISOString() }));
+      // Same weekly board as the Leaderboard and Weekly screens: weekly points, then votes during Top 10 voting week.
+      const { data: board } = await supabase.rpc('get_weekly_board');
+      const boardRows: any[] = (board as any)?.rows || [];
+      if (boardRows.length > 0) {
+        const byVotes = (board as any).phase !== 'points';
+        const derived: WeeklyWinner[] = boardRows.slice(0, 3).map((u: any, idx: number) => ({ rank: (idx + 1) as 1|2|3, user_id: u.user_id, username: u.username || 'unknown', display_name: u.display_name || u.username || 'Unknown', avatar_url: u.avatar_url, weekly_points: (byVotes ? u.votes : u.points) || 0, unit: byVotes ? 'votes' as const : 'pts' as const, week_start: (board as any).week_start }));
         setWeeklyWinners(derived);
         weeklyWinnersRef.current = derived;
-      }
+      } else if (board) { setWeeklyWinners([]); weeklyWinnersRef.current = []; }
     } catch (e) { console.error('Error loading weekly winners:', e); }
   };
 
@@ -1545,7 +1566,7 @@ export default function VideosScreen() {
         return {
           id: p.id, user_id: p.user_id,
           username: postUser?.username || 'unknown', display_name: postUser?.display_name || 'Unknown',
-          user_photo_url: postUser?.avatar_url, media_url: cdnVideoUrl(p.media_url), caption: p.caption || '',
+          user_photo_url: postUser?.avatar_url, media_url: cdnVideoUrl(p.media_url), raw_media_url: p.media_url, caption: p.caption || '',
           likes_count: likes.count, comments_count: p.comments_count ?? commentsMap.get(p.id) ?? 0,
           views_count: p.views_count || 0, coins_received: p.coins_received || 0,
           liked_by: likes.users, location: p.location,
