@@ -76,7 +76,7 @@ export default {
       // ✅ NEW: Play requires a new version code for every upload — your
       // last one used code 1, so this build must be 2 or higher. Bump this
       // by 1 every time you build again after this.
-      "versionCode": 8
+      "versionCode": 9
     },
     "plugins": [
       "expo-audio",
