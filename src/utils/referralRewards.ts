@@ -2,8 +2,10 @@
 import { supabase } from "../config/supabase"; 
 
 export const REFERRAL_REWARDS = {
-  REFERRER_POINTS: 100,
-  NEW_USER_POINTS: 50,
+  // Referral rewards are no longer points. The server gives the referrer a free Boost (and Connector badges)
+  // once the friend has verified their email and started posting.
+  REFERRER_POINTS: 0,
+  NEW_USER_POINTS: 0,
 };
 
 export const WITHDRAWAL_SPLIT = {

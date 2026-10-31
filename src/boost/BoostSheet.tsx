@@ -23,6 +23,7 @@ const REASONS: Record<string, string> = {
   too_fast: 'Please wait a few seconds, then watch the next ad.',
   finalist_voting: "This post is in this week's Top 10 voting, so it can't be boosted until voting ends.",
   not_yours: 'You can only boost your own posts.',
+  no_free_boost: 'You have no free boosts left.',
   login: 'Please log in to boost a post.',
 };
 
@@ -57,6 +58,17 @@ export default function BoostSheet({ visible, postId, onClose }: { visible: bool
     load();
   };
 
+  const free = st?.free_boosts || 0;
+  const useFree = async () => {
+    if (busy) return;
+    setBusy(true); setMsg('');
+    try {
+      const { data } = await supabase.rpc('boost_use_free_credit', { p_post_id: postId });
+      if (data && data.ok) setMsg('🚀 Your post is boosted for the next 24 hours!');
+      else setMsg(REASONS[data?.reason] || 'Something went wrong. Please try again.');
+    } catch { setMsg('Something went wrong. Please try again.'); }
+    setBusy(false); load();
+  };
   const watched = st?.ads_watched || 0, needed = st?.needed || 3;
   const active = st?.active_until ? new Date(st.active_until) : null;
   const hoursLeft = active ? Math.max(1, Math.ceil((active.getTime() - Date.now()) / 3600000)) : 0;
@@ -75,6 +87,11 @@ export default function BoostSheet({ visible, postId, onClose }: { visible: bool
             </View>
           ) : (
             <>
+              {free > 0 && !(st?.blocked_finalist) && (st?.boosts_left_today ?? 1) > 0 ? (
+                <TouchableOpacity style={[s.btn, { marginTop: 16 }, busy && { opacity: 0.55 }]} disabled={busy} onPress={useFree} activeOpacity={0.85}>
+                  <Text style={s.btnText}>🎁 Use a free boost ({free} left)</Text>
+                </TouchableOpacity>
+              ) : null}
               <View style={s.dots}>{Array.from({ length: needed }).map((_, i) => (<View key={i} style={[s.dot, i < watched && s.dotOn]}><Text style={[s.dotText, i < watched && { color: '#000' }]}>{i < watched ? '✓' : i + 1}</Text></View>))}</View>
               {blocked && st?.blocked_finalist ? <Text style={s.note}>{REASONS.finalist_voting}</Text> : (
                 <TouchableOpacity style={[s.btn, (busy || (st?.boosts_left_today ?? 1) <= 0) && { opacity: 0.55 }]} disabled={busy || (st?.boosts_left_today ?? 1) <= 0} onPress={watch} activeOpacity={0.85}>

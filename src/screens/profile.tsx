@@ -308,6 +308,21 @@ const BADGES = [
       achieved: false,
     }),
   },
+  {
+    id: 'connector_3', name: 'Connector', icon: '🤝', description: 'Bring 3 friends who join and start posting', reward: 'Connector badge + a free Boost for every active friend',
+    rewardDetail: 'Invite friends from Profile → Invite. When a friend verifies their email and starts posting, you earn a free Boost, and a Connector badge at 3 friends. It is awarded automatically.', bonusPoints: 0,
+    getProgress: (_stats: any, _userCount: number) => ({ current: 0, total: 3, label: 'Invite friends: they must verify their email and start posting', achieved: false }),
+  },
+  {
+    id: 'connector_10', name: 'Super Connector', icon: '🤝', description: 'Bring 10 friends who join and start posting', reward: 'Super Connector badge',
+    rewardDetail: 'Keep inviting. At 10 active friends you become a Super Connector. It is awarded automatically.', bonusPoints: 0,
+    getProgress: (_stats: any, _userCount: number) => ({ current: 0, total: 10, label: 'Invite 10 friends who start posting', achieved: false }),
+  },
+  {
+    id: 'connector_25', name: 'Community Builder', icon: '🤝', description: 'Bring 25 friends who join and start posting', reward: 'Community Builder badge',
+    rewardDetail: 'At 25 active friends you are a Community Builder, one of LumVibe\'s top supporters. It is awarded automatically.', bonusPoints: 0,
+    getProgress: (_stats: any, _userCount: number) => ({ current: 0, total: 25, label: 'Invite 25 friends who start posting', achieved: false }),
+  },
 ];
 
 const THEMES: Record<string, { background: string; card: string; primary: string; text: string }> = {
@@ -559,7 +574,7 @@ const AVATAR_COLORS = ['#00C96B', '#00A8E8', '#FF6B6B', '#FFD166', '#A78BFA', '#
 
 function buildInviteMessage(contactFirstName: string, senderName: string, referralCode: string, includeReferral: boolean): string {
   const base = `Hey ${contactFirstName}! It's me ${senderName} 👋\n\nI just joined Lumvibe and I'm loving it! It's a social app with short videos, marketplace to sell your talent, gifts for creators, weekly leaderboards, voice & image posts, and a lot more 🔥\n\nCome join me 👉 https://play.google.com/store/apps/details?id=com.lumvibe.app`;
-  const ref  = `\n\nP.S. Use my referral code 🎁 *${referralCode}* when signing up to get 50 FREE bonus points! (totally optional 😊)`;
+  const ref  = `\n\nP.S. Use my referral code 🎁 *${referralCode}* when you sign up. (totally optional 😊)`;
   return includeReferral && referralCode && referralCode !== 'ERROR' ? base + ref : base;
 }
 
@@ -776,7 +791,7 @@ function ContactInviteModal({
                   <View style={ci.toggleRow}>
                     <View style={{ flex: 1 }}>
                       <Text style={ci.toggleTitle}>🎁 Include referral code?</Text>
-                      <Text style={ci.toggleSub}>Your friend gets 50 bonus points on signup</Text>
+                      <Text style={ci.toggleSub}>Your friend joins LumVibe with your invite</Text>
                     </View>
                     <TouchableOpacity
                       style={[ci.toggleTrack, includeReferral && ci.toggleTrackOn]}
@@ -3147,8 +3162,8 @@ export default function ProfileScreen() {
                 </View>
                 <View style={s.referralBenefits}>
                   <Text style={s.benefitsTitle}>Referral Rewards:</Text>
-                  <View style={s.benefitItem}><Text style={s.benefitIcon}>🎁</Text><Text style={s.benefitText}>You get: 100 points when they join</Text></View>
-                  <View style={s.benefitItem}><Text style={s.benefitIcon}>✨</Text><Text style={s.benefitText}>Friend gets: 50 points on signup</Text></View>
+                  <View style={s.benefitItem}><Text style={s.benefitIcon}>🎁</Text><Text style={s.benefitText}>You get: a free 🚀 Boost when they join and start posting</Text></View>
+                  <View style={s.benefitItem}><Text style={s.benefitIcon}>✨</Text><Text style={s.benefitText}>Friend gets: a friend to watch, vote and share with</Text></View>
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>💰</Text><Text style={s.benefitText}>You earn: 5% coins on every withdrawal they make — forever!</Text></View>
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>🌟</Text><Text style={s.benefitText}>Refer 5 friends: unlock a glowing avatar border!</Text></View>
                 </View>

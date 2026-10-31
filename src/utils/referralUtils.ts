@@ -144,7 +144,7 @@ export const processReferral = async (
     }
 
     // ✅ Reward referrer: +100 POINTS
-    const newReferrerPoints = (referrer.points || 0) + 100;
+    const newReferrerPoints = (referrer.points || 0) + 0;   // no points: the reward is now a free Boost (given by the server)
     await supabase
       .from('users')
       .update({
@@ -160,7 +160,7 @@ export const processReferral = async (
       .eq('id', newUserId)
       .single();
 
-    const newUserPoints = (newUserData?.points || 0) + 50;
+    const newUserPoints = (newUserData?.points || 0) + 0;
     await supabase
       .from('users')
       .update({ points: newUserPoints })
@@ -171,7 +171,7 @@ export const processReferral = async (
       user_id:      referrer.id,
       type:         'referral',
       title:        'New Referral! 🎁',
-      message:      `You earned 100 points for referring a friend!`,
+      message:      `A friend joined with your code! You'll get a free Boost once they start posting.`,
       from_user_id: newUserId,
       is_read:      false,
     });
@@ -180,7 +180,7 @@ export const processReferral = async (
 
     return {
       success:    true,
-      message:    '🎉 Referral applied! You earned 50 points!',
+      message:    '🎉 Referral applied! Welcome to LumVibe.',
       referrerId: referrer.id,
     };
   } catch (error: any) {
@@ -253,11 +253,11 @@ export const shareReferralLink = async (
   const link = `${BASE_URL}/invite?ref=${referralCode}`;
 
   const messages: Record<string, string> = {
-    whatsapp:  `Hey! 👋 I just joined *LumVibe* — a new app where you actually get *PAID* for posting, getting likes and comments! 🤑\n\nUse my referral code *${referralCode}* to get 50 bonus points when you sign up!\n\nDownload here 👉 ${link}`,
-    twitter:   `I'm earning money just by posting on @LumVibeApp 🤑\n\nNo more posting for free! Join me and start earning today 👉 ${link}\n\nUse my code: ${referralCode} for 50 bonus points! 🎁 #LumVibe #EarnOnline`,
-    instagram: `Finally an app that PAYS creators! 🇳🇬💰\n\nI joined LumVibe — you earn coins from every post, like and comment. Real money! 🤑\n\nJoin me 👉 ${link}\nReferral code: ${referralCode} (get 50 bonus points!)\n\n#LumVibe #ContentCreator #EarnOnline`,
-    tiktok:    `I found an app that pays you for posting — it's called LumVibe 🤑🇳🇬\n\nUse my code ${referralCode} to get 50 FREE points when you join!\n\nDownload 👉 ${link}\n\n#LumVibe #EarnOnline #ContentCreator #FYP`,
-    general:   `Join me on LumVibe! 🚀\n\nUse my referral code: ${referralCode}\n\n✅ Get 50 bonus points\n✅ I get 100 bonus points\n✅ Earn from every post, like & comment!\n\nDownload: ${link}`,
+    whatsapp:  `Hey! 👋 I'm on *LumVibe* — a new Nigerian video app where you can post, win the weekly Top 10 and earn a 🏆 badge.\n\nJoin with my referral code *${referralCode}* and let's grow together!\n\nDownload here 👉 ${link}`,
+    twitter:   `I'm posting on @LumVibeApp and going for the weekly Top 10 🏆\n\nJoin me 👉 ${link}\n\nUse my code: ${referralCode} #LumVibe #ContentCreator`,
+    instagram: `New Nigerian video app alert 🇳🇬\n\nI joined LumVibe: post your videos, win the weekly Top 10 and get a 🏆 badge.\n\nJoin me 👉 ${link}\nReferral code: ${referralCode}\n\n#LumVibe #ContentCreator`,
+    tiktok:    `Found a new app for Nigerian creators: LumVibe 🇳🇬\n\nPost, get votes and win the weekly Top 10 🏆\n\nUse my code ${referralCode}\n\nDownload 👉 ${link}\n\n#LumVibe #ContentCreator #FYP`,
+    general:   `Join me on LumVibe! 🚀\n\nUse my referral code: ${referralCode}\n\n✅ Watch, post and win the weekly Top 10 🏆\n✅ I get a free Boost when you join and start posting\n\nDownload: ${link}`,
   };
 
   const msg = messages[platform || 'general'];
