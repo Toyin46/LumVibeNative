@@ -30,6 +30,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../config/supabase';
+import BoostSheet, { fetchBoosts, markBoostSeen } from '../boost/BoostSheet';   // 🚀 Boost post
 import { notifyPostLike, notifyNewFollower, notifyPostComment } from '../utils/notificationHelpers';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
@@ -52,6 +53,9 @@ async function fetchWithTimeout(input: RequestInfo, init?: RequestInit, ms = 150
     clearTimeout(timer); return res;
   } catch (e) { clearTimeout(timer); throw e; }
 }
+
+const FEED_POST_SELECT = 'id,user_id,caption,media_url,watermarked_url,media_type,views_count,coins_received,comments_count,saved_by,liked_by,location,music_name,music_artist,music_url,music_volume,original_volume,music_start_offset_ms,music_end_offset_ms,voice_duration,created_at,has_watermark,applied_filter,video_effect,video_filter_tint,playback_rate,vibe_type,cloudinary_public_id,is_published,marketplace_listing_id,marketplace_price,marketplace_title';
+const SEEN_BOOSTS = new Set<string>();   // boosted posts already counted for this person in this session
 
 // ── Data saver ───────────────────────────────────────────────────────────
 // On mobile data the app asks for a smaller picture (max 720px wide, lower bitrate); on Wi-Fi it keeps full quality
@@ -297,7 +301,7 @@ const REPORT_CATEGORIES = [
 // ─── INTERFACES ───────────────────────────────────────────────────────────────
 interface Post {
   id: string; user_id: string; username: string; display_name: string;
-  user_photo_url?: string; media_url?: string; raw_media_url?: string; caption: string;
+  user_photo_url?: string; media_url?: string; raw_media_url?: string; boost_id?: string; caption: string;
   likes_count: number; comments_count: number; views_count: number;
   coins_received: number; liked_by: string[]; location?: string;
   music_name?: string; music_artist?: string;
@@ -683,6 +687,7 @@ const VideoPost = memo(function VideoPost({
   const [videoError,  setVideoError]  = useState(false);
   // ✅ NEW: three-dot menu state
   const [menuVisible,      setMenuVisible]      = useState(false);
+  const [boostVisible,     setBoostVisible]     = useState(false);
   // ✅ NEW: Co-Watch / Watch Together bottom-sheet state
   const [cowatchModalVisible, setCowatchModalVisible] = useState(false);
 
@@ -1008,6 +1013,8 @@ const VideoPost = memo(function VideoPost({
         <Feather name="download" size={20} color="#fff" />
       </TouchableOpacity>
 
+      <BoostSheet visible={boostVisible} postId={item.id} onClose={() => setBoostVisible(false)} />
+
       {/* ✅ NEW: Three-dot menu modal */}
       <Modal
         visible={menuVisible}
@@ -1080,6 +1087,16 @@ const VideoPost = memo(function VideoPost({
             )}
 
             {/* Delete — only shown for own posts */}
+            {isOwnPost && (
+              <TouchableOpacity style={menuStyles.row} activeOpacity={0.7} onPress={() => { setMenuVisible(false); setTimeout(() => setBoostVisible(true), 200); }}>
+                <View style={menuStyles.iconWrap}><Feather name="zap" size={20} color="#00ff88" /></View>
+                <View style={menuStyles.rowText}>
+                  <Text style={menuStyles.rowTitle}>Boost post</Text>
+                  <Text style={menuStyles.rowSub}>Show it to more people for 24 hours</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
             {isOwnPost && (
               <TouchableOpacity
                 style={menuStyles.row}
@@ -1183,7 +1200,7 @@ const VideoPost = memo(function VideoPost({
             </TouchableOpacity>
           )}
         </View>
-        {item.caption && <Text style={styles.videoCaption} numberOfLines={3}>{item.caption}</Text>}
+        {(item.caption || (item as any).boost_id) && <Text style={styles.videoCaption} numberOfLines={3}>{(item as any).boost_id ? '🚀 Boosted · ' : ''}{item.caption}</Text>}
         {item.location && (<View style={styles.locationContainer}><Feather name="map-pin" size={12} color="#00ff88" /><Text style={styles.locationText}>{item.location}</Text></View>)}
 
         {item.vibe_type === 'marketplace' && (() => {
@@ -1533,13 +1550,29 @@ export default function VideosScreen() {
     try {
       const { data: postsData, error: postsError } = await supabase
         .from('posts')
-        .select('id,user_id,caption,media_url,watermarked_url,media_type,views_count,coins_received,comments_count,saved_by,liked_by,location,music_name,music_artist,music_url,music_volume,original_volume,music_start_offset_ms,music_end_offset_ms,voice_duration,created_at,has_watermark,applied_filter,video_effect,video_filter_tint,playback_rate,vibe_type,cloudinary_public_id,is_published,marketplace_listing_id,marketplace_price,marketplace_title')
+        .select(FEED_POST_SELECT)
         .eq('media_type', 'video')
         .or('is_published.is.null,is_published.eq.true')
         .order('created_at', { ascending: false })
         .limit(50);
 
       if (postsError) throw postsError;
+
+      // 🚀 Boost: mix in videos other creators have boosted (the database decides who may see what; never your own posts)
+      const boostedIds = new Set<string>(); const boostMap = new Map<string, string>();
+      try {
+        const boosts = await fetchBoosts(2);
+        if (boosts.length && postsData) {
+          boosts.forEach(b => { boostedIds.add(b.post_id); boostMap.set(b.post_id, b.boost_id); });
+          const have = new Set((postsData as any[]).map((p: any) => p.id));
+          const need = boosts.map(b => b.post_id).filter(id => !have.has(id));
+          if (need.length) {
+            const { data: extra } = await supabase.from('posts').select(FEED_POST_SELECT).in('id', need).eq('media_type', 'video');
+            if (extra && extra.length) (postsData as any[]).push(...(extra as any[]));
+          }
+        }
+      } catch { /* boosts are a bonus: never block the feed */ }
+
       if (!postsData || postsData.length === 0) { setPosts([]); setFeedItems([]); setLoading(false); isLoadingRef.current = false; return; }
 
       const userIds = [...new Set(postsData.map(p => p.user_id))];
@@ -1609,7 +1642,13 @@ export default function VideosScreen() {
         _score: computeVideoScore(post, followingSet, usersMap.get(post.user_id)?.followers_count || 0, viewerCity)
       }));
       scoredPosts.sort((a, b) => (b._score || 0) - (a._score || 0));
-      const topPosts = scoredPosts.slice(0, 50);
+      let topPosts = scoredPosts.slice(0, 50);
+      if (boostedIds.size) {   // boosted videos jump out of the ranking and show near the top, labelled "Boosted"
+        const boosted = scoredPosts.filter(p => boostedIds.has(p.id)).slice(0, 2);
+        const rest = topPosts.filter(p => !boostedIds.has(p.id));
+        boosted.forEach((bp, i) => rest.splice(Math.min(i === 0 ? 2 : 8, rest.length), 0, { ...bp, boost_id: boostMap.get(bp.id) } as any));
+        topPosts = rest;
+      }
       setPosts(topPosts);
 
       const itemsWithAds: FeedItem[] = [];
@@ -1650,6 +1689,8 @@ export default function VideosScreen() {
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
     const firstPost = viewableItems.find((v: any) => v.item && !isAd(v.item) && !isWinnerCard(v.item));
     setActivePostId(firstPost ? (firstPost.item as Post).id : null);
+    const bid = firstPost ? (firstPost.item as any).boost_id : null;
+    if (bid && !SEEN_BOOSTS.has(bid)) { SEEN_BOOSTS.add(bid); markBoostSeen(bid); }   // count one view of a boosted video
   }).current;
 
   const viewabilityConfig = useRef({

@@ -27,7 +27,7 @@ import { useAuthStore } from '../store/authStore';
 import { detectCurrency, convertFromNgn, formatNgn } from '../utils/currencyUtils';
 import { FLW_TEST_MODE } from '../utils/flutterwaveUtils';
 import { useScreenPadding } from '@/hooks/useScreenPadding';
-import AdWalletCard from './AdWalletCard';  // ✅ NEW: free coins from rewarded ads 
+// (AdWalletCard retired: rewarded ads now boost posts instead of paying coins) 
 
 const NGN_PER_COIN = 150;
 
@@ -295,7 +295,7 @@ export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
 
         {/* ✅ NEW: Ad Wallet — only on the main coin wallet, never on marketplace coins. */}
         {config.walletType === 'profile' && (
-          <AdWalletCard accentColor={config.accentColor} onCoinsAdded={loadBalance} />
+          {/* Retired: ad rewards no longer turn into coins. Watch ads to BOOST a post instead (post menu -> Boost post). */}
         )}
 
         <View style={s.currencyBanner}>
