@@ -19,7 +19,7 @@ export default {
     "icon": "./src/assets/images/icon.png",
     "runtimeVersion": "1.0.0",
     "updates": {
-  "url": "https://u.expo.dev/931882e6-0576-4ca1-94e8-2dd90d17f784"
+  "url": "https://u.expo.dev/7c7127f1-b98d-4e09-b44b-68b0a05a434d"
 },
     "splash": {
       "image": "./src/assets/images/splash-icon.png",
@@ -28,7 +28,7 @@ export default {
     },
     "extra": {
       "eas": {
-        "projectId": "931882e6-0576-4ca1-94e8-2dd90d17f784"
+        "projectId": "7c7127f1-b98d-4e09-b44b-68b0a05a434d"
       },
       "livekitUrl": "wss://lumvibe-fn3kjths.livekit.cloud" 
     },
