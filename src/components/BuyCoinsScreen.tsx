@@ -293,10 +293,7 @@ export default function BuyCoinsScreen({ config }: { config: BuyCoinsConfig }) {
           <Text style={s.balanceNgn}>{localBalance} {currency.code}</Text>
         </View>
 
-        {/* ✅ NEW: Ad Wallet — only on the main coin wallet, never on marketplace coins. */}
-        {config.walletType === 'profile' && (
-          {/* Retired: ad rewards no longer turn into coins. Watch ads to BOOST a post instead (post menu -> Boost post). */}
-        )}
+        {/* Ad Wallet retired: ad rewards no longer turn into coins. Watch ads to BOOST a post instead (post menu -> Boost post). */}
 
         <View style={s.currencyBanner}>
           <Text style={s.currencyBannerText}>
