@@ -6,7 +6,7 @@
 // different: the packages, the wallet column, and the color theme.
 
 import React from 'react';
-import BuyCoinsScreenBase, { CoinPackage } from '../components/BuyCoinsScreen';
+import BuyCoinsScreenBase, { CoinPackage } from './components/BuyCoinsScreen';
 
 // ✅ CHANGED: 6 -> 22 packages. The original 6 (Rose, Ice Cream, Love Letter,
 // Trophy, Crown, Diamond) are untouched — same id, coins, bonus, price — so
