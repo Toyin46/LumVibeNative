@@ -9,10 +9,10 @@ export const REFERRAL_REWARDS = {
 };
 
 export const WITHDRAWAL_SPLIT = {
-  PLATFORM_FEE:        0.30,
-  REFERRAL_COMMISSION: 0.05,
-  USER_REFERRED:       0.65,
-  USER_NOT_REFERRED:   0.70,
+  PLATFORM_FEE:        0.20,   // the only amount deducted from a withdrawal
+  REFERRAL_COMMISSION: 0.05,   // credited to the referrer as coins, paid by LumVibe (not deducted from the friend)
+  USER_REFERRED:       0.80,
+  USER_NOT_REFERRED:   0.80,
 };
 
 export async function getWithdrawingUserReferrer(userId: string): Promise<string | null> {

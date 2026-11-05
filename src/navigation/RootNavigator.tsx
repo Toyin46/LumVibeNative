@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ActivityIndicator, View } from 'react-native';
 import { MainTabs } from './MainTabs';
 import { useAuthStore } from '../store/authStore';
+import { checkForAppUpdate } from '../utils/appUpdate';
 import type { RootStackParamList } from './types';
 
 // ─────────────────────────────────────────────────────────────
@@ -22,7 +23,6 @@ import SearchScreen              from '../search';
 import UserProfileScreen         from '../user/[id]';
 import PostDetailScreen          from '../post-detail';
 import ChallengeScreen           from '../challenge/ChallengeScreen';
-import WeeklyScreen              from '../weekly/WeeklyScreen';
 import SettingsScreen            from '../settings';
 import PrivacyScreen             from '../privacy';
 import TermsScreen               from '../terms';
@@ -78,6 +78,11 @@ export function RootNavigator() {
     if (user) loadProfile();
   }, [user]);
 
+  // Asks the backend if a newer Play Store build exists (popup is off until you turn it on).
+  useEffect(() => {
+    if (user?.id) checkForAppUpdate();
+  }, [user?.id]);
+
   if (!initialized) return <LoadingScreen />;
 
   return (
@@ -102,7 +107,6 @@ export function RootNavigator() {
           <Stack.Screen name="Premium"             component={PremiumScreen as any} />
           <Stack.Screen name="Story"               component={StoryScreen} />
           <Stack.Screen name="Challenge"           component={ChallengeScreen as any} />
-          <Stack.Screen name="Weekly"              component={WeeklyScreen as any} />
         </>
       ) : (
         <Stack.Screen name="Auth" component={AuthStack as any} />

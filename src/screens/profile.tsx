@@ -158,7 +158,7 @@ const POST_SIZE = Math.floor((width - 4) / 3);
 const WITHDRAWAL_SPLIT = {
   PLATFORM_FEE:        0.20,
   REFERRAL_COMMISSION: 0.05,
-  USER_REFERRED:       0.75,
+  USER_REFERRED:       0.80,   // only the 20% platform fee is deducted; the referrer's 5% is paid by LumVibe, not by the friend
   USER_NOT_REFERRED:   0.80,
 };
 const MIN_WITHDRAW_COINS = 34;
@@ -1432,29 +1432,11 @@ export default function ProfileScreen() {
         await supabase.from('users').update({ referral_code: code }).eq('id', user.id);
       }
       setReferralCode(code);
-      const { count: countFromReferrals } = await supabase.from('referrals').select('id', { count: 'exact', head: true }).eq('referrer_id', user.id);
-      const { count: countFromUsers }     = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('referred_by', user.id);
-      const finalCount = Math.max(countFromReferrals || 0, countFromUsers || 0);
-      setInviteCount(finalCount);
-      if (userData?.successful_referrals !== finalCount) {
-        await supabase.from('users').update({ successful_referrals: finalCount }).eq('id', user.id);
-        const prevCount    = userData?.successful_referrals || 0;
-        const newReferrals = finalCount - prevCount;
-        if (newReferrals > 0) {
-          const { data: meData } = await supabase.from('users').select('points').eq('id', user.id).single();
-          const currentPoints    = meData?.points || 0;
-          const bonusPoints      = newReferrals * 100;
-          await supabase.from('users').update({ points: currentPoints + bonusPoints }).eq('id', user.id);
-          await supabase.from('transactions').insert({
-            user_id:     user.id,
-            type:        'referral_bonus',
-            amount:      bonusPoints,
-            description: `🎉 Referral bonus: ${newReferrals} new person${newReferrals > 1 ? 's' : ''} joined with your code!`,
-            status:      'completed',
-          });
-          setPoints(currentPoints + bonusPoints);
-        }
-      }
+      // Only friends who verified their email and started posting count: the same rule as the free Boost and the
+      // Connector badge. Rewards for each active friend (points, unlocks) are given by the server when they become active.
+      const { count: activeCount } = await supabase.from('referrals').select('id', { count: 'exact', head: true })
+        .eq('referrer_id', user.id).not('activated_at', 'is', null);
+      setInviteCount(activeCount || 0);
     } catch {
       setReferralCode('ERROR');
       setInviteCount(0);
@@ -1802,15 +1784,34 @@ export default function ProfileScreen() {
     }
   };
 
+  // The first 100 members get the Founding Creator badge + verified tick. Only mention it while spots remain,
+  // so the share text never promises something that has run out.
+  const getFoundingLine = async (): Promise<string> => {
+    try {
+      const { count } = await supabase.from('users').select('id', { count: 'exact', head: true });
+      if (typeof count === 'number' && count < 100) {
+        return `👑 First 100 members get the Founding Creator badge + verified tick (${100 - count} spots left)`;
+      }
+    } catch {}
+    return '';
+  };
+
+  // Share texts now match what the backend really gives:
+  //  - inviter: a free 🚀 Boost once the friend verifies their email and starts posting,
+  //    a Connector badge at 3 active friends, and 5% commission on the friend's withdrawals
+  //  - friend: Co-Watch, the weekly Top 10 + Champion badge, and the Founding badge while spots last
+  // (The old texts promised "50 bonus coins" / "100 bonus coins" / "get PAID", which are no longer given.)
   const handleInviteFriends = async (platform?: 'whatsapp' | 'twitter' | 'instagram' | 'tiktok' | 'general') => {
     const code = referralCode && referralCode !== 'ERROR' ? referralCode : '';
     const link = `https://lumvibe.site/ref/${code}`;
+    const founding = await getFoundingLine();
+    const foundingLine = founding ? `\n${founding}` : '';
     const messages: Record<string, string> = {
-      whatsapp:  `Hey! 👋 I just joined *Lumvibe* — a new app where you actually get *PAID* for posting, getting likes and comments! 🤑\n\nUse my referral code *${code}* to get 50 bonus coins when you sign up!\n\nDownload here 👉 ${link}`,
-      twitter:   `I'm earning money just by posting on @LumVibeApp 🤑\n\nNo more posting for free! Join me and start earning today 👉 ${link}\n\nUse my code: ${code} for 50 bonus coins! 🎁 #LumVibe #NigerianCreators #EarnOnline`,
-      instagram: `Finally an app that PAYS Nigerian creators! 🇳🇬💰\n\nI joined LumVibe — you earn coins from every post, like and comment. Real money! 🤑\n\nJoin me 👉 ${link}\nReferral code: ${code} (get 50 bonus coins!)\n\n#LumVibe #NigerianCreators #ContentCreator #EarnOnline`,
-      tiktok:    `I found an app that pays you for posting — it's called LumVibe 🤑🇳🇬\n\nUse my code ${code} to get 50 FREE coins when you join!\n\nDownload 👉 ${link}\n\n#LumVibe #NigerianCreators #EarnOnline #ContentCreator #FYP`,
-      general:   `Join me on Lumvibe! 🚀\n\nUse my referral code: ${code}\n\n✅ Get 50 bonus coins\n✅ I get 100 bonus coins\n✅ Earn from every post, like & comment!\n\nDownload: ${link}`,
+      whatsapp:  `Hey! 👋 I'm on *LumVibe*, a new video app where you can watch together with friends and win the weekly Top 10.\n\nJoin with my code *${code}*:\n🏆 Post and compete for the weekly Top 10 + Champion badge\n👥 Co-Watch videos live with friends${foundingLine}\n\nWhen you join and start posting, I get a free 🚀 Boost (and a Connector badge as more friends join). I also earn a 5% commission on withdrawals from friends who join and start posting, paid by LumVibe and never deducted from you.\n\nDownload 👉 ${link}`,
+      twitter:   `I'm on @LumVibeApp 🚀 Co-Watch videos with friends and compete for the weekly Top 10 🏆\n\nUse my code ${code} and I get a free Boost when you start posting.\n\nJoin 👉 ${link}\n\n#LumVibe #NigerianCreators`,
+      instagram: `New Nigerian video app 🇳🇬\n\nOn LumVibe you can Co-Watch videos with friends, post, and win the weekly Top 10 for a 🏆 Champion badge.${foundingLine}\n\nUse my code ${code}. I get a free 🚀 Boost when you join and start posting.\n\nJoin me 👉 ${link}\n\n#LumVibe #NigerianCreators #ContentCreator`,
+      tiktok:    `Found a new app for Nigerian creators: LumVibe 🇳🇬\n\nCo-Watch with friends, post, and win the weekly Top 10 🏆${foundingLine}\n\nUse my code ${code}. I get a free 🚀 Boost when you start posting.\n\nDownload 👉 ${link}\n\n#LumVibe #NigerianCreators #ContentCreator #FYP`,
+      general:   `Join me on LumVibe! 🚀\n\nUse my referral code: ${code}\n\nWhat you get:\n🏆 Post and compete for the weekly Top 10 + Champion badge\n👥 Co-Watch videos live with friends${foundingLine}\n\nWhat I get:\n🚀 A free Boost when you join and start posting\n🤝 A Connector badge as more friends join\n💰 5% commission on withdrawals from friends who join and start posting (paid by LumVibe, never deducted from you)\n\nDownload: ${link}`,
     };
     const msg = messages[platform || 'general'];
     if (platform === 'whatsapp') {
@@ -1944,150 +1945,67 @@ export default function ProfileScreen() {
     const methodNote = isPaystackAuto
       ? '\n\n💳 Payment will be sent automatically to your bank.'
       : '\n\n📋 We will process your payment within 1-3 business days.';
-    const msg = myReferrerId
-      ? `Amount: ${sym}${totalLocal.toLocaleString()}\nPlatform Fee (20%): -${sym}${platformFee.toLocaleString()}\nReferral Commission (5%): -${sym}${referralCut.toLocaleString()}\nYou Receive (75%): ${sym}${userReceives.toLocaleString()}${methodNote}`
-      : `Amount: ${sym}${totalLocal.toLocaleString()}\nPlatform Fee (20%): -${sym}${platformFee.toLocaleString()}\nYou Receive (80%): ${sym}${userReceives.toLocaleString()}${methodNote}`;
+    const msg = `Amount: ${sym}${totalLocal.toLocaleString()}\nPlatform Fee (20%): -${sym}${platformFee.toLocaleString()}\nYou Receive (80%): ${sym}${userReceives.toLocaleString()}${methodNote}`;
     Alert.alert('Confirm Withdrawal', msg, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Confirm', onPress: () => executeWithdraw(amountNum, netUSD, userReceives, referralCommissionCoins, sym) },
     ]);
   };
 
+  // The server does the whole withdrawal in one safe step (request_withdrawal): it checks your balance, deducts the
+  // coins, saves the withdrawal with server-calculated amounts (20% fee) and pays your referrer's 5% (active friends only).
+  // The app can no longer change the amounts, and a failed request never takes your coins.
   const executeWithdraw = async (
     amountNum: number,
-    netUSD: number,
+    _netUSD: number,
     userReceives: number,
-    referralCommissionCoins: number,
+    _referralCommissionCoins: number,
     sym: string,
   ) => {
     if (withdrawalInProgress.current) return;
     withdrawalInProgress.current = true;
     setWithdrawing(true);
-    let originalBalance: number | null = null;
-    let withdrawalRowId: string | null = null;
-    let coinsWereDeducted = false;
+    const finish = async () => {
+      setWithdrawModalVisible(false);
+      setWithdrawAmount('');
+      await Promise.all([loadUserCoins(), loadTransactions()]);
+    };
     try {
-      const { data: freshData, error: freshErr } = await supabase.from('users').select('coins').eq('id', user!.id).single();
-      if (freshErr) throw new Error('Could not verify balance. Please try again.');
-      const freshCoins = freshData?.coins || 0;
-      if (freshCoins < amountNum) { Alert.alert('Error', 'Balance changed. Please try again.'); return; }
-      originalBalance = freshCoins;
-
-      const { data: userData, error: userErr } = await supabase
-        .from('users')
-        .select('bank_account_number, bank_account_name, bank_code, bank_name, withdrawal_country, withdrawal_currency, withdrawal_iban, display_name, username')
-        .eq('id', user!.id)
-        .single();
-      if (userErr) throw new Error('Could not load bank details. Please try again.');
-      if (!userData?.bank_account_number || !userData?.bank_code) {
-        throw new Error('Bank account not connected. Please connect your bank first.');
-      }
-
-      const grossAmount    = amountNum * currency.ratePerCoin;
-      const platformFee    = grossAmount * WITHDRAWAL_SPLIT.PLATFORM_FEE;
-      const referralCutNGN = myReferrerId ? grossAmount * WITHDRAWAL_SPLIT.REFERRAL_COMMISSION : 0;
-      const amountNGN      = grossAmount * userPayoutRate;
-
-      const { error: deductErr } = await supabase.from('users').update({ coins: freshCoins - amountNum }).eq('id', user!.id);
-      if (deductErr) throw new Error('Failed to deduct coins. Please try again.');
-      coinsWereDeducted = true;
-      setCoins(freshCoins - amountNum);
-
-      const finalCurrency = userData.withdrawal_currency || currency.code;
-      const isAutoPayable = PAYSTACK_AUTO_CURRENCIES.includes(finalCurrency);
-
-      const { data: newRow, error: logErr } = await supabase.from('withdrawals').insert({
-        user_id:       user!.id,
-        amount_coins:  amountNum,
-        amount_local:  grossAmount,
-        currency_code: finalCurrency,
-        platform_fee:  platformFee,
-        referral_cut:  referralCutNGN,
-        net_amount:    amountNGN,
-        bank_account:  userData.bank_account_number,
-        bank_code:     userData.bank_code,
-        bank_name:     userData.bank_name || userData.bank_code || '',
-        account_name:  userData.bank_account_name || '',
-        status:        isAutoPayable ? 'processing' : 'pending',
-        payout_method: isAutoPayable ? 'paystack_auto' : 'manual',
-      }).select('id').single();
-      if (logErr) throw new Error(`Failed to log withdrawal: ${logErr.message}. Coins will be refunded.`);
-      withdrawalRowId = newRow?.id || null;
-
-      await supabase.from('transactions').insert({
-        user_id:     user!.id,
-        type:        'withdrawal',
-        amount:      amountNum,
-        description: `Withdrawal: ${amountNum} coins → ${sym}${amountNGN.toLocaleString()} ${finalCurrency}`,
-        status:      'pending',
+      // Same amount within the same minute = the same request, so a double tap or a retry can never withdraw twice.
+      const requestKey = `${user!.id}:${amountNum}:${Math.floor(Date.now() / 60000)}`;
+      const { data: req, error: reqErr } = await supabase.rpc('request_withdrawal', {
+        p_coins: amountNum,
+        p_currency: currency.code,
+        p_request_key: requestKey,
       });
+      if (reqErr || !req?.ok) throw new Error(req?.message || reqErr?.message || 'Could not start the withdrawal.');
 
-      if (myReferrerId && referralCommissionCoins > 0) {
-        try {
-          await supabase.rpc('increment_coins', { target_user_id: myReferrerId, coin_amount: referralCommissionCoins });
-          await supabase.from('transactions').insert({ user_id: myReferrerId, type: 'referral_commission', amount: referralCommissionCoins, description: `💰 Referral commission: 5% from @${userProfile?.username || 'a user'}'s withdrawal`, status: 'completed' });
-          await supabase.from('notifications').insert({ user_id: myReferrerId, type: 'referral_commission', title: '💰 Referral Commission Received!', message: `You earned ${referralCommissionCoins.toFixed(2)} coins (5% commission) from @${userProfile?.username || 'a user'}'s withdrawal`, is_read: false });
-        } catch (commErr) {
-          console.error('Referral commission credit failed:', commErr);
-        }
-      }
+      if (typeof req.new_balance === 'number') setCoins(req.new_balance);
+      const received: number = typeof req.net_amount === 'number' ? req.net_amount : userReceives;
 
-      if (isAutoPayable && withdrawalRowId) {
+      if (req.auto && req.withdrawal_id) {
         try {
+          // Only the withdrawal id is sent. The server works out the amount and the bank details itself.
           const { data: paystackResult, error: fnErr } = await supabase.functions.invoke('paystack-transfer', {
-            body: {
-              withdrawalId:  withdrawalRowId,
-              userId:        user!.id,
-              amountNgn:     amountNGN,
-              accountNumber: userData.bank_account_number,
-              bankCode:      userData.bank_code,
-              accountName:   userData.bank_account_name,
-              currency:      finalCurrency,
-              walletType:    'profile',
-            },
+            body: { withdrawalId: req.withdrawal_id },
           });
+          await finish();
           if (fnErr || !paystackResult?.success) {
-            await supabase.from('withdrawals').update({ status: 'pending', payout_method: 'manual', notes: paystackResult?.message || fnErr?.message }).eq('id', withdrawalRowId);
-            setWithdrawModalVisible(false);
-            setWithdrawAmount('');
-            await Promise.all([loadUserCoins(), loadTransactions()]);
             Alert.alert('Withdrawal Submitted ✅', `Automatic payment could not be processed right now.\n\nYour request is queued for manual review. You will be paid within 1-3 business days. 🙏`);
           } else {
-            await supabase.from('withdrawals').update({ status: 'completed', flw_reference: paystackResult.transferCode }).eq('id', withdrawalRowId);
-            setWithdrawModalVisible(false);
-            setWithdrawAmount('');
-            await Promise.all([loadUserCoins(), loadTransactions()]);
-            Alert.alert('💸 Payment Sent!', `${sym}${userReceives.toLocaleString()} has been sent to your ${userData.bank_name || 'bank'} account.\n\nIt may take a few minutes to appear.`);
+            Alert.alert('💸 Payment Sent!', `${sym}${received.toLocaleString()} has been sent to your bank account.\n\nIt may take a few minutes to appear.`);
           }
-        } catch (paystackErr: any) {
-          await supabase.from('withdrawals').update({ status: 'pending', payout_method: 'manual', notes: 'Paystack network error' }).eq('id', withdrawalRowId!);
-          setWithdrawModalVisible(false);
-          setWithdrawAmount('');
-          await Promise.all([loadUserCoins(), loadTransactions()]);
+        } catch {
+          await finish();
           Alert.alert('Withdrawal Submitted ✅', `Payment encountered a network issue. Your request is queued and will be paid manually within 1-3 business days. 🙏`);
         }
       } else {
-        setWithdrawModalVisible(false);
-        setWithdrawAmount('');
-        await Promise.all([loadUserCoins(), loadTransactions()]);
-        Alert.alert('Withdrawal Requested! ✅', `Your request for ${sym}${amountNGN.toLocaleString()} has been submitted.\n\nWe will process your payment within 1-3 business days. 🙏`);
+        await finish();
+        Alert.alert('Withdrawal Requested! ✅', `Your request for ${sym}${received.toLocaleString()} has been submitted.\n\nWe will process your payment within 1-3 business days. 🙏`);
       }
     } catch (e: any) {
-      if (coinsWereDeducted && originalBalance !== null) {
-        try {
-          const { data: currentData } = await supabase.from('users').select('coins').eq('id', user!.id).single();
-          if ((currentData?.coins || 0) < originalBalance) {
-            await supabase.from('users').update({ coins: originalBalance }).eq('id', user!.id);
-            await supabase.from('transactions').update({ status: 'failed' }).eq('user_id', user!.id).eq('type', 'withdrawal').eq('status', 'pending');
-            setCoins(originalBalance);
-          }
-        } catch (refundErr) {
-          console.error('CRITICAL: Coin refund failed for user', user!.id, refundErr);
-        }
-        Alert.alert('Withdrawal Failed', `${getFriendlyErrorMessage(e, isOffline, 'Please try again.')}\n\nYour coins have been refunded. Contact lumvibesupport@gmail.com if this persists.`);
-      } else {
-        Alert.alert('Withdrawal Failed', getFriendlyErrorMessage(e, isOffline, 'Failed to process. Your coins are safe.'));
-      }
+      Alert.alert('Withdrawal Failed', getFriendlyErrorMessage(e, isOffline, 'Failed to process. Your coins are safe.'));
+      await loadUserCoins();
     } finally {
       setWithdrawing(false);
       withdrawalInProgress.current = false;
@@ -2503,7 +2421,7 @@ export default function ProfileScreen() {
             <View style={[s.newSection, { backgroundColor: theme.card }]}>
               <View style={s.newSectionHeader}>
                 <Text style={s.newSectionTitle}>🔓 Unlock Features</Text>
-                <Text style={{ color: '#666', fontSize: 12 }}>{inviteCount} invites</Text>
+                <Text style={{ color: '#666', fontSize: 12 }}>{inviteCount} active friends</Text>
               </View>
               {UNLOCKABLE_FEATURES.map(feat => {
                 const unlocked = unlockedFeatures.includes(feat.id);
@@ -2649,8 +2567,7 @@ export default function ProfileScreen() {
                   <Text style={s.withdrawPreviewLabel}>{t.wallet.breakdown}</Text>
                   <View style={s.withdrawRow}><Text style={s.withdrawRowLabel}>Gross</Text><Text style={s.withdrawRowValue}>{currency.symbol}{previewTotal.toLocaleString()}</Text></View>
                   <View style={s.withdrawRow}><Text style={s.withdrawRowLabel}>Platform fee (20%)</Text><Text style={[s.withdrawRowValue, { color: '#ff6b6b' }]}>-{currency.symbol}{previewFee.toLocaleString()}</Text></View>
-                  {myReferrerId && <View style={s.withdrawRow}><Text style={s.withdrawRowLabel}>Referral (5%)</Text><Text style={[s.withdrawRowValue, { color: '#ff6b6b' }]}>-{currency.symbol}{previewRef.toLocaleString()}</Text></View>}
-                  <View style={s.withdrawRow}><Text style={s.withdrawRowLabel}>You receive ({myReferrerId ? '75' : '80'}%)</Text><Text style={[s.withdrawRowValue, { color: theme.primary }]}>{currency.symbol}{previewRcv.toLocaleString()}</Text></View>
+                  <View style={s.withdrawRow}><Text style={s.withdrawRowLabel}>You receive (80%)</Text><Text style={[s.withdrawRowValue, { color: theme.primary }]}>{currency.symbol}{previewRcv.toLocaleString()}</Text></View>
                   <Text style={s.withdrawPreviewNote}>Processing: {isPaystackAuto ? '⚡ Automatic' : '1-3 business days'}</Text>
                 </View>
               )}
@@ -3140,7 +3057,7 @@ export default function ProfileScreen() {
                     <TouchableOpacity onPress={() => handleInviteFriends('general')}><Feather name="share-2" size={20} color="#00ff88" /></TouchableOpacity>
                   </View>
                 </View>
-                <Text style={s.inviteSubtext}>You've invited {inviteCount} friend{inviteCount !== 1 ? 's' : ''}</Text>
+                <Text style={s.inviteSubtext}>{inviteCount} active friend{inviteCount !== 1 ? 's' : ''} (they joined and started posting)</Text>
                 <Text style={[s.inviteTitle, { marginTop: 16, marginBottom: 10 }]}>Share on your platforms</Text>
                 <View style={s.smartShareRow}>
                   <TouchableOpacity style={[s.smartShareBtn, { backgroundColor: '#25D36615' }]} onPress={() => handleInviteFriends('whatsapp')}>
@@ -3164,7 +3081,7 @@ export default function ProfileScreen() {
                   <Text style={s.benefitsTitle}>Referral Rewards:</Text>
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>🎁</Text><Text style={s.benefitText}>You get: a free 🚀 Boost when they join and start posting</Text></View>
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>✨</Text><Text style={s.benefitText}>Friend gets: a friend to watch, vote and share with</Text></View>
-                  <View style={s.benefitItem}><Text style={s.benefitIcon}>💰</Text><Text style={s.benefitText}>You earn: 5% coins on every withdrawal they make — forever!</Text></View>
+                  <View style={s.benefitItem}><Text style={s.benefitIcon}>💰</Text><Text style={s.benefitText}>You earn: 5% coins on every withdrawal your active friends make — forever!</Text></View>
                   <View style={s.benefitItem}><Text style={s.benefitIcon}>🌟</Text><Text style={s.benefitText}>Refer 5 friends: unlock a glowing avatar border!</Text></View>
                 </View>
               </View>
@@ -3179,7 +3096,7 @@ export default function ProfileScreen() {
                       key={feature.id}
                       style={[s.unlockItem, isUnlocked && th.unlockActive]}
                       onPress={() => {
-                        if (!isUnlocked) { Alert.alert('Feature Locked 🔒', `You need ${feature.requiredInvites} invites.\n\nYou have ${inviteCount}.`); return; }
+                        if (!isUnlocked) { Alert.alert('Feature Locked 🔒', `You need ${feature.requiredInvites} active friend${feature.requiredInvites !== 1 ? 's' : ''} (friends who join and start posting).\n\nYou have ${inviteCount}.`); return; }
                         if (feature.id === 'custom_themes') { setInviteModalVisible(false); setTimeout(() => navigation.navigate('Themes'), 300); }
                         else if (feature.id === 'advanced_analytics') { setInviteModalVisible(false); setTimeout(() => navigation.navigate('Analytics'), 300); }
                         else if (feature.id === 'glowing_avatar') Alert.alert('✨ Glowing Avatar Active!', 'Your profile picture has a beautiful glowing border!');
