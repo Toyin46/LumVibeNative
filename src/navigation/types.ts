@@ -28,6 +28,7 @@ export type RootStackParamList = {
   // story accordingly. No context = posted from the plain Create tab,
   // always a normal public-to-profile story.
   Story: { contextType?: 'dm' | 'group' | 'circle'; contextId?: string; contextLabel?: string } | undefined;
+  QuickPost: { mode?: 'text' | 'photo'} | undefined;
 };
 
 export type MainTabParamList = {

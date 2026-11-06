@@ -35,6 +35,7 @@ import { useAudioPlayer, useAudioPlayerStatus, AudioModule } from 'expo-audio';
 //import { BannerAd, BannerAdSize, TestIds } from 'react-native-google-mobile-ads';
 import { useTranslation } from '../locales/LanguageContext';
 import AdSlot from '@/components/AdSlot';
+import MultiImageGrid from '@/components/MultiImageGrid';
 import NetInfo from '@react-native-community/netinfo';
 
 // ✅ NEW: when a caught error is network-shaped (or the device is
@@ -456,6 +457,9 @@ interface Post {
   video_filter_tint?: string | null; applied_filter?: string | null;
   video_effect?: string | null; vibe_type?: string | null;
   cloudinary_public_id?: string | null;
+  media_urls?: string[] | null;     // posts with several photos (media_url is always the first one)
+  text_template?: string | null;    // text posts: which template look was used
+  content?: string | null;
 }
 
 interface Comment {
@@ -1356,7 +1360,9 @@ const PostCard = memo(({
             {/* IMAGE POST — lazy loads only when visible */}
       {item.media_url && item.media_type === 'image' && (
         <View style={styles.mediaContainer}>
-          <LazyImage uri={item.media_url} isVisible={isVisible} />
+          {Array.isArray(item.media_urls) && item.media_urls.length > 1
+            ? <MultiImageGrid urls={item.media_urls} isVisible={isVisible} />
+            : <LazyImage uri={item.media_url} isVisible={isVisible} />}
           {!!resolvedTint && (<View style={[StyleSheet.absoluteFillObject, { backgroundColor: resolvedTint }]} pointerEvents="none" />)}
           <Animated.View style={[styles.watermarkOverlay, { top: 0, left: 0, bottom: undefined, right: undefined, transform: [{ translateX: wmX }, { translateY: wmY }], opacity: wmOpacity }]}>
             <Image source={require('../assets/images/adaptive-icon.png')} style={styles.watermarkLogo} resizeMode="contain" />

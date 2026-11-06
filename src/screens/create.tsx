@@ -4362,6 +4362,19 @@ export default function CreateScreen() {
   const [mediaUri, setMediaUri]         = useState<string | null>(null);
   const [originalMediaUri, setOriginalMediaUri] = useState<string | null>(null);
   const [mediaType, setMediaType]       = useState<MediaType>(null);
+  // Photo posts: the preview box takes the photo's own shape, so the snapshot that gets uploaded is the WHOLE photo
+  // (it used to be a tall fixed box that cut the sides off portrait, square and landscape photos).
+  const [imgAspect, setImgAspect]     = useState<number | null>(null);
+  const [previewBoxW, setPreviewBoxW] = useState(0);
+  // true for a split second while the snapshot is taken, so preview-only labels are not baked into the photo
+  const [isCapturing, setIsCapturing] = useState(false);
+  useEffect(() => {
+    if (mediaType === 'image' && mediaUri) {
+      Image.getSize(mediaUri, (w, h) => { if (w > 0 && h > 0) setImgAspect(w / h); }, () => setImgAspect(null));
+    } else {
+      setImgAspect(null);
+    }
+  }, [mediaUri, mediaType]);
   const [caption, setCaption]           = useState('');
   const [isPosting, setIsPosting]       = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -5438,7 +5451,10 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         // Capture the full compose preview (image + filter tint + AR overlay) as flat JPEG
         let sourceUri = mediaUri;
         if (previewBoxRef.current) {
-          const compositeUri = await captureCompositeImage(previewBoxRef);
+          setIsCapturing(true);                                   // hide preview-only labels
+          await new Promise<void>(res => setTimeout(res, 150));   // give the screen a moment to redraw without them
+          let compositeUri: string | null = null;
+          try { compositeUri = await captureCompositeImage(previewBoxRef); } finally { setIsCapturing(false); }
           if (compositeUri) sourceUri = compositeUri;
         }
 
@@ -6361,6 +6377,13 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 <Text style={[ms.postModeTxt, postMode === m && ms.postModeTxtActive]}>{m.toUpperCase()}</Text>
               </TouchableOpacity>
             ))}
+            {/* Quick text posts (5 templates) and multi-photo posts */}
+            <TouchableOpacity onPress={() => (navigation as any).navigate('QuickPost', { mode: 'text' })}>
+              <Text style={ms.postModeTxt}>TEXT</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => (navigation as any).navigate('QuickPost', { mode: 'photos' })}>
+              <Text style={ms.postModeTxt}>PHOTOS</Text>
+            </TouchableOpacity>
           </View>
 
           {/* NEW: private/public story picker. Only shown in story mode
@@ -6482,6 +6505,9 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
   const activeFxOverlay = activeFxTint;
   // preview box height: 58% of screen for all devices
   const PREVIEW_H = SH * 0.58;
+  const previewBoxH = (mediaType === 'image' && imgAspect && previewBoxW > 0)
+    ? Math.max(160, Math.min(PREVIEW_H, previewBoxW / imgAspect))
+    : PREVIEW_H;
   // filter card width: 4 visible on screen
   const FILTER_CARD_W = (SW - 32) / 4 - 6;
 
@@ -6579,7 +6605,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 <Ionicons name="images-outline" size={13} color="#fff" />
                 <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>Change</Text>
               </TouchableOpacity>
-              <View ref={previewBoxRef} style={[ms.previewBox, { height: PREVIEW_H }]} collapsable={false}>
+              <View ref={previewBoxRef} style={[ms.previewBox, { height: previewBoxH }]} collapsable={false} onLayout={(e) => setPreviewBoxW(e.nativeEvent.layout.width)}>
               {mediaType === 'video' ? (
                 <>
                   {/* Video renders at zIndex 1 */}
@@ -6642,7 +6668,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   </TouchableOpacity>
                 </>
               ) : (
-                <Image source={{ uri: mediaUri }} style={[StyleSheet.absoluteFill, { zIndex: 1 }]} resizeMode="cover" />
+                <Image source={{ uri: mediaUri }} style={[StyleSheet.absoluteFill, { zIndex: 1 }]} resizeMode="contain" />
               )}
               {/* Photo preset overlay — for Toy, Sketch, Lomo etc (image only) */}
               {mediaType === 'image' && selectedPhotoPreset !== 'none' && (() => {
@@ -6692,7 +6718,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 );
               })()}
               {/* Speed badge */}
-              {selectedSpeed !== 'normal' && (
+              {!isCapturing && selectedSpeed !== 'normal' && (
                 <View style={{ position: 'absolute', top: 8, left: 8, zIndex: 15, backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 }}>
                   <Text style={{ color: '#00ff88', fontSize: 11, fontWeight: '800' }}>
                     {SPEED_OPTIONS.find(s => s.id === selectedSpeed)?.emoji} {SPEED_OPTIONS.find(s => s.id === selectedSpeed)?.label} — applied on post
@@ -6700,7 +6726,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 </View>
               )}
               {/* Vibe badge */}
-              {selectedVibe && (() => {
+              {!isCapturing && selectedVibe && (() => {
                 const v = VIBE_TYPES.find(vt => vt.id === selectedVibe);
                 return v ? (
                   <View style={{ position: 'absolute', top: 8, right: 8, zIndex: 15, backgroundColor: v.color + '33', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: v.color }}>
@@ -6719,6 +6745,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 </View>
               )}
               {/* Info pill at bottom */}
+              {!isCapturing && (
               <View style={[ms.previewInfo, { zIndex: 16 }]}>
                 <Text style={ms.previewInfoTxt} numberOfLines={1}>
                   {activeFilterDef?.emoji}{' '}
@@ -6728,6 +6755,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   {' — compressed & saved'}
                 </Text>
               </View>
+              )}
               </View>
             </View>
 
