@@ -2914,7 +2914,7 @@ export default function ProfileScreen() {
               <TouchableOpacity onPress={() => setLeaderboardModalVisible(false)}><Feather name="x" size={24} color="#fff" /></TouchableOpacity>
             </View>
             <LeaderboardCountdown />
-            <TouchableOpacity activeOpacity={0.85} onPress={() => { setLeaderboardModalVisible(false); navigation.navigate('Weekly'); }}
+            <TouchableOpacity activeOpacity={0.85} onPress={() => { setLeaderboardModalVisible(false); setTimeout(() => navigation.navigate('Weekly'), 300); }}
               style={{ marginHorizontal: 16, marginBottom: 10, padding: 12, borderRadius: 14, backgroundColor: leaderboardPhase === 'voting' ? '#00ff88' : '#06210F', borderWidth: 1, borderColor: '#0E3D22' }}>
               <Text style={{ textAlign: 'center', fontWeight: '800', color: leaderboardPhase === 'voting' ? '#000' : '#9DFFCF' }}>
                 {leaderboardPhase === 'voting' ? '🗳️ Weekly Top 10 voting is live. Vote now →' : leaderboardPhase === 'closed' ? "🏆 See this week's results →" : '🔥 Weekly Top 10: see the countdown →'}
