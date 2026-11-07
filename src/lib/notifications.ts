@@ -110,6 +110,11 @@ async function sendPushAndStore({
     // Don't abort — still try push
   }
 
+  // The DATABASE now sends the push for comments and new posts (it reaches every registered device, not only the
+  // few accounts with the old users.push_token field). Sending it here too would show the same alert twice.
+  // The in-app notification above is unchanged.
+  if (type === 'comment' || type === 'new_post') return;
+
   // ── 2. Fetch recipient's push token ─────────────────────
   const token = await getPushToken(recipientUserId);
   if (!token || !token.startsWith('ExponentPushToken')) return;

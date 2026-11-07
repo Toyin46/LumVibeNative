@@ -49,6 +49,8 @@ import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/m
 import NetInfo from '@react-native-community/netinfo';
 // Crowd Cam (multi-phone film) -- lives in its own files under src/crowdcam/
 import CrowdCamModal from '../crowdcam/CrowdCamModal';
+// Text templates + multi-photo picker (opens from TEXT / PHOTOS, then continues on this compose screen)
+import QuickPostModal from '@/QuickPostModal';
 
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
@@ -349,6 +351,7 @@ interface FreesoundResult {
 }
 interface PostInsertData {
   user_id: string; caption: string;
+  media_urls?: string[]; text_template?: string; content?: string;
   likes_count: number; comments_count: number; views_count: number; coins_received: number;
   created_at: string; is_published: boolean; scheduled_for: string | null;
   has_watermark: boolean; auto_optimized: boolean; applied_filter: string;
@@ -365,6 +368,36 @@ interface PostInsertData {
 // ─── CONSTANTS ────────────────────────────────────────────
 const CLOUDINARY_CLOUD_NAME    = 'dvllxm0wg';
 const CLOUDINARY_UPLOAD_PRESET = 'Kinsta_unsigned';
+
+// Uploads one extra photo of a multi-photo post (very large photos are shrunk, nothing is cropped).
+async function uploadExtraPhoto(uri: string): Promise<string> {
+  let useUri = uri;
+  try {
+    const dims = await new Promise<{ w: number; h: number }>((res, rej) => Image.getSize(uri, (w, h) => res({ w, h }), rej));
+    if (dims.w > 1600 || dims.h > 1600) {
+      const out = await ImageManipulator.manipulateAsync(
+        uri, [{ resize: dims.w >= dims.h ? { width: 1600 } : { height: 1600 } }],
+        { compress: 0.88, format: ImageManipulator.SaveFormat.JPEG },
+      );
+      useUri = out.uri;
+    }
+  } catch { /* upload the original if shrinking fails */ }
+  const form = new FormData();
+  form.append('file', { uri: useUri, type: 'image/jpeg', name: `photo_${Date.now()}_${Math.floor(Math.random() * 1e6)}.jpg` } as any);
+  form.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+  form.append('resource_type', 'image');
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, { method: 'POST', body: form });
+  if (!res.ok) {
+    console.error('[extra photo upload] Cloudinary rejected the upload:', res.status, await res.text().catch(() => ''));
+    throw new Error('Could not upload one of your photos. Please check your connection and try again.');
+  }
+  let url = (await res.json()).secure_url as string;
+  if (url && url.includes('/upload/') && !url.includes('q_auto')) {
+    const idx = url.indexOf('/upload/');
+    url = url.slice(0, idx + 8) + 'q_auto:good,f_auto,dpr_auto/' + url.slice(idx + 8);
+  }
+  return url;
+}
 const DRAFTS_STORAGE_KEY       = 'lumvibe_drafts_v1';
 const MAX_DRAFTS               = 20;
 const VIDEO_SIZE_LIMIT_MB      = 50;
@@ -4375,6 +4408,10 @@ export default function CreateScreen() {
       setImgAspect(null);
     }
   }, [mediaUri, mediaType]);
+  // Posts that start from the TEXT / PHOTOS options
+  const [extraPhotoUris, setExtraPhotoUris] = useState<string[]>([]);          // photos 2..10 of a multi-photo post
+  const [textPostMeta, setTextPostMeta]     = useState<{ template: string; content: string } | null>(null);
+  const [quickPostMode, setQuickPostMode]   = useState<null | 'text' | 'photos'>(null);
   const [caption, setCaption]           = useState('');
   const [isPosting, setIsPosting]       = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -5006,6 +5043,8 @@ export default function CreateScreen() {
     setMediaUri(null);
     setOriginalMediaUri(null);
     setMediaType(null);
+    setExtraPhotoUris([]);
+    setTextPostMeta(null);
     setCaption('');
     setVideoPlaying(false);
     setShowEndScreen(false);
@@ -5450,7 +5489,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
         // Capture the full compose preview (image + filter tint + AR overlay) as flat JPEG
         let sourceUri = mediaUri;
-        if (previewBoxRef.current) {
+        if (previewBoxRef.current && !textPostMeta && extraPhotoUris.length === 0) {
           setIsCapturing(true);                                   // hide preview-only labels
           await new Promise<void>(res => setTimeout(res, 150));   // give the screen a moment to redraw without them
           let compositeUri: string | null = null;
@@ -5790,6 +5829,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
       const filterTintForDb = filterDef?.dbTint || null;
       const resolvedTintForDb = fxTintForDb || filterTintForDb || null;
 
+      // ── EXTRA PHOTOS of a multi-photo post ──
+      const extraPhotoUrls: string[] = [];
+      if (mediaType === 'image' && finalMediaUrl && extraPhotoUris.length > 0) {
+        for (let i = 0; i < extraPhotoUris.length; i++) {
+          setUploadStage(`Uploading photo ${i + 2} of ${extraPhotoUris.length + 1}...`);
+          extraPhotoUrls.push(await uploadExtraPhoto(extraPhotoUris[i]));
+        }
+      }
+
       const postData: PostInsertData = {
         user_id: user.id,
         caption: statusContent || caption.trim() || '',
@@ -5808,6 +5856,8 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
       };
 
       if (finalMediaUrl) { postData.media_url = finalMediaUrl; postData.media_type = finalMediaType; }
+      if (finalMediaUrl && extraPhotoUrls.length > 0) postData.media_urls = [finalMediaUrl, ...extraPhotoUrls];
+      if (textPostMeta) { postData.text_template = textPostMeta.template; postData.content = textPostMeta.content; }
       if (cloudinaryPublicId) postData.cloudinary_public_id = cloudinaryPublicId;
       // ✅ WATERMARK: persist the eager-processed watermarked video URL.
       // handleSaveMedia in videos.tsx reads this and uses it when the user saves.
@@ -6372,16 +6422,16 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               is still a UI-only placeholder (falls through to a normal post),
               since actual live streaming is a separate, bigger feature. */}
           <View style={ms.postModeRow}>
-            {(['post', 'story', 'live'] as const).map(m => (
+            {(['post', 'story', 'live'] as const).filter(m => m === 'post' || postMode === m).map(m => (
               <TouchableOpacity key={m} onPress={() => setPostMode(m)}>
                 <Text style={[ms.postModeTxt, postMode === m && ms.postModeTxtActive]}>{m.toUpperCase()}</Text>
               </TouchableOpacity>
             ))}
-            {/* Quick text posts (5 templates) and multi-photo posts */}
-            <TouchableOpacity onPress={() => (navigation as any).navigate('QuickPost', { mode: 'text' })}>
+            {/* Quick text posts (5 templates) and multi-photo posts: they open a small editor, then continue on the compose screen */}
+            <TouchableOpacity onPress={() => setQuickPostMode('text')}>
               <Text style={ms.postModeTxt}>TEXT</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => (navigation as any).navigate('QuickPost', { mode: 'photos' })}>
+            <TouchableOpacity onPress={() => setQuickPostMode('photos')}>
               <Text style={ms.postModeTxt}>PHOTOS</Text>
             </TouchableOpacity>
           </View>
@@ -6478,6 +6528,37 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
           }}
         />
 
+        {/* TEXT / PHOTOS editor: hands the finished card or photos to the compose screen below */}
+        <QuickPostModal
+          visible={quickPostMode !== null}
+          initialMode={quickPostMode || 'text'}
+          onClose={() => setQuickPostMode(null)}
+          onTextReady={(uri, template, content) => {
+            setQuickPostMode(null);
+            setCapturedWithLiveFx(false);
+            setSelectedFilter('original'); setSelectedFx('fx_none'); setSelectedPhotoPreset('none');
+            setExtraPhotoUris([]);
+            setTextPostMeta({ template, content });
+            setOriginalMediaUri(uri);
+            setMediaUri(uri);
+            setMediaType('image');
+            setVideoPlaying(false);
+            setScreenView('compose');
+          }}
+          onPhotosReady={(uris) => {
+            setQuickPostMode(null);
+            setCapturedWithLiveFx(false);
+            setSelectedFilter('original'); setSelectedFx('fx_none'); setSelectedPhotoPreset('none');
+            setTextPostMeta(null);
+            setExtraPhotoUris(uris.slice(1));
+            setOriginalMediaUri(uris[0]);
+            setMediaUri(uris[0]);
+            setMediaType('image');
+            setVideoPlaying(false);
+            setScreenView('compose');
+          }}
+        />
+
         {/* Crowd Cam modal (multi-phone film) */}
         <CrowdCamModal
           visible={showCrowdCam}
@@ -6508,6 +6589,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
   const previewBoxH = (mediaType === 'image' && imgAspect && previewBoxW > 0)
     ? Math.max(160, Math.min(PREVIEW_H, previewBoxW / imgAspect))
     : PREVIEW_H;
+  const isMultiPhoto = extraPhotoUris.length > 0;   // filters and styles are off for multi-photo posts and text cards
   // filter card width: 4 visible on screen
   const FILTER_CARD_W = (SW - 32) / 4 - 6;
 
@@ -6597,6 +6679,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                       const type = asset.type === 'video' ? 'video' : 'image';
                       if (type === 'video') { const ok = await checkVideoSize(asset.uri); if (!ok) return; }
                       setOriginalMediaUri(asset.uri); setMediaUri(asset.uri); setMediaType(type);
+                      setTextPostMeta(null); setExtraPhotoUris([]);
                       setVideoPlaying(false); setShowEndScreen(false);
                     }
                   } catch (e: any) { Alert.alert('Error', 'Could not pick media: ' + getFriendlyError(e)); }
@@ -6760,6 +6843,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </View>
 
             {/* Vertical filter scroll on the RIGHT — exactly like old design */}
+            {!(isMultiPhoto || !!textPostMeta) && (
             <View style={[ms.filterSidePanel, { height: PREVIEW_H }]}>
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 6 }}>
                 {FILTERS.map(f => {
@@ -6782,11 +6866,45 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 })}
               </ScrollView>
             </View>
+            )}
+          </View>
+        )}
+
+        {/* ── MULTI-PHOTO STRIP: manage the photos picked on the PHOTOS option ── */}
+        {mediaUri && mediaType === 'image' && extraPhotoUris.length > 0 && (
+          <View style={{ marginHorizontal: 12, marginTop: 10 }}>
+            <Text style={{ color: '#aaa', fontSize: 12, marginBottom: 6 }}>{extraPhotoUris.length + 1} photos · the first one is the cover</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+              {extraPhotoUris.map((u, i) => (
+                <View key={u + i} style={{ width: 64, height: 64 }}>
+                  <Image source={{ uri: u }} style={{ width: 64, height: 64, borderRadius: 10, backgroundColor: '#111' }} />
+                  <TouchableOpacity
+                    style={{ position: 'absolute', top: 3, right: 3, width: 20, height: 20, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.75)', alignItems: 'center', justifyContent: 'center' }}
+                    onPress={() => setExtraPhotoUris(prev => prev.filter((_, k) => k !== i))}
+                  >
+                    <Ionicons name="close" size={12} color="#fff" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+              {extraPhotoUris.length < 9 && (
+                <TouchableOpacity
+                  style={{ width: 64, height: 64, borderRadius: 10, borderWidth: 2, borderStyle: 'dashed', borderColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center' }}
+                  onPress={async () => {
+                    try {
+                      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: 9 - extraPhotoUris.length, quality: 1 });
+                      if (!r.canceled) setExtraPhotoUris(prev => [...prev, ...r.assets.map(a => a.uri)].slice(0, 9));
+                    } catch (e: any) { Alert.alert('Could not open your photos', 'Please try again.'); }
+                  }}
+                >
+                  <Ionicons name="add" size={26} color="#00ff88" />
+                </TouchableOpacity>
+              )}
+            </ScrollView>
           </View>
         )}
 
         {/* ── PHOTO STYLE PRESETS — Toy, Sketch, Lomo etc ── */}
-        {mediaUri && mediaType === 'image' && (
+        {mediaUri && mediaType === 'image' && !isMultiPhoto && !textPostMeta && (
           <PhotoPresetStrip selected={selectedPhotoPreset} onSelect={setSelectedPhotoPreset} />
         )}
 

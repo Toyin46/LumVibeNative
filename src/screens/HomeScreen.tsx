@@ -1805,6 +1805,18 @@ export default function HomeScreen() {
           video_effect: post.video_effect || null,
           vibe_type: post.vibe_type || null,
           cloudinary_public_id: post.cloudinary_public_id || null,
+          // Posts with several photos: keep the full list (same image-quality tweak as media_url above).
+          media_urls: Array.isArray(post.media_urls)
+            ? post.media_urls.map((u: string) => {
+                if (u && u.includes('/upload/') && !u.includes('q_auto')) {
+                  const i = u.indexOf('/upload/');
+                  return u.slice(0, i + 8) + 'q_auto:good,f_auto/' + u.slice(i + 8);
+                }
+                return u;
+              })
+            : null,
+          text_template: post.text_template || null,
+          content: post.content || null,
         };
       });
 
@@ -1934,6 +1946,18 @@ export default function HomeScreen() {
           video_effect: post.video_effect || null,
           vibe_type: post.vibe_type || null,
           cloudinary_public_id: post.cloudinary_public_id || null,
+          // Posts with several photos: keep the full list (same image-quality tweak as media_url above).
+          media_urls: Array.isArray(post.media_urls)
+            ? post.media_urls.map((u: string) => {
+                if (u && u.includes('/upload/') && !u.includes('q_auto')) {
+                  const i = u.indexOf('/upload/');
+                  return u.slice(0, i + 8) + 'q_auto:good,f_auto/' + u.slice(i + 8);
+                }
+                return u;
+              })
+            : null,
+          text_template: post.text_template || null,
+          content: post.content || null,
         };
       });
 
