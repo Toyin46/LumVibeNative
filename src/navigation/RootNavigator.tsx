@@ -35,7 +35,7 @@ import LanguagePickerScreen      from '../language-picker';
 import ApplySubscriptions        from '../apply-subscriptions';
 import PremiumScreen             from '../premium-subscription';
 import StoryScreen                from '../story';
-import QuickPostScreen            from '../quick-post';
+import WeeklyScreen               from '../weekly/WeeklyScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -106,9 +106,10 @@ export function RootNavigator() {
           <Stack.Screen name="ConnectAccounts"     component={ConnectAccountsScreen as any} />
           <Stack.Screen name="LanguagePicker"      component={LanguagePickerScreen as any} />
           <Stack.Screen name="Premium"             component={PremiumScreen as any} />
+          <Stack.Screen name="ApplySubscriptions"  component={ApplySubscriptions as any} />
           <Stack.Screen name="Story"               component={StoryScreen} />
-          <Stack.Screen name="QuickPost"           component={QuickPostScreen as any} />
           <Stack.Screen name="Challenge"           component={ChallengeScreen as any} />
+          <Stack.Screen name="Weekly"             component={WeeklyScreen as any} />
         </>
       ) : (
         <Stack.Screen name="Auth" component={AuthStack as any} />
