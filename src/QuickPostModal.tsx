@@ -15,8 +15,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { captureRef } from 'react-native-view-shot';
-import { supabase } from '../config/supabase';
-import { useAuthStore } from '../store/authStore';
+import { supabase } from './config/supabase'; 
+import { useAuthStore } from './store/authStore'; 
 
 const { width: SW } = Dimensions.get('window');
 const MAX_TEXT = 300;
