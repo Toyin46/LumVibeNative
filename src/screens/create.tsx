@@ -50,9 +50,9 @@ import NetInfo from '@react-native-community/netinfo';
 // Crowd Cam (multi-phone film) -- lives in its own files under src/crowdcam/
 import CrowdCamModal from '../crowdcam/CrowdCamModal';
 // Text templates + multi-photo picker (opens from TEXT / PHOTOS, then continues on this compose screen)
-import QuickPostModal from '../quickpost/QuickPostModal';
+import QuickPostModal from '@/QuickPostModal';
 // "Add on top": text and pictures placed over the photo / video / text card
-import OverlayLayer, { OverlayItem, OverlayTextEditor, makeOverlayId, PIP_BASE_WIDTH } from '../overlays/OverlayLayer';
+import OverlayLayer, { OverlayItem, OverlayTextEditor, makeOverlayId, PIP_BASE_WIDTH } from '@/OverlayLayer';
 
 import { VideoView, useVideoPlayer } from 'expo-video';
 import {  bakeVideo, bakeImage, supportsOverlayLayer, supportsPipVideo } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
