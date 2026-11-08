@@ -81,6 +81,7 @@ type VideoBakerOptions = {
   watermarkSpeedXPxPerSec?: number; // default 90
   watermarkSpeedYPxPerSec?: number; // default 65 — different from X on purpose, see WatermarkBounce.kt
   captionText?: string;
+  overlayLayerPngPath?: string; // full-frame transparent PNG (text / pictures placed by the person), drawn over every frame
   brightness?: number; // -1..1, default 0
   contrast?: number; // 0..2, default 1
   saturation?: number; // 0..2, default 1
@@ -120,6 +121,9 @@ type VideoBakerEvents = {
 };
 
 const NativeVideoBaker = requireNativeModule("VideoBaker");
+
+/** True only on app builds whose native baker can draw an overlay layer onto videos. */
+export const supportsOverlayLayer: boolean = !!(NativeVideoBaker as any)?.supportsOverlayLayer;
 const emitter = new EventEmitter<VideoBakerEvents>(NativeVideoBaker);
 
 /**

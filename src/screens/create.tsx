@@ -51,9 +51,11 @@ import NetInfo from '@react-native-community/netinfo';
 import CrowdCamModal from '../crowdcam/CrowdCamModal';
 // Text templates + multi-photo picker (opens from TEXT / PHOTOS, then continues on this compose screen)
 import QuickPostModal from '@/QuickPostModal';
+// "Add on top": text and pictures placed over the photo / video / text card
+import OverlayLayer, { OverlayItem, OverlayTextEditor, makeOverlayId } from '@/OverlayLayer';
 
 import { VideoView, useVideoPlayer } from 'expo-video';
-import {  bakeVideo, bakeImage } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
+import {  bakeVideo, bakeImage, supportsOverlayLayer } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
 import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
@@ -4412,6 +4414,13 @@ export default function CreateScreen() {
   const [extraPhotoUris, setExtraPhotoUris] = useState<string[]>([]);          // photos 2..10 of a multi-photo post
   const [textPostMeta, setTextPostMeta]     = useState<{ template: string; content: string } | null>(null);
   const [quickPostMode, setQuickPostMode]   = useState<null | 'text' | 'photos'>(null);
+  // "Add on top": text and pictures placed over the photo / video / text card (baked in when you post)
+  const [overlays, setOverlays]                   = useState<OverlayItem[]>([]);
+  const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
+  const [overlayEditor, setOverlayEditor]         = useState<null | { id: string | null }>(null);   // id null = a new text
+  const overlayLayerRef  = useRef<View>(null);
+  const overlayLayoutRef = useRef({ w: 0, h: 0 });
+  const [vidAspect, setVidAspect] = useState<number | null>(null);                                 // shape of the video
   const [caption, setCaption]           = useState('');
   const [isPosting, setIsPosting]       = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -4623,6 +4632,15 @@ export default function CreateScreen() {
   // (no audio operations fighting the gesture), and playback catches up
   // instantly once you stop — the same scrubbing feel as WhatsApp/most
   // proper video/audio editors.
+  useEffect(() => {
+    setVidAspect(null);
+    if (mediaType !== 'video' || !videoPlayer) return;
+    const read = (track: any) => { const sz = track?.size; if (sz && sz.width > 0 && sz.height > 0) setVidAspect(sz.width / sz.height); };
+    let sub: any;
+    try { read((videoPlayer as any).videoTrack); } catch { /* older expo-video: shape stays unknown */ }
+    try { sub = (videoPlayer as any).addListener?.('videoTrackChange', (e: any) => read(e?.videoTrack)); } catch { /* ignore */ }
+    return () => { try { sub?.remove?.(); } catch { /* ignore */ } };
+  }, [videoPlayer, mediaUri, mediaType]);
   const seekDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (seekDebounceRef.current) clearTimeout(seekDebounceRef.current);
@@ -5045,6 +5063,8 @@ export default function CreateScreen() {
     setMediaType(null);
     setExtraPhotoUris([]);
     setTextPostMeta(null);
+    setOverlays([]);
+    setSelectedOverlayId(null);
     setCaption('');
     setVideoPlaying(false);
     setShowEndScreen(false);
@@ -5489,7 +5509,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
 
         // Capture the full compose preview (image + filter tint + AR overlay) as flat JPEG
         let sourceUri = mediaUri;
-        if (previewBoxRef.current && !textPostMeta && extraPhotoUris.length === 0) {
+        if (previewBoxRef.current && (!textPostMeta || overlays.length > 0) && extraPhotoUris.length === 0) {
           setIsCapturing(true);                                   // hide preview-only labels
           await new Promise<void>(res => setTimeout(res, 150));   // give the screen a moment to redraw without them
           let compositeUri: string | null = null;
@@ -5712,7 +5732,8 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         // the reasoning (removes the duplicate floating UI overlay that
         // was showing on top of the permanently-baked one at the same
         // time). Effects/FX baking below is completely untouched.
-        const needsBake = !!fxEffect && selectedFx !== 'fx_none' && !capturedWithLiveFx;
+        const hasOverlays = overlays.length > 0 && supportsOverlayLayer;
+        const needsBake = (!!fxEffect && selectedFx !== 'fx_none' && !capturedWithLiveFx) || hasOverlays;
 
         let uriToUpload = mediaUri;
 
@@ -5788,12 +5809,26 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               }
             }
 
+            // Text / pictures placed on top: a transparent picture of that layer, drawn over every frame by the baker
+            if (hasOverlays && overlayLayerRef.current && overlayLayoutRef.current.w > 0) {
+              setUploadStage('Adding your text and pictures...');
+              setSelectedOverlayId(null);
+              setIsCapturing(true);
+              await new Promise<void>(res => setTimeout(res, 220));
+              try {
+                const lw = overlayLayoutRef.current.w, lh = overlayLayoutRef.current.h;
+                const layerPng = await captureRef(overlayLayerRef, { format: 'png', quality: 1, result: 'tmpfile', width: 1080, height: Math.max(2, Math.round(1080 * lh / lw)) });
+                bakeOptions.overlayLayerPngPath = layerPng.replace('file://', '');
+              } finally { setIsCapturing(false); }
+            }
             const outputPath = `${FileSystem.cacheDirectory}baked_${Date.now()}.mp4`.replace('file://', '');
             const cleanInput = mediaUri.replace('file://', '');
             const finalPath = await bakeVideo(cleanInput, outputPath, bakeOptions);
             uriToUpload = `file://${finalPath}`;
           } catch (e) {
             console.warn('Native video bake failed, uploading original video instead:', e);
+            // never post the video WITHOUT the text / pictures the person placed on it
+            if (hasOverlays) throw new Error('Could not add your text and pictures to the video. Please try again.');
             uriToUpload = mediaUri;
           }
         } 
@@ -6586,8 +6621,9 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
   const activeFxOverlay = activeFxTint;
   // preview box height: 58% of screen for all devices
   const PREVIEW_H = SH * 0.58;
-  const previewBoxH = (mediaType === 'image' && imgAspect && previewBoxW > 0)
-    ? Math.max(160, Math.min(PREVIEW_H, previewBoxW / imgAspect))
+  const frameAspect = mediaType === 'image' ? imgAspect : (mediaType === 'video' && overlays.length > 0 ? vidAspect : null);
+  const previewBoxH = (frameAspect && previewBoxW > 0)
+    ? Math.max(160, Math.min(PREVIEW_H, previewBoxW / frameAspect))
     : PREVIEW_H;
   const isMultiPhoto = extraPhotoUris.length > 0;   // filters and styles are off for multi-photo posts and text cards
   // filter card width: 4 visible on screen
@@ -6679,7 +6715,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                       const type = asset.type === 'video' ? 'video' : 'image';
                       if (type === 'video') { const ok = await checkVideoSize(asset.uri); if (!ok) return; }
                       setOriginalMediaUri(asset.uri); setMediaUri(asset.uri); setMediaType(type);
-                      setTextPostMeta(null); setExtraPhotoUris([]);
+                      setTextPostMeta(null); setExtraPhotoUris([]); setOverlays([]); setSelectedOverlayId(null);
                       setVideoPlaying(false); setShowEndScreen(false);
                     }
                   } catch (e: any) { Alert.alert('Error', 'Could not pick media: ' + getFriendlyError(e)); }
@@ -6695,7 +6731,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   <VideoView
                     player={videoPlayer}
                     style={[StyleSheet.absoluteFill, { zIndex: 1 }]}
-                    contentFit="cover"
+                    contentFit={overlays.length > 0 ? 'contain' : 'cover'}
                     nativeControls={false}
                   />
                   {/* INSTANT EFFECT PREVIEW (like the website): the clip plays through the real effect engine the moment an effect is chosen */}
@@ -6828,6 +6864,21 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 </View>
               )}
               {/* Info pill at bottom */}
+              {(mediaType === 'image' || (mediaType === 'video' && supportsOverlayLayer)) && !isMultiPhoto && previewBoxW > 0 && (
+                <View
+                  ref={overlayLayerRef} collapsable={false} pointerEvents="box-none"
+                  style={[StyleSheet.absoluteFill, { zIndex: 30 }]}
+                  onLayout={(e) => { overlayLayoutRef.current = { w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height }; }}
+                >
+                  <OverlayLayer
+                    items={overlays} onChange={setOverlays}
+                    selectedId={selectedOverlayId} onSelect={setSelectedOverlayId}
+                    width={previewBoxW} height={previewBoxH}
+                    editable={!isCapturing}
+                    onEditText={(id) => setOverlayEditor({ id })}
+                  />
+                </View>
+              )}
               {!isCapturing && (
               <View style={[ms.previewInfo, { zIndex: 16 }]}>
                 <Text style={ms.previewInfoTxt} numberOfLines={1}>
@@ -6869,6 +6920,59 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             )}
           </View>
         )}
+
+        {/* ── ADD ON TOP: text and pictures over the photo / video / text card ── */}
+        {(mediaType === 'image' || mediaType === 'video') && !isMultiPhoto && (
+          <View style={{ marginHorizontal: 12, marginTop: 10 }}>
+            {mediaType === 'video' && !supportsOverlayLayer ? (
+              <Text style={{ color: '#777', fontSize: 12 }}>Text and pictures on videos need the latest app update.</Text>
+            ) : (
+              <>
+                <Text style={{ color: '#aaa', fontSize: 12, marginBottom: 6 }}>Add on top</Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <TouchableOpacity
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#161616', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}
+                    onPress={() => setOverlayEditor({ id: null })}
+                  >
+                    <Ionicons name="text" size={16} color="#00ff88" /><Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Text</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#161616', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}
+                    onPress={async () => {
+                      try {
+                        const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: false, quality: 1 });
+                        if (r.canceled || !r.assets?.[0]) return;
+                        const a = r.assets[0]; const id = makeOverlayId();
+                        setOverlays(prev => [...prev, { id, kind: 'image', x: 0.5, y: 0.5, scale: 1, rotation: 0, uri: a.uri, aspect: a.width && a.height ? a.width / a.height : 1 }]);
+                        setSelectedOverlayId(id);
+                      } catch { Alert.alert('Could not open your photos', 'Please try again.'); }
+                    }}
+                  >
+                    <Ionicons name="image" size={16} color="#00ff88" /><Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Picture</Text>
+                  </TouchableOpacity>
+                  {overlays.length > 0 && (
+                    <Text style={{ color: '#777', fontSize: 11, alignSelf: 'center', flex: 1 }}>Drag to move, pinch to resize, tap text to edit</Text>
+                  )}
+                </View>
+              </>
+            )}
+          </View>
+        )}
+        <OverlayTextEditor
+          visible={overlayEditor !== null}
+          initial={overlayEditor?.id ? (overlays.find(o => o.id === overlayEditor.id) || null) : null}
+          onCancel={() => setOverlayEditor(null)}
+          onDone={(f) => {
+            if (overlayEditor?.id) {
+              setOverlays(prev => prev.map(i => (i.id === overlayEditor.id ? { ...i, ...f } : i)));
+            } else {
+              const id = makeOverlayId();
+              setOverlays(prev => [...prev, { id, kind: 'text', x: 0.5, y: 0.4, scale: 1, rotation: 0, ...f }]);
+              setSelectedOverlayId(id);
+            }
+            setOverlayEditor(null);
+          }}
+        />
 
         {/* ── MULTI-PHOTO STRIP: manage the photos picked on the PHOTOS option ── */}
         {mediaUri && mediaType === 'image' && extraPhotoUris.length > 0 && (

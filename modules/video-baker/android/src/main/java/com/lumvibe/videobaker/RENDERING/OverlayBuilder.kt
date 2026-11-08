@@ -48,6 +48,27 @@ object OverlayBuilder {
     }
 
     /**
+     * Full-frame transparent texture made from a PNG the app prepared (the text and pictures a person placed on
+     * their video), stretched to the output frame. Returns null if no path was given or the file cannot be decoded.
+     * Callers then simply skip it, so a bad file can never make an export fail.
+     */
+    fun buildFullFrameTexture(width: Int, height: Int, pngPath: String?): Int? {
+        if (pngPath.isNullOrEmpty()) return null
+        val src = BitmapFactory.decodeFile(pngPath) ?: run {
+            Log.w("OverlayBuilder", "buildFullFrameTexture: BitmapFactory.decodeFile returned null for path: $pngPath")
+            return null
+        }
+        val scaled = if (src.width == width && src.height == height) src
+                     else Bitmap.createScaledBitmap(src, width, height, true)
+        val textureId = GlUtil.createTexture2D()
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, scaled, 0)
+        if (scaled !== src) scaled.recycle()
+        src.recycle()
+        return textureId
+    }
+
+    /**
      * The watermark logo as its own small texture (transparent background, natural
      * aspect ratio, scaled so it's [targetWidthPx] wide). Returns null if no path
      * given or the file can't be decoded.

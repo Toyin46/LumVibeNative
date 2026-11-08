@@ -57,6 +57,9 @@ class VideoTranscoder {
         val watermarkSpeedXPxPerSec: Float = 90f,
         val watermarkSpeedYPxPerSec: Float = 65f,
         val captionText: String? = null,
+        // Full-frame transparent PNG with the text / pictures the person placed on top of the video (drawn over
+        // every frame, under the watermark). Null = nothing extra, exactly as before.
+        val overlayLayerPngPath: String? = null,
         val brightness: Float = 0f,
         val contrast: Float = 1f,
         val saturation: Float = 1f,
@@ -147,6 +150,7 @@ class VideoTranscoder {
         renderer.setEffect(if (engineId0 != null) VisualEffect.NONE else VisualEffect.fromKey(options.effect))
 
         val captionTextureId = OverlayBuilder.buildCaptionTexture(width, height, options.captionText)
+        val overlayLayerTextureId = OverlayBuilder.buildFullFrameTexture(width, height, options.overlayLayerPngPath)
         val logoTexture = if (options.watermarkPngPath != null && options.watermarkUsername != null) {
             OverlayBuilder.buildWatermarkCard(
                 options.watermarkPngPath, options.watermarkUsername, width * options.watermarkCardWidthFraction
@@ -1199,6 +1203,10 @@ class VideoTranscoder {
                           // a few dozen lines up  -  everything from "if (hasEffect)" down to
                           // here only runs when we're NOT currently holding a blink-freeze frame.
 
+                        if (overlayLayerTextureId != null) {
+                            renderer.drawOverlay(overlayLayerTextureId)
+                        }
+
                         if (captionTextureId != null) {
                             renderer.drawOverlay(captionTextureId)
                         }
@@ -1324,6 +1332,7 @@ class VideoTranscoder {
         // context is still current, before eglCore.release() tears it down. ----
         val texturesToDelete = mutableListOf<Int>()
         captionTextureId?.let { texturesToDelete.add(it) }
+        overlayLayerTextureId?.let { texturesToDelete.add(it) }
         logoTexture?.let { texturesToDelete.add(it.textureId) }
         if (mouthWordTextureId != 0) texturesToDelete.add(mouthWordTextureId)
         if (stickerTextureId != 0) texturesToDelete.add(stickerTextureId)

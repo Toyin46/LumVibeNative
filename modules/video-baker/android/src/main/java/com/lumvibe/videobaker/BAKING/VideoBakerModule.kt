@@ -21,6 +21,9 @@ class VideoBakerModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("VideoBaker")
 
+        // Lets the app know this build can draw an overlay layer onto videos (older builds do not have this).
+        Constants("supportsOverlayLayer" to true)
+
         Events("onProgress")
 
         // Switched from a suspend/withContext body to Expo's explicit Promise
@@ -44,6 +47,7 @@ class VideoBakerModule : Module() {
                         watermarkSpeedXPxPerSec = (options["watermarkSpeedXPxPerSec"] as? Number)?.toFloat() ?: 90f,
                         watermarkSpeedYPxPerSec = (options["watermarkSpeedYPxPerSec"] as? Number)?.toFloat() ?: 65f,
                         captionText = options["captionText"] as? String,
+                        overlayLayerPngPath = options["overlayLayerPngPath"] as? String,
                         brightness = (options["brightness"] as? Number)?.toFloat() ?: 0f,
                         contrast = (options["contrast"] as? Number)?.toFloat() ?: 1f,
                         saturation = (options["saturation"] as? Number)?.toFloat() ?: 1f,
