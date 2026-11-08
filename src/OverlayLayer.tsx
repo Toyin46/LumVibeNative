@@ -3,6 +3,8 @@
 // "Add on top": text and pictures placed over a photo, a video or a text card.
 //   - drag with one finger, pinch with two fingers to resize and rotate
 //   - tap a text to edit it, tap the little x to remove an item
+// A third kind, a VIDEO, can also be placed on a video (picture-in-picture). It is moved and resized the same way
+// (it cannot be rotated) and the native baker plays it frame by frame in step with the main video.
 // Positions are saved as FRACTIONS of the picture (0..1), so they land in exactly the same place on the final
 // photo or video, whatever its size.
 
@@ -12,6 +14,7 @@ import {
   Platform, KeyboardAvoidingView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useVideoPlayer, VideoView } from 'expo-video';
 
 const GREEN = '#00ff88';
 
@@ -20,17 +23,30 @@ export type OverlayFont = 'bold' | 'serif' | 'mono';
 
 export type OverlayItem = {
   id: string;
-  kind: 'text' | 'image';
+  kind: 'text' | 'image' | 'video';
   x: number; y: number;              // centre of the item, as a fraction of the picture's width / height
   scale: number; rotation: number;   // rotation in radians
   // text
   text?: string; color?: string; bg?: OverlayBg; font?: OverlayFont;
   // picture
-  uri?: string; aspect?: number;     // width / height
+  uri?: string; aspect?: number;     // width / height (pictures and videos)
 };
+
+/** Width of a placed video at scale 1, as a fraction of the picture's width (the baker uses the same number). */
+export const PIP_BASE_WIDTH = 0.4;
 
 export const makeOverlayId = () => `ov_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+// The small moving preview of a placed video (muted, looping). It is NOT part of the layer snapshot: the baker draws it.
+function PipPreview({ uri, w, h }: { uri: string; w: number; h: number }) {
+  const player = useVideoPlayer(uri, (p) => { p.loop = true; p.muted = true; p.play(); });
+  return (
+    <View style={{ width: w, height: h, borderWidth: 2, borderColor: '#fff', backgroundColor: '#000' }}>
+      <VideoView player={player} style={{ width: '100%', height: '100%' }} contentFit="cover" nativeControls={false} />
+    </View>
+  );
+}
 
 const FONT_FAMILY: Record<OverlayFont, string | undefined> = {
   bold: undefined,
@@ -74,7 +90,8 @@ function OverlayItemView(props: ItemProps) {
         const dx = t[1].pageX - t[0].pageX, dy = t[1].pageY - t[0].pageY;
         const dist = Math.hypot(dx, dy), angle = Math.atan2(dy, dx);
         if (!s.two) { s.two = true; s.dist = dist || 1; s.angle = angle; s.scale = p.item.scale; s.rotation = p.item.rotation; }
-        p.onUpdate({ scale: clamp(s.scale * (dist / s.dist), 0.25, 6), rotation: s.rotation + (angle - s.angle) });
+        const isVid = p.item.kind === 'video';
+        p.onUpdate({ scale: clamp(s.scale * (dist / s.dist), 0.25, isVid ? 2.2 : 6), rotation: isVid ? 0 : s.rotation + (angle - s.angle) });
       } else {
         if (s.two) { s.two = false; s.x = p.item.x; s.y = p.item.y; s.baseDx = g.dx; s.baseDy = g.dy; }
         p.onUpdate({
@@ -104,6 +121,10 @@ function OverlayItemView(props: ItemProps) {
         >{item.text}</Text>
       </View>
     );
+  } else if (item.kind === 'video' && item.uri) {
+    const w = width * PIP_BASE_WIDTH, h = w / (item.aspect || 1);
+    // while the layer picture is taken this stays empty: the baker draws the video itself
+    content = editable ? <PipPreview uri={item.uri} w={w} h={h} /> : <View style={{ width: w, height: h }} />;
   } else if (item.uri) {
     const w = width * 0.38;
     content = <Image source={{ uri: item.uri }} style={{ width: w, height: w / (item.aspect || 1) }} resizeMode="contain" />;
@@ -118,7 +139,7 @@ function OverlayItemView(props: ItemProps) {
         left: item.x * width - size.w / 2,
         top: item.y * height - size.h / 2,
         opacity: size.w > 0 ? 1 : 0,
-        transform: [{ rotate: `${item.rotation}rad` }, { scale: item.scale }],
+        transform: [{ rotate: `${item.kind === 'video' ? 0 : item.rotation}rad` }, { scale: item.scale }],
         borderWidth: editable && selected ? 1.5 : 0, borderColor: GREEN, borderStyle: 'dashed', borderRadius: 8,
       }}
     >

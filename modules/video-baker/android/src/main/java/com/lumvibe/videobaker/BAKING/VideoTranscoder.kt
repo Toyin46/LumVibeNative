@@ -82,6 +82,13 @@ class VideoTranscoder {
         // degradation as live preview, so an export never crashes even if
         // the download somehow failed right before the user hit export.
         val fireVideoPath: String? = null,
+        // Another video placed on top (picture-in-picture), drawn frame-accurately in step with the export.
+        // The rectangle is a fraction of the output frame, origin top-left. Null path = nothing extra.
+        val pipVideoPath: String? = null,
+        val pipX: Float = 0f,
+        val pipY: Float = 0f,
+        val pipW: Float = 0.35f,
+        val pipH: Float = 0.2f,
         val videoBitRate: Int = -1 // -1 = auto (width*height*4)
     )
 
@@ -151,6 +158,12 @@ class VideoTranscoder {
 
         val captionTextureId = OverlayBuilder.buildCaptionTexture(width, height, options.captionText)
         val overlayLayerTextureId = OverlayBuilder.buildFullFrameTexture(width, height, options.overlayLayerPngPath)
+        // Created here, while this GL context is current. If it cannot be created the export fails loudly
+        // (the app then tells the person) instead of silently posting without the video they placed.
+        val pipDecoder: PipVideoDecoder? = if (!options.pipVideoPath.isNullOrEmpty()) {
+            PipVideoDecoder(options.pipVideoPath, options.pipX, options.pipY, options.pipW, options.pipH)
+        } else null
+        var pipBasePtsUs = -1L
         val logoTexture = if (options.watermarkPngPath != null && options.watermarkUsername != null) {
             OverlayBuilder.buildWatermarkCard(
                 options.watermarkPngPath, options.watermarkUsername, width * options.watermarkCardWidthFraction
@@ -1203,6 +1216,12 @@ class VideoTranscoder {
                           // a few dozen lines up  -  everything from "if (hasEffect)" down to
                           // here only runs when we're NOT currently holding a blink-freeze frame.
 
+                        if (pipDecoder != null) {
+                            if (pipBasePtsUs < 0L) pipBasePtsUs = bufferInfo.presentationTimeUs
+                            pipDecoder.prepareFrame(bufferInfo.presentationTimeUs - pipBasePtsUs)
+                            pipDecoder.drawOnto(renderer, width, height)
+                        }
+
                         if (overlayLayerTextureId != null) {
                             renderer.drawOverlay(overlayLayerTextureId)
                         }
@@ -1340,6 +1359,7 @@ class VideoTranscoder {
         if (texturesToDelete.isNotEmpty()) {
             GLES20.glDeleteTextures(texturesToDelete.size, texturesToDelete.toIntArray(), 0)
         }
+        pipDecoder?.release() // the second video, while the GL context is still current
 
         // ---- Cleanup ----
         try {

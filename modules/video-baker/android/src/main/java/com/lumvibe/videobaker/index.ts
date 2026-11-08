@@ -42,6 +42,12 @@ type VideoBakerOptions = {
   watermarkSpeedYPxPerSec?: number; // default 65 — different from X on purpose, see WatermarkBounce.kt
   captionText?: string;
   overlayLayerPngPath?: string; // full-frame transparent PNG (text / pictures placed by the person), drawn over every frame
+  // another video placed on top (picture-in-picture): file path + rectangle as fractions of the frame (top-left origin)
+  pipVideoPath?: string;
+  pipX?: number;
+  pipY?: number;
+  pipW?: number;
+  pipH?: number;
   brightness?: number; // -1..1, default 0
   contrast?: number; // 0..2, default 1
   saturation?: number; // 0..2, default 1
@@ -85,6 +91,9 @@ const NativeVideoBaker = requireNativeModule("VideoBaker");
 
 /** True only on app builds whose native baker can draw an overlay layer onto videos. */
 export const supportsOverlayLayer: boolean = !!(NativeVideoBaker as any)?.supportsOverlayLayer;
+
+/** True only on app builds whose native baker can draw a second video on top of a video. */
+export const supportsPipVideo: boolean = !!(NativeVideoBaker as any)?.supportsPipVideo;
 const emitter = new EventEmitter<VideoBakerEvents>(NativeVideoBaker);
 
 /**

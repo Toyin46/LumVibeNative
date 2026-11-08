@@ -50,12 +50,12 @@ import NetInfo from '@react-native-community/netinfo';
 // Crowd Cam (multi-phone film) -- lives in its own files under src/crowdcam/
 import CrowdCamModal from '../crowdcam/CrowdCamModal';
 // Text templates + multi-photo picker (opens from TEXT / PHOTOS, then continues on this compose screen)
-import QuickPostModal from '@/QuickPostModal';
+import QuickPostModal from '../quickpost/QuickPostModal';
 // "Add on top": text and pictures placed over the photo / video / text card
-import OverlayLayer, { OverlayItem, OverlayTextEditor, makeOverlayId } from '@/OverlayLayer';
+import OverlayLayer, { OverlayItem, OverlayTextEditor, makeOverlayId, PIP_BASE_WIDTH } from '../overlays/OverlayLayer';
 
 import { VideoView, useVideoPlayer } from 'expo-video';
-import {  bakeVideo, bakeImage, supportsOverlayLayer } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
+import {  bakeVideo, bakeImage, supportsOverlayLayer, supportsPipVideo } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker'; 
 import { LiveEffectPreview } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import type { LiveEffectPreviewHandle } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/LiveEffectPreview'; 
 import { ensureFireVideoCached } from 'modules/video-baker/android/src/main/java/com/lumvibe/videobaker/fireVideoCache'; 
@@ -5810,7 +5810,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             }
 
             // Text / pictures placed on top: a transparent picture of that layer, drawn over every frame by the baker
-            if (hasOverlays && overlayLayerRef.current && overlayLayoutRef.current.w > 0) {
+            if (hasOverlays && overlays.some(o => o.kind !== 'video') && overlayLayerRef.current && overlayLayoutRef.current.w > 0) {
               setUploadStage('Adding your text and pictures...');
               setSelectedOverlayId(null);
               setIsCapturing(true);
@@ -5820,6 +5820,18 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 const layerPng = await captureRef(overlayLayerRef, { format: 'png', quality: 1, result: 'tmpfile', width: 1080, height: Math.max(2, Math.round(1080 * lh / lw)) });
                 bakeOptions.overlayLayerPngPath = layerPng.replace('file://', '');
               } finally { setIsCapturing(false); }
+            }
+            // Another video placed on top: its file and rectangle go to the baker, which plays it in step with this video
+            const pipItem = overlays.find(o => o.kind === 'video' && !!o.uri);
+            if (pipItem && supportsPipVideo && overlayLayoutRef.current.w > 0) {
+              const lw = overlayLayoutRef.current.w, lh = overlayLayoutRef.current.h;
+              const wFrac = Math.min(0.95, PIP_BASE_WIDTH * pipItem.scale);
+              const hFrac = Math.min(0.95, wFrac * (lw / lh) / (pipItem.aspect || 1));
+              bakeOptions.pipVideoPath = (pipItem.uri as string).replace('file://', '');
+              bakeOptions.pipX = Math.min(Math.max(pipItem.x - wFrac / 2, 0), 1 - wFrac);
+              bakeOptions.pipY = Math.min(Math.max(pipItem.y - hFrac / 2, 0), 1 - hFrac);
+              bakeOptions.pipW = wFrac;
+              bakeOptions.pipH = hFrac;
             }
             const outputPath = `${FileSystem.cacheDirectory}baked_${Date.now()}.mp4`.replace('file://', '');
             const cleanInput = mediaUri.replace('file://', '');
@@ -6950,6 +6962,26 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                   >
                     <Ionicons name="image" size={16} color="#00ff88" /><Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Picture</Text>
                   </TouchableOpacity>
+                  {mediaType === 'video' && supportsPipVideo && !overlays.some(o => o.kind === 'video') && (
+                    <TouchableOpacity
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#161616', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}
+                      onPress={async () => {
+                        try {
+                          const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['videos'], allowsMultipleSelection: false, quality: 1 });
+                          if (r.canceled || !r.assets?.[0]) return;
+                          const a = r.assets[0];
+                          // keep our own copy, so the baker always has a plain file to read
+                          const copy = `${FileSystem.cacheDirectory}pip_${Date.now()}.mp4`;
+                          await FileSystem.copyAsync({ from: a.uri, to: copy });
+                          const id = makeOverlayId();
+                          setOverlays(prev => [...prev, { id, kind: 'video', x: 0.72, y: 0.22, scale: 1, rotation: 0, uri: copy, aspect: a.width && a.height ? a.width / a.height : 9 / 16 }]);
+                          setSelectedOverlayId(id);
+                        } catch { Alert.alert('Could not add the video', 'Please try again.'); }
+                      }}
+                    >
+                      <Ionicons name="videocam" size={16} color="#00ff88" /><Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Video</Text>
+                    </TouchableOpacity>
+                  )}
                   {overlays.length > 0 && (
                     <Text style={{ color: '#777', fontSize: 11, alignSelf: 'center', flex: 1 }}>Drag to move, pinch to resize, tap text to edit</Text>
                   )}

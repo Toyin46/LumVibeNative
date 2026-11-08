@@ -22,7 +22,7 @@ class VideoBakerModule : Module() {
         Name("VideoBaker")
 
         // Lets the app know this build can draw an overlay layer onto videos (older builds do not have this).
-        Constants("supportsOverlayLayer" to true)
+        Constants("supportsOverlayLayer" to true, "supportsPipVideo" to true)
 
         Events("onProgress")
 
@@ -54,7 +54,12 @@ class VideoBakerModule : Module() {
                         effect = options["effect"] as? String,
                         effectIntensity = (options["effectIntensity"] as? Number)?.toFloat() ?: 1f,
                         portalScenePngPath = options["portalScenePngPath"] as? String,
-                        fireVideoPath = options["fireVideoPath"] as? String
+                        fireVideoPath = options["fireVideoPath"] as? String,
+                        pipVideoPath = options["pipVideoPath"] as? String,
+                        pipX = (options["pipX"] as? Number)?.toFloat() ?: 0f,
+                        pipY = (options["pipY"] as? Number)?.toFloat() ?: 0f,
+                        pipW = (options["pipW"] as? Number)?.toFloat() ?: 0.35f,
+                        pipH = (options["pipH"] as? Number)?.toFloat() ?: 0.2f
                     )
                     transcoder.transcode(videoBakerContext, inputPath, outputPath, opts) { progress ->
                         sendEvent("onProgress", mapOf("progress" to progress))
