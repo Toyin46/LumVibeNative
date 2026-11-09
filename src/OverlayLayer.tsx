@@ -14,7 +14,6 @@ import {
   Platform, KeyboardAvoidingView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useVideoPlayer, VideoView } from 'expo-video';
 
 const GREEN = '#00ff88';
 
@@ -38,28 +37,19 @@ export const PIP_BASE_WIDTH = 0.4;
 export const makeOverlayId = () => `ov_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-// The small moving preview of a placed video (muted, looping). It is NOT part of the layer snapshot: the baker draws it.
-function PipPreview({ uri, w, h }: { uri: string; w: number; h: number }) {
-  const player = useVideoPlayer(uri, (p) => { p.loop = true; p.muted = true; p.play(); });
+// The small preview of a placed video: a still picture with a play mark. It deliberately does NOT run a second
+// video player while you move it (that is heavy and crashed some phones). The baker plays the real video when you post.
+function PipPoster({ uri, w, h }: { uri: string; w: number; h: number }) {
+  const [showFrame, setShowFrame] = useState(true);
   return (
-    <View style={{ width: w, height: h, borderWidth: 2, borderColor: '#fff', backgroundColor: '#000' }}>
-      <VideoView player={player} style={{ width: '100%', height: '100%' }} contentFit="cover" nativeControls={false} />
+    <View style={{ width: w, height: h, borderWidth: 2, borderColor: '#fff', backgroundColor: '#161616', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+      {showFrame && <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" onError={() => setShowFrame(false)} />}
+      <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
+        <Ionicons name="play" size={18} color="#fff" />
+      </View>
     </View>
   );
 }
-
-const FONT_FAMILY: Record<OverlayFont, string | undefined> = {
-  bold: undefined,
-  serif: Platform.select({ ios: 'Georgia', android: 'serif', default: 'serif' }),
-  mono: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
-};
-const BG_STYLE: Record<OverlayBg, { backgroundColor: string; textColor?: string }> = {
-  none:   { backgroundColor: 'transparent' },
-  dark:   { backgroundColor: 'rgba(0,0,0,0.65)' },
-  light:  { backgroundColor: 'rgba(255,255,255,0.92)', textColor: '#111' },
-  accent: { backgroundColor: GREEN, textColor: '#000' },
-};
-const COLORS = ['#ffffff', '#000000', '#00ff88', '#ffd400', '#ff4d6d', '#4da3ff', '#c77dff'];
 
 // ─────────────────────────── ONE MOVABLE ITEM ───────────────────────────
 type ItemProps = {
@@ -124,7 +114,7 @@ function OverlayItemView(props: ItemProps) {
   } else if (item.kind === 'video' && item.uri) {
     const w = width * PIP_BASE_WIDTH, h = w / (item.aspect || 1);
     // while the layer picture is taken this stays empty: the baker draws the video itself
-    content = editable ? <PipPreview uri={item.uri} w={w} h={h} /> : <View style={{ width: w, height: h }} />;
+    content = editable ? <PipPoster uri={item.uri} w={w} h={h} /> : <View style={{ width: w, height: h }} />;
   } else if (item.uri) {
     const w = width * 0.38;
     content = <Image source={{ uri: item.uri }} style={{ width: w, height: w / (item.aspect || 1) }} resizeMode="contain" />;
@@ -162,7 +152,14 @@ type LayerProps = {
   onEditText: (id: string) => void;
 };
 
-export default function OverlayLayer({ items, onChange, selectedId, onSelect, width, height, editable, onEditText }: LayerProps) {
+class LayerBoundary extends React.Component<{ children?: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error: any) { console.warn('[OverlayLayer] could not draw the layer:', error); }
+  render() { return this.state.failed ? null : this.props.children; }
+}
+
+function OverlayLayerInner({ items, onChange, selectedId, onSelect, width, height, editable, onEditText }: LayerProps) {
   // Always read the newest list, so a fast gesture never overwrites a newer change.
   const itemsRef = useRef(items); itemsRef.current = items;
   const update = (id: string, patch: Partial<OverlayItem>) => onChange(itemsRef.current.map((i) => (i.id === id ? { ...i, ...patch } : i)));
@@ -181,6 +178,10 @@ export default function OverlayLayer({ items, onChange, selectedId, onSelect, wi
       ))}
     </View>
   );
+}
+
+export default function OverlayLayer(props: LayerProps) {
+  return <LayerBoundary><OverlayLayerInner {...props} /></LayerBoundary>;
 }
 
 // ─────────────────────────── TEXT EDITOR ───────────────────────────
