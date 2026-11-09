@@ -37,6 +37,19 @@ export const PIP_BASE_WIDTH = 0.4;
 export const makeOverlayId = () => `ov_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
+const FONT_FAMILY: Record<OverlayFont, string | undefined> = {
+  bold: undefined,
+  serif: Platform.select({ ios: 'Georgia', android: 'serif', default: 'serif' }),
+  mono: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+};
+const BG_STYLE: Record<OverlayBg, { backgroundColor: string; textColor?: string }> = {
+  none:   { backgroundColor: 'transparent' },
+  dark:   { backgroundColor: 'rgba(0,0,0,0.65)' },
+  light:  { backgroundColor: 'rgba(255,255,255,0.92)', textColor: '#111' },
+  accent: { backgroundColor: GREEN, textColor: '#000' },
+};
+const COLORS = ['#ffffff', '#000000', '#00ff88', '#ffd400', '#ff4d6d', '#4da3ff', '#c77dff'];
+
 // The small preview of a placed video: a still picture with a play mark. It deliberately does NOT run a second
 // video player while you move it (that is heavy and crashed some phones). The baker plays the real video when you post.
 function PipPoster({ uri, w, h }: { uri: string; w: number; h: number }) {
