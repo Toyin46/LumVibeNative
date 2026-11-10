@@ -1932,22 +1932,33 @@ export default function VideosScreen() {
 
   // ✅ NEW: Vibe / Following feed tabs — header height scales with device safe-area
   const [activeFeedTab, setActiveFeedTab] = useState<'vibe' | 'following'>('vibe');
-  const [hasUnreadNotif, setHasUnreadNotif] = useState(false);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const HEADER_HEIGHT = insets.top + 96;
+
+  // Unread notifications: same behaviour as the old Home header — a numbered badge that updates
+  // live (realtime) and refreshes whenever this screen comes back into focus (e.g. after reading them).
+  const loadUnreadNotifications = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const { count, error } = await supabase
+        .from('notifications')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('is_read', false);
+      if (!error) setUnreadNotifCount(count || 0);
+    } catch {}
+  }, [userId]);
 
   useEffect(() => {
     if (!userId) return;
-    (async () => {
-      try {
-        const { count } = await supabase
-          .from('notifications')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', userId)
-          .eq('is_read', false);
-        setHasUnreadNotif((count || 0) > 0);
-      } catch {}
-    })();
-  }, [userId]);
+    loadUnreadNotifications();
+    const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const ch = supabase.channel(`feed-notifications-${mountId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, () => { loadUnreadNotifications(); })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [userId, loadUnreadNotifications]);
+  useFocusEffect(useCallback(() => { loadUnreadNotifications(); }, [loadUnreadNotifications]));
 
   const [posts,               setPosts]               = useState<Post[]>([]);
   const [feedItems,           setFeedItems]           = useState<FeedItem[]>([]);
@@ -2739,12 +2750,14 @@ export default function VideosScreen() {
         <View style={[styles.topHeaderRow, { marginTop: insets.top + 8 }]}>
           <Text style={styles.lumvibeLogo}>LUMVIBE</Text>
           <View style={styles.topHeaderIcons}>
-            <TouchableOpacity onPress={() => navigation.navigate('Explore')} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <TouchableOpacity onPress={() => navigation.navigate('Search')} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Feather name="search" size={22} color="#fff" />
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => navigation.navigate('Notifications')} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ position: 'relative' }}>
+            <TouchableOpacity onPress={() => navigation.navigate('Notification')} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ position: 'relative' }}>
               <Feather name="bell" size={22} color="#fff" />
-              {hasUnreadNotif && <View style={styles.notifDot} />}
+              {unreadNotifCount > 0 && (
+                <View style={styles.notifBadge}><Text style={styles.notifBadgeText}>{unreadNotifCount > 99 ? '99+' : unreadNotifCount}</Text></View>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -3051,6 +3064,8 @@ const styles = StyleSheet.create({
   topHeaderRow:         { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   lumvibeLogo:          { color: '#fff', fontSize: 20, fontWeight: '800', letterSpacing: 0.5 },
   topHeaderIcons:        { flexDirection: 'row', alignItems: 'center', gap: 18 },
+  notifBadge:           { position: 'absolute', top: -7, right: -9, backgroundColor: '#ff0000', borderRadius: 9, minWidth: 18, height: 18, paddingHorizontal: 4, justifyContent: 'center', alignItems: 'center', borderWidth: 1.5, borderColor: '#000' },
+  notifBadgeText:       { color: '#fff', fontSize: 10, fontWeight: 'bold' },
   notifDot:             { position: 'absolute', top: -2, right: -2, width: 9, height: 9, borderRadius: 5, backgroundColor: '#ff4444', borderWidth: 1.5, borderColor: '#000' },
   feedTabsRow:          { flexDirection: 'row', gap: 24, marginTop: 14 },
   feedTabBtn:           { alignItems: 'center', paddingBottom: 8 },
