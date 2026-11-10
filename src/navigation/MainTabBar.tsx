@@ -122,9 +122,6 @@ function TabIcon({
         </View>
       );
 
-    case 'Videos':
-      return <Ionicons name="play-circle" size={size} color={color} />;
-
     case 'Market':
       return <Feather name="shopping-bag" size={size} color={color} />;
 
@@ -151,7 +148,6 @@ function TabLabel({
     Home: 'Home',
     Explore: 'Explore',
     Messages: 'Messages',
-    Videos: 'Videos',
     Market: 'Market',
     Profile: 'Profile',
   };

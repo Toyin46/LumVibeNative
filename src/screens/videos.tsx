@@ -23,7 +23,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Video from 'react-native-video';
-import { createAudioPlayer, type AudioPlayer, type AudioStatus } from 'expo-audio';
+import { createAudioPlayer, AudioModule, type AudioPlayer, type AudioStatus } from 'expo-audio';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -784,6 +784,8 @@ const VideoPost = memo(function VideoPost({
   // installed in this project and Audio.Sound.createAsync doesn't exist
   // here. createAudioPlayer is synchronous (returns the player immediately,
   // no await), unlike expo-av's async createAsync.
+  const playStateRef = useRef({ isPlaying: false, isMuted: false });
+  playStateRef.current = { isPlaying, isMuted };
   useEffect(() => {
     if (!shouldLoad || !item.music_url) return;
     let cancelled = false;
@@ -796,6 +798,9 @@ const VideoPost = memo(function VideoPost({
       player.volume = Math.min(Math.max(item.music_volume ?? 0.85, 0), 1);
       if (startMs > 0) player.seekTo(startMs / 1000);
       musicPlayerRef.current = player;
+      // Start right away if the video is already playing (the sync effect below only
+      // re-runs when isPlaying/isMuted change, so a player created AFTER that never got play()).
+      if (playStateRef.current.isPlaying && !playStateRef.current.isMuted) { try { player.play(); } catch {} }
       // ✅ FIX: looping the whole track back to position 0 would undo the
       // trim on every repeat (the user picked a specific point in the song,
       // not "the beginning"). Looping is handled manually here instead — on
@@ -929,6 +934,8 @@ const VideoPost = memo(function VideoPost({
               setVideoError(true);
             }}
             ignoreSilentSwitch="ignore"
+            disableFocus
+            mixWithOthers="mix"
             playInBackground={false}
             playWhenInactive={false}
             bufferConfig={{ minBufferMs: 3000, maxBufferMs: 10000, bufferForPlaybackMs: 1500, bufferForPlaybackAfterRebufferMs: 3000 }}
@@ -1455,6 +1462,9 @@ const TEXT_GRADIENTS: [string, string][] = [
 function hashStr(str: string): number { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0; return h; }
 function fmtClock(sec: number): string { const s = Math.max(0, Math.floor(sec)); return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`; }
 
+// Only one photo/voice/text-post sound may play at any moment: a new one stops the previous.
+let stopCurrentPostAudio: (() => void) | null = null;
+
 const MediaPost = memo(function MediaPost({
   item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onDelete, onReport, user, onView, followStatusMap, topOffset,
 }: {
@@ -1495,6 +1505,9 @@ const MediaPost = memo(function MediaPost({
     let player: AudioPlayer | null = null;
     let sub: { remove: () => void } | null = null;
     try {
+      stopCurrentPostAudio?.();                       // stop whatever other post is still playing
+      const myStop = () => { try { sub?.remove(); } catch {} try { player?.pause(); player?.remove(); } catch {} };
+      stopCurrentPostAudio = myStop;
       player = createAudioPlayer({ uri: audioUrl });
       if (kind !== 'voice') player.volume = Math.min(Math.max(item.music_volume ?? 0.85, 0), 1);
       playerRef.current = player;
@@ -1503,7 +1516,7 @@ const MediaPost = memo(function MediaPost({
         const st: any = status;
         setPosSec(st.currentTime || 0);
         if (st.duration) setDurSec(st.duration);
-        setPlaying(!!st.playing);
+        if (st.isLoaded !== false) setPlaying(!!st.playing);   // ignore the not-yet-loaded 'playing: false' blips
         if (st.didJustFinish) {
           try { player.seekTo(0); if (kind !== 'voice') player.play(); else setPlaying(false); } catch {}
         }
@@ -1513,14 +1526,16 @@ const MediaPost = memo(function MediaPost({
     return () => {
       cancelled = true;
       try { sub?.remove(); } catch {}
-      try { player?.remove(); } catch {}
-      playerRef.current = null; setPlaying(false); setPosSec(0);
+      try { player?.pause(); player?.remove(); } catch {}
+      if (playerRef.current === player) playerRef.current = null;
+      stopCurrentPostAudio = null;
+      setPlaying(false); setPosSec(0);
     };
   }, [isActive, audioUrl]);
 
   const togglePlay = () => {
     const p = playerRef.current; if (!p) return;
-    try { if (playing) { p.pause(); setPlaying(false); } else { p.play(); setPlaying(true); } } catch {}
+    try { if ((p as any).playing) { p.pause(); setPlaying(false); } else { p.play(); setPlaying(true); } } catch {}   // use the player's REAL state, never start a second copy
   };
 
   const handleFollowPress = async () => {
@@ -1750,7 +1765,18 @@ export default function VideosScreen() {
     setRefreshing(false);
   }, []);
 
-  useFocusEffect(useCallback(() => { return () => { setActivePostId(null); }; }, []));
+  // Let the video's own sound and the added music/voice play together (Android audio focus /
+  // iOS session), and make sure a leftover "recording" audio mode from Create can't muffle playback.
+  useEffect(() => {
+    AudioModule.setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false, shouldPlayInBackground: false, interruptionMode: 'mixWithOthers' } as any).catch(() => {});
+  }, []);
+  // Remember the post that was playing so coming back to this tab resumes it (the feed is now the Home tab).
+  const lastActivePostRef = useRef<string | null>(null);
+  useEffect(() => { if (activePostId) lastActivePostRef.current = activePostId; }, [activePostId]);
+  useFocusEffect(useCallback(() => {
+    if (lastActivePostRef.current) setActivePostId(lastActivePostRef.current);
+    return () => { setActivePostId(null); };
+  }, []));
 
   const loadWeeklyWinners = async () => {
     try {

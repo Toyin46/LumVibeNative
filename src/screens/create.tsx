@@ -42,7 +42,7 @@ import { useAuthStore } from '../store/authStore';
 // ✅ NEW: fixes "new post from someone you follow" not existing anywhere
 // in this file — confirmed by reading it in full before this change.
 import { notifyNewPost } from '../lib/notifications';
-import { useNavigation, useRoute } from '@react-navigation/native';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { captureRef } from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getMarketplacePostBridge, clearMarketplacePostBridge } from '../utils/marketplacePostBridge';
@@ -2941,6 +2941,7 @@ function VoiceNote({ visible, onClose, onDone }: AudioStudioProps) {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (recActiveRef.current) { try { await recorder.stop(); } catch {} }
     recActiveRef.current = false;
+    AudioModule.setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => {});
     setRecActive(false); setRecDur(0); durRef.current = 0; setVoiceUri(null);
   };
 
@@ -2970,6 +2971,7 @@ function VoiceNote({ visible, onClose, onDone }: AudioStudioProps) {
       const uri = recorder.uri;
       recActiveRef.current = false; setRecActive(false);
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      AudioModule.setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => {});
       if (uri) { setVoiceUri(uri); Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); }
     } catch (e: any) { Alert.alert('Error', getFriendlyError(e)); }
   };
@@ -4824,6 +4826,18 @@ export default function CreateScreen() {
     };
   }, []);
 
+  // Stop every preview sound (music + voice). The Create tab stays mounted when you switch tabs or
+  // finish a post, so the unmount cleanup above never ran — that's why a song kept playing in the feed.
+  const stopPreviewAudio = useCallback(() => {
+    previewMusicSoundRef.current?.unloadAsync().catch(() => {});
+    previewMusicSoundRef.current = null;
+    voicePreviewSoundRef.current?.unloadAsync().catch(() => {});
+    voicePreviewSoundRef.current = null;
+    setPreviewMusicPlaying(false);
+    setVoicePreviewPlaying(false);
+  }, []);
+  useFocusEffect(useCallback(() => () => { stopPreviewAudio(); }, [stopPreviewAudio]));
+
   // ─── Drafts state ─────────────────────────────────────
   const [drafts, setDrafts]             = useState<Draft[]>([]);
 
@@ -5331,6 +5345,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
   };
 
   const executePost = async () => {
+    stopPreviewAudio();   // never keep previewing music/voice while (or after) posting
     if (!user) return;
     // Declare vibe here so it's accessible throughout executePost
     const vibe = selectedVibe ? VIBE_TYPES.find(v => v.id === selectedVibe) : null;

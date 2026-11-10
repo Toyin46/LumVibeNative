@@ -5,7 +5,6 @@ import {
   ExploreScreen,
   HomeScreen,
   ProfileScreen,
-  VideosScreen,
 } from '../screens';
 import { MarketplaceStack } from './MarketplaceStack';
 // FIX: the Messages tab must render the nested ChatStack, not
@@ -33,7 +32,6 @@ export function MainTabs() {
       <Tab.Screen name="Explore"  component={ExploreScreen} />
       <Tab.Screen name="Create"   component={CreateScreen} />
       <Tab.Screen name="Messages" component={ChatStack} />
-      <Tab.Screen name="Videos"   component={VideosScreen} />
       <Tab.Screen name="Market"   component={MarketplaceStack} />
       <Tab.Screen name="Profile"  component={ProfileScreen} />
     </Tab.Navigator>
