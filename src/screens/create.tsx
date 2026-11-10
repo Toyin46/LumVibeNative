@@ -309,6 +309,7 @@ async function fetchTrendingSounds(): Promise<{ id: string; name: string; artist
 
 
 const { width: SW, height: SH } = Dimensions.get('window');
+const MODE_ITEM_W = 76; // width of one circle in the swipe selector
 
 // ─── TYPES ────────────────────────────────────────────────
 type MediaType  = 'image' | 'video' | 'text' | 'voice' | null;
@@ -2914,6 +2915,138 @@ const drs = StyleSheet.create({
 });
 
 // ══════════════════════════════════════════════════════════
+// VOICE NOTE — voice-only post (record → preview → post to feed)
+// Replaces the old Audio Studio on the camera screen. Returns the same
+// result shape as AudioStudio.onDone so the compose/upload flow is unchanged.
+// ══════════════════════════════════════════════════════════
+function VoiceNote({ visible, onClose, onDone }: AudioStudioProps) {
+  const [recActive, setRecActive] = useState(false);
+  const [recDur, setRecDur]       = useState(0);
+  const [voiceUri, setVoiceUri]   = useState<string | null>(null);
+  const [playing, setPlaying]     = useState(false);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sndRef   = useRef<CompatSound | null>(null);
+  const recActiveRef = useRef(false);
+  const durRef   = useRef(0);
+
+  const stopPlayback = async () => {
+    try { await sndRef.current?.stopAsync(); } catch {}
+    try { await sndRef.current?.unloadAsync(); } catch {}
+    sndRef.current = null; setPlaying(false);
+  };
+
+  const reset = async () => {
+    await stopPlayback();
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (recActiveRef.current) { try { await recorder.stop(); } catch {} }
+    recActiveRef.current = false;
+    setRecActive(false); setRecDur(0); durRef.current = 0; setVoiceUri(null);
+  };
+
+  useEffect(() => { if (!visible) { reset(); } }, [visible]);
+  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+
+  const startRec = async () => {
+    try {
+      await stopPlayback();
+      const { granted } = await AudioModule.requestRecordingPermissionsAsync();
+      if (!granted) { Alert.alert('Permission needed', 'Microphone access is required to record.'); return; }
+      await AudioModule.setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, shouldPlayInBackground: false });
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      recActiveRef.current = true;
+      setVoiceUri(null); setRecActive(true); setRecDur(0); durRef.current = 0;
+      timerRef.current = setInterval(() => { durRef.current += 1; setRecDur(durRef.current); }, 1000);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    } catch (e: any) { Alert.alert('Error', 'Could not start recording: ' + getFriendlyError(e)); }
+  };
+
+  const stopRec = async () => {
+    if (!recActiveRef.current) return;
+    if (durRef.current < 1) { Alert.alert('Too Short', 'Recording must be at least 1 second.'); return; }
+    try {
+      await recorder.stop();
+      const uri = recorder.uri;
+      recActiveRef.current = false; setRecActive(false);
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      if (uri) { setVoiceUri(uri); Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); }
+    } catch (e: any) { Alert.alert('Error', getFriendlyError(e)); }
+  };
+
+  const togglePlay = async () => {
+    if (!voiceUri) return;
+    if (playing) { await stopPlayback(); return; }
+    try {
+      await AudioModule.setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      const { sound } = await createCompatSound({ uri: voiceUri }, { shouldPlay: true, volume: 1.0 });
+      sndRef.current = sound; setPlaying(true);
+      sound.setOnPlaybackStatusUpdate(st => { if ((st as any).didJustFinish) setPlaying(false); });
+    } catch { Alert.alert('Error', 'Could not play the recording.'); }
+  };
+
+  const post = async () => {
+    if (!voiceUri) return;
+    await stopPlayback();
+    onDone({
+      voiceUri, beatUri: null, beatName: null, beatArtist: null,
+      voiceVolume: 1, beatVolume: 1,
+      effectName: null, effectId: 'none', effectReverb: 0, effectEcho: 0, effectChorus: false,
+      duration: durRef.current || recDur, autoTuneEnabled: false,
+    });
+  };
+
+  const fmtT = (n: number) => `${Math.floor(n / 60).toString().padStart(2, '0')}:${(n % 60).toString().padStart(2, '0')}`;
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16 }}>
+          <TouchableOpacity onPress={onClose} style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: '#1a1a1a', alignItems: 'center', justifyContent: 'center' }}>
+            <Feather name="x" size={22} color="#fff" />
+          </TouchableOpacity>
+          <Text style={{ color: '#fff', fontSize: 16, fontWeight: '800' }}>🎙️ Voice Note</Text>
+          <TouchableOpacity
+            style={{ backgroundColor: voiceUri ? '#00ff88' : '#1a1a1a', borderRadius: 18, paddingHorizontal: 18, paddingVertical: 9 }}
+            onPress={post} disabled={!voiceUri}>
+            <Text style={{ color: voiceUri ? '#000' : '#555', fontWeight: '800' }}>Next</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
+          <StudioWave active={recActive || playing} />
+          <Text style={{ color: '#fff', fontSize: 44, fontWeight: '800', marginTop: 24, fontVariant: ['tabular-nums'] }}>{fmtT(recDur)}</Text>
+          <Text style={{ color: '#888', fontSize: 13, marginTop: 6, textAlign: 'center' }}>
+            {recActive ? 'Recording… tap to stop' : voiceUri ? 'Voice note ready' : 'Tap the button and start talking'}
+          </Text>
+
+          <TouchableOpacity
+            onPress={recActive ? stopRec : startRec}
+            style={{ marginTop: 36, width: 84, height: 84, borderRadius: 42, borderWidth: 4, borderColor: recActive ? '#ff4444' : '#fff', alignItems: 'center', justifyContent: 'center' }}>
+            {recActive
+              ? <View style={{ width: 30, height: 30, borderRadius: 6, backgroundColor: '#ff4444' }} />
+              : <Ionicons name="mic" size={36} color="#fff" />}
+          </TouchableOpacity>
+
+          {voiceUri && !recActive && (
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 28 }}>
+              <TouchableOpacity onPress={togglePlay} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#00ff8822', borderColor: '#00ff88', borderWidth: 1, borderRadius: 22, paddingHorizontal: 18, paddingVertical: 11 }}>
+                <Feather name={playing ? 'pause' : 'play'} size={16} color="#00ff88" />
+                <Text style={{ color: '#00ff88', fontWeight: '700' }}>{playing ? 'Stop' : 'Play'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={reset} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1a1a1a', borderRadius: 22, paddingHorizontal: 18, paddingVertical: 11 }}>
+                <Feather name="trash-2" size={16} color="#ff6666" />
+                <Text style={{ color: '#ff6666', fontWeight: '700' }}>Re-record</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ══════════════════════════════════════════════════════════
 // AUDIO STUDIO COMPONENT
 // ══════════════════════════════════════════════════════════
 type StudioTab = 'record' | 'beats' | 'effects' | 'mix' | 'edit';
@@ -4516,6 +4649,10 @@ export default function CreateScreen() {
   // ─── Audio Studio state ───────────────────────────────
   const [showAudioStudio, setShowAudioStudio] = useState(false);
   const [showCrowdCam, setShowCrowdCam]       = useState(false); // Crowd Cam modal
+  const [showVoiceNote, setShowVoiceNote]     = useState(false); // voice-only post
+  // Snapchat-style swipe selector: 0 text · 1 photos · 2 camera · 3 voice · 4 crowdcam
+  const [camSel, setCamSel]                   = useState(2);
+  const modeScrollRef                         = useRef<ScrollView | null>(null);
   const [studioVoiceUri, setStudioVoiceUri] = useState<string | null>(null);
   const [studioEffectId, setStudioEffectId] = useState<string | null>(null);
   const [autoTuneEnabled, setAutoTuneEnabled] = useState(false);
@@ -6286,9 +6423,6 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
                 </View>
               )}
             </View>
-            <TouchableOpacity style={ms.camIconBtn} onPress={() => setShowCrowdCam(true)}>
-              <Ionicons name="people-outline" size={22} color="#fff" />
-            </TouchableOpacity>
             <TouchableOpacity style={ms.camIconBtn} onPress={() => setScreenView('drafts')}>
               <Ionicons name="document-text-outline" size={22} color="#fff" />
               {drafts.length > 0 && <View style={ms.draftBadge}><Text style={ms.draftBadgeTxt}>{drafts.length}</Text></View>}
@@ -6353,7 +6487,7 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
           )}
 
           {/* Mode toggle */}
-          <View style={ms.modeRow}>
+          <View style={[ms.modeRow, camSel !== 2 && { opacity: 0 }]} pointerEvents={camSel === 2 ? 'auto' : 'none'}>
             <TouchableOpacity style={[ms.modeBtn, cameraMode === 'picture' && ms.modeBtnActive]} onPress={() => setCameraMode('picture')}>
               <Text style={[ms.modeTxt, cameraMode === 'picture' && { color: '#00ff88' }]}>Photo</Text>
             </TouchableOpacity>
@@ -6362,47 +6496,103 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
             </TouchableOpacity>
           </View>
 
-          {/* Capture row */}
-          <View style={ms.captureRow}>
-            {/* Gallery */}
-            <TouchableOpacity style={ms.galleryBtn} onPress={handlePickMedia}>
-              <Ionicons name="images-outline" size={26} color="#fff" />
-            </TouchableOpacity>
-
-            {/* Shutter */}
-            {cameraMode === 'picture' ? (
-              <TouchableOpacity style={ms.shutterBtn} onPress={handleTakePhoto} disabled={isCapturingPhoto}>
-                <View style={[ms.shutterInner, isCapturingPhoto && { opacity: 0.4 }]} />
-                {/* FIX: Snapchat-style selected-effect badge - shows which
-                    filter/effect is active right on the capture button, using
-                    the same real cover images (FX_IMAGES) already proven in
-                    the filmstrip below, so no new assets are needed. */}
-                {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
-                  <View style={ms.shutterFxBadge}>
-                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
-                  </View>
-                )}
+          {/* Capture row — Snapchat-style: swipe the circles left/right.
+              Centre circle = active mode (camera shutter / voice / text / photos / crowdcam). */}
+          <View style={{ height: 96, justifyContent: 'center' }}>
+            <View style={{ position: 'absolute', left: 16, top: 24, zIndex: 5 }}>
+              <TouchableOpacity style={ms.galleryBtn} onPress={handlePickMedia}>
+                <Ionicons name="images-outline" size={26} color="#fff" />
               </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                style={[ms.shutterBtn, isRecording && ms.shutterRecording]}
-                onPress={isRecording ? handleStopRecording : handleStartRecording}
+            </View>
+            <View style={{ alignSelf: 'center', width: SW - 128, height: 96 }}>
+              <ScrollView
+                ref={modeScrollRef}
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                snapToInterval={MODE_ITEM_W}
+                decelerationRate="fast"
+                scrollEventThrottle={16}
+                contentContainerStyle={{ paddingHorizontal: (SW - 128 - MODE_ITEM_W) / 2, alignItems: 'center' }}
+                onLayout={() => modeScrollRef.current?.scrollTo({ x: camSel * MODE_ITEM_W, y: 0, animated: false })}
+                onScroll={(e) => {
+                  const i = Math.max(0, Math.min(4, Math.round(e.nativeEvent.contentOffset.x / MODE_ITEM_W)));
+                  if (i !== camSel) { setCamSel(i); Haptics.selectionAsync(); }
+                }}
               >
-                <View style={[ms.shutterInner, isRecording && ms.shutterInnerRec]} />
-                {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
-                  <View style={ms.shutterFxBadge}>
-                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
-                  </View>
-                )}
-              </TouchableOpacity>
-            )}
+                {([
+                  { key: 'text',   icon: 'text-outline',            label: 'TEXT'     },
+                  { key: 'photos', icon: 'images-outline',          label: 'PHOTOS'   },
+                  { key: 'camera', icon: null,                      label: ''         },
+                  { key: 'voice',  icon: 'mic-outline',             label: 'VOICE'    },
+                  { key: 'crowd',  icon: 'people-outline',          label: 'CROWDCAM' },
+                ] as const).map((m, idx) => {
+                  const active = camSel === idx;
+                  return (
+                    <View key={m.key} style={{ width: MODE_ITEM_W, alignItems: 'center', justifyContent: 'center' }}>
+                      <View style={{ transform: [{ scale: active ? 1 : 0.62 }], opacity: active ? 1 : 0.75 }}>
+                        {m.key === 'camera' ? (
+                          <View>
+                            {cameraMode === 'picture' ? (
+                              <TouchableOpacity style={ms.shutterBtn} onPress={handleTakePhoto} disabled={isCapturingPhoto}>
+                                <View style={[ms.shutterInner, isCapturingPhoto && { opacity: 0.4 }]} />
+                                {/* FIX: Snapchat-style selected-effect badge - shows which
+                                    filter/effect is active right on the capture button, using
+                                    the same real cover images (FX_IMAGES) already proven in
+                                    the filmstrip below, so no new assets are needed. */}
+                                {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
+                                  <View style={ms.shutterFxBadge}>
+                                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                                  </View>
+                                )}
+                              </TouchableOpacity>
+                            ) : (
+                              <TouchableOpacity
+                                style={[ms.shutterBtn, isRecording && ms.shutterRecording]}
+                                onPress={isRecording ? handleStopRecording : handleStartRecording}
+                              >
+                                <View style={[ms.shutterInner, isRecording && ms.shutterInnerRec]} />
+                                {selectedFx !== 'fx_none' && FX_IMAGES[selectedFx] && (
+                                  <View style={ms.shutterFxBadge}>
+                                    <Image source={FX_IMAGES[selectedFx]} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                                  </View>
+                                )}
+                              </TouchableOpacity>
+                            )}
 
-            {/* Audio Studio */}
-            <TouchableOpacity style={ms.studioBtn} onPress={() => setShowAudioStudio(true)}>
-              <Ionicons name="musical-notes-outline" size={24} color={studioVoiceUri ? '#00ff88' : '#fff'} />
-              {studioVoiceUri && <View style={ms.studioDot} />}
-            </TouchableOpacity>
+                          </View>
+                        ) : (
+                          <TouchableOpacity
+                            activeOpacity={0.8}
+                            style={[ms.shutterBtn, { backgroundColor: '#1a1a1a' }]}
+                            onPress={() => {
+                              if (!active) return;
+                              if (m.key === 'text') setQuickPostMode('text');
+                              else if (m.key === 'photos') setQuickPostMode('photos');
+                              else if (m.key === 'voice') setShowVoiceNote(true);
+                              else if (m.key === 'crowd') setShowCrowdCam(true);
+                            }}
+                          >
+                            <Ionicons name={m.icon as any} size={32} color="#fff" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                      {/* tapping a side circle slides it to the centre */}
+                      {!active && (
+                        <TouchableOpacity
+                          style={StyleSheet.absoluteFill}
+                          activeOpacity={1}
+                          onPress={() => modeScrollRef.current?.scrollTo({ x: idx * MODE_ITEM_W, y: 0, animated: true })}
+                        />
+                      )}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            </View>
           </View>
+          <Text style={{ color: '#00ff88', fontSize: 11, fontWeight: '800', letterSpacing: 0.8, textAlign: 'center', height: 14, marginTop: 2 }}>
+            {camSel === 2 ? '' : ['TEXT', 'PHOTOS', '', 'VOICE POST', 'CROWDCAM'][camSel]}
+          </Text>
 
           {/* FX thumbnail strip — Snapchat-style: real cover image per effect
               (FX_IMAGES), live GL preview kicks in via hasLiveGLEffect/
@@ -6468,20 +6658,15 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
               branching logic — saves to `stories` instead of `posts`. 'live'
               is still a UI-only placeholder (falls through to a normal post),
               since actual live streaming is a separate, bigger feature. */}
+          {postMode !== 'post' && (
           <View style={ms.postModeRow}>
             {(['post', 'story', 'live'] as const).filter(m => m === 'post' || postMode === m).map(m => (
               <TouchableOpacity key={m} onPress={() => setPostMode(m)}>
                 <Text style={[ms.postModeTxt, postMode === m && ms.postModeTxtActive]}>{m.toUpperCase()}</Text>
               </TouchableOpacity>
             ))}
-            {/* Quick text posts (5 templates) and multi-photo posts: they open a small editor, then continue on the compose screen */}
-            <TouchableOpacity onPress={() => setQuickPostMode('text')}>
-              <Text style={ms.postModeTxt}>TEXT</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setQuickPostMode('photos')}>
-              <Text style={ms.postModeTxt}>PHOTOS</Text>
-            </TouchableOpacity>
           </View>
+          )}
 
           {/* NEW: private/public story picker. Only shown in story mode
               AND when there's an actual context (arrived via chat/group/
@@ -6545,11 +6730,11 @@ ${vibe.emoji} ${vibe.label} Vibe` : ''}`,
         </Modal>
 
         {/* Audio Studio modal */}
-        <AudioStudio
-          visible={showAudioStudio}
-          onClose={() => setShowAudioStudio(false)}
+        <VoiceNote
+          visible={showVoiceNote}
+          onClose={() => setShowVoiceNote(false)}
           onDone={result => {
-            setShowAudioStudio(false);
+            setShowVoiceNote(false);
             if (result.voiceUri) {
               setStudioVoiceUri(result.voiceUri);
               setStatusVoiceUri(result.voiceUri);
