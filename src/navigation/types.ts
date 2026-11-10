@@ -39,7 +39,6 @@ export type MainTabParamList = {
   // navigate straight into a nested ChatStack screen with typed params:
   // navigation.navigate('Messages', { screen: 'Cowatch', params: {...} })
   Messages: NavigatorScreenParams<ChatStackParamList> | undefined;
-  Videos:   undefined;
   Market:   undefined;
   Profile:  undefined;
 };

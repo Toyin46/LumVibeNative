@@ -1466,15 +1466,20 @@ function fmtClock(sec: number): string { const s = Math.max(0, Math.floor(sec));
 let stopCurrentPostAudio: (() => void) | null = null;
 
 const MediaPost = memo(function MediaPost({
-  item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onDelete, onReport, user, onView, followStatusMap, topOffset,
+  item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onDelete, onReport, user, onView, followStatusMap, vibeRoomMap, topOffset,
 }: {
   item: Post; activePostId: string | null; onLike: (post: Post) => void; onComment: (post: Post) => void;
   onGift: (post: Post) => void; onFollow: (userId: string, isFollowing: boolean) => Promise<void>;
   onUserPress: (userId: string) => void; onShare: (post: Post) => void;
   onDelete: (post: Post) => void; onReport: (post: Post) => void;
-  user: any; onView: (postId: string) => void; followStatusMap: Map<string, boolean>; topOffset: number;
+  user: any; onView: (postId: string) => void; followStatusMap: Map<string, boolean>; vibeRoomMap: Map<string, VibeRoomPreview>; topOffset: number;
 }) {
   const { t } = useTranslation();
+  const navigation = useNavigation<any>();
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [boostVisible, setBoostVisible] = useState(false);
+  const [cowatchModalVisible, setCowatchModalVisible] = useState(false);
+  const vibeRoom = vibeRoomMap.get(item.id) || null;
   const isActive    = activePostId === item.id;
   const userId      = user?.id || (user as any)?.id;
   const isLiked     = userId ? item.liked_by?.includes(userId) : false;
@@ -1544,18 +1549,39 @@ const MediaPost = memo(function MediaPost({
     try { await onFollow(item.user_id, isFollowing); } finally { setCheckingFollow(false); }
   };
 
-  const openMenu = () => {
-    const buttons: any[] = [{ text: 'Share', onPress: () => onShare(item) }];
-    if (!isOwnPost) buttons.push({ text: 'Report', style: 'destructive', onPress: () => onReport(item) });
-    if (isOwnPost) buttons.push({
-      text: 'Delete post', style: 'destructive',
-      onPress: () => Alert.alert('Delete Post', 'Permanently delete this post? This cannot be undone.', [
-        { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => onDelete(item) },
-      ]),
-    });
-    buttons.push({ text: 'Cancel', style: 'cancel' });
-    Alert.alert('Post options', undefined, buttons);
+  // Same Watch Together handlers as the video page
+  const handleAiMatchMe = useCallback(() => {
+    setCowatchModalVisible(false);
+    navigation.navigate('Messages', { screen: 'Cowatch', params: { conversationId: '', otherName: '', otherPhoto: '', isAiMatch: 'true' } });
+  }, [navigation]);
+  const handleWatchWithFriends = useCallback(() => {
+    setCowatchModalVisible(false);
+    navigation.navigate('Messages', { screen: 'MessagesHome' });
+  }, [navigation]);
+
+  // Save a photo post to the gallery (videos have their own watermark-aware saver)
+  const saveImage = () => {
+    if (!item.media_url) return;
+    Alert.alert('Save Photo', 'Save this photo to your gallery?', [
+      { text: t.common.cancel, style: 'cancel' },
+      { text: t.common.save, onPress: async () => {
+        try {
+          const { status } = await MediaLibrary.requestPermissionsAsync();
+          if (status !== 'granted') { Alert.alert(t.videos.permissionDenied, t.videos.permissionMsg); return; }
+          const cacheDir = (FileSystem as any).cacheDirectory ?? (FileSystem as any).documentDirectory ?? '';
+          const dest = `${cacheDir}lumvibe_${item.id}_${Date.now()}.jpg`;
+          const r = await FileSystem.downloadAsync(item.media_url!, dest);
+          if (r.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
+          const asset = await MediaLibrary.createAssetAsync(dest);
+          await MediaLibrary.createAlbumAsync('LumVibe', asset, false);
+          await FileSystem.deleteAsync(dest, { idempotent: true });
+          Alert.alert('✅ Saved!', 'Photo saved to your LumVibe gallery.');
+        } catch (e: any) { Alert.alert('Error', 'Failed to save photo: ' + (e.message || 'Unknown error')); }
+      } },
+    ]);
   };
+  // Voice / text posts have no file to save, so the download button opens Share instead
+  const handleDownloadPress = () => { if (kind === 'image') saveImage(); else onShare(item); };
 
   const grad = TEXT_GRADIENTS[hashStr(item.id) % TEXT_GRADIENTS.length];
   const bars = useMemo(() => Array.from({ length: 36 }, (_, i) => 14 + ((hashStr(item.id + i) % 100) / 100) * 56), [item.id]);
@@ -1563,6 +1589,13 @@ const MediaPost = memo(function MediaPost({
 
   return (
     <View style={styles.videoContainer}>
+      {item.vibe_type && VIBE_TYPES[item.vibe_type] && (
+        <View pointerEvents="none" style={[styles.vibeBadge, { top: topOffset + 40, backgroundColor: VIBE_TYPES[item.vibe_type].color + '22', borderColor: VIBE_TYPES[item.vibe_type].color }]}>
+          <Text style={styles.vibeBadgeEmoji}>{VIBE_TYPES[item.vibe_type].emoji}</Text>
+          <Text style={[styles.vibeBadgeText, { color: VIBE_TYPES[item.vibe_type].color }]}>{VIBE_TYPES[item.vibe_type].label.toUpperCase()}</Text>
+        </View>
+      )}
+
       {/* ── page background, by post type ── */}
       {kind === 'image' && (
         <>
@@ -1605,11 +1638,180 @@ const MediaPost = memo(function MediaPost({
         <LinearGradient colors={['transparent', 'rgba(0,0,0,0.75)']} style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 320 }} pointerEvents="none" />
       )}
 
-      {/* ── more menu ── */}
-      <TouchableOpacity onPress={openMenu} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        style={{ position: 'absolute', top: topOffset + 4, right: 16, zIndex: 8, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' }}>
-        <Feather name="more-horizontal" size={20} color="#fff" />
+      <EntryChip postId={String(item.id)} top={topOffset + 6} left={72} />
+
+      <TouchableOpacity style={[styles.menuDotBtn, { top: topOffset }]} onPress={() => setMenuVisible(true)} activeOpacity={0.8} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <Feather name="more-vertical" size={22} color="#fff" />
       </TouchableOpacity>
+      <TouchableOpacity style={[styles.downloadBtn, { top: topOffset }]} onPress={handleDownloadPress} activeOpacity={0.8} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <Feather name="download" size={20} color="#fff" />
+      </TouchableOpacity>
+
+      <BoostSheet visible={boostVisible} postId={item.id} onClose={() => setBoostVisible(false)} />
+
+      {/* ✅ NEW: Three-dot menu modal */}
+      <Modal
+        visible={menuVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setMenuVisible(false)}
+      >
+        <TouchableOpacity
+          style={menuStyles.backdrop}
+          activeOpacity={1}
+          onPress={() => setMenuVisible(false)}
+        >
+          <View style={menuStyles.sheet}>
+            <View style={menuStyles.handle} />
+
+            {kind === 'image' && (
+            <TouchableOpacity
+              style={menuStyles.row}
+              activeOpacity={0.7}
+              onPress={() => {
+                setMenuVisible(false);
+                setTimeout(() => saveImage(), 200);
+              }}
+            >
+              <View style={menuStyles.iconWrap}>
+                <Feather name="download" size={20} color="#00ff88" />
+              </View>
+              <View style={menuStyles.rowText}>
+                <Text style={menuStyles.rowTitle}>Save Photo</Text>
+                <Text style={menuStyles.rowSub}>Download to your gallery</Text>
+              </View>
+            </TouchableOpacity>
+            )}
+
+            {/* Share */}
+            <TouchableOpacity
+              style={menuStyles.row}
+              activeOpacity={0.7}
+              onPress={() => {
+                setMenuVisible(false);
+                setTimeout(() => onShare(item), 200);
+              }}
+            >
+              <View style={menuStyles.iconWrap}>
+                <Feather name="share-2" size={20} color="#fff" />
+              </View>
+              <View style={menuStyles.rowText}>
+                <Text style={menuStyles.rowTitle}>Share</Text>
+                <Text style={menuStyles.rowSub}>Share this post with friends</Text>
+              </View>
+            </TouchableOpacity>
+
+            {/* Report — only shown for other people's posts */}
+            {!isOwnPost && (
+              <TouchableOpacity
+                style={menuStyles.row}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setMenuVisible(false);
+                  setTimeout(() => onReport(item), 200);
+                }}
+              >
+                <View style={menuStyles.iconWrap}>
+                  <Feather name="flag" size={20} color="#ff4444" />
+                </View>
+                <View style={menuStyles.rowText}>
+                  <Text style={[menuStyles.rowTitle, { color: '#ff4444' }]}>Report</Text>
+                  <Text style={menuStyles.rowSub}>Let us know what's wrong</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {/* Delete — only shown for own posts */}
+            {isOwnPost && (
+              <TouchableOpacity style={menuStyles.row} activeOpacity={0.7} onPress={() => { setMenuVisible(false); setTimeout(() => setBoostVisible(true), 200); }}>
+                <View style={menuStyles.iconWrap}><Feather name="zap" size={20} color="#00ff88" /></View>
+                <View style={menuStyles.rowText}>
+                  <Text style={menuStyles.rowTitle}>Boost post</Text>
+                  <Text style={menuStyles.rowSub}>Show it to more people for 24 hours</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {isOwnPost && (
+              <TouchableOpacity
+                style={menuStyles.row}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setMenuVisible(false);
+                  setTimeout(() => {
+                    Alert.alert('Delete Post', 'Permanently delete this post? This cannot be undone.', [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Delete', style: 'destructive', onPress: () => onDelete(item) },
+                    ]);
+                  }, 200);
+                }}
+              >
+                <View style={menuStyles.iconWrap}>
+                  <Feather name="trash-2" size={20} color="#ff4444" />
+                </View>
+                <View style={menuStyles.rowText}>
+                  <Text style={[menuStyles.rowTitle, { color: '#ff4444' }]}>Delete Post</Text>
+                  <Text style={menuStyles.rowSub}>Permanently remove this post</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity style={menuStyles.cancelBtn} onPress={() => setMenuVisible(false)} activeOpacity={0.7}>
+              <Text style={menuStyles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ✅ NEW: Watch Together bottom sheet — replaces the old Alert.alert.
+          FIX: this must live in VideoPost's own return (same scope as the
+          Co-Watch button and its state/handlers above) — it was previously
+          pasted after the shared report modal in VideosScreen, a different
+          component, which is why cowatchModalVisible/handleAiMatchMe etc.
+          weren't in scope there. */}
+      <Modal visible={cowatchModalVisible} transparent animationType="slide" onRequestClose={() => setCowatchModalVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={cowatchStyles.sheet}>
+            <View style={cowatchStyles.handle} />
+
+            <View style={cowatchStyles.header}>
+              <View style={cowatchStyles.headerIcon}>
+                <Feather name="users" size={22} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={cowatchStyles.title}>Watch Together</Text>
+                <Text style={cowatchStyles.subtitle}>Choose how you'd like to co-watch this post</Text>
+              </View>
+            </View>
+
+            <TouchableOpacity style={[cowatchStyles.option, cowatchStyles.optionFriends]} onPress={handleWatchWithFriends} activeOpacity={0.8}>
+              <View style={[cowatchStyles.optionIcon, cowatchStyles.optionIconFriends]}>
+                <Feather name="users" size={20} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={cowatchStyles.optionTitle}>Watch with Friends</Text>
+                <Text style={cowatchStyles.optionSubtitle}>Invite your friends to join and watch together in real-time.</Text>
+              </View>
+              <Feather name="chevron-right" size={20} color="#00ff88" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[cowatchStyles.option, cowatchStyles.optionAi]} onPress={handleAiMatchMe} activeOpacity={0.8}>
+              <View style={[cowatchStyles.optionIcon, cowatchStyles.optionIconAi]}>
+                <Feather name="cpu" size={20} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={cowatchStyles.optionTitle}>AI Match Me</Text>
+                <Text style={cowatchStyles.optionSubtitle}>Let AI find someone with similar vibes to watch with.</Text>
+              </View>
+              <Feather name="chevron-right" size={20} color="#a78bfa" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={cowatchStyles.cancelBtn} onPress={() => setCowatchModalVisible(false)} activeOpacity={0.7}>
+              <Text style={cowatchStyles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {item.music_name && kind !== 'voice' && (
         <View style={styles.musicContainer}>
@@ -1634,8 +1836,33 @@ const MediaPost = memo(function MediaPost({
             </TouchableOpacity>
           )}
         </View>
-        {kind !== 'text' && !!item.caption && <Text style={styles.videoCaption} numberOfLines={3}>{item.caption}</Text>}
+        {((kind !== 'text' && !!item.caption) || (item as any).boost_id) && <Text style={styles.videoCaption} numberOfLines={3}>{(item as any).boost_id ? '🚀 Boosted · ' : ''}{kind !== 'text' ? item.caption : ''}</Text>}
         {item.location && (<View style={styles.locationContainer}><Feather name="map-pin" size={12} color="#00ff88" /><Text style={styles.locationText}>{item.location}</Text></View>)}
+
+        {item.vibe_type === 'marketplace' && (() => {
+          const listingIdFromColumn = (item as any).marketplace_listing_id as string | null | undefined;
+          const listingIdFromPublicId = (item as any).cloudinary_public_id?.startsWith('marketplace_listing_')
+            ? (item as any).cloudinary_public_id.replace('marketplace_listing_', '')
+            : null;
+          const listingId = listingIdFromColumn || listingIdFromPublicId;
+          if (!listingId) return null;
+          const price = (item as any).marketplace_price
+            || item.caption?.match(/(\d+) coins/)?.[1]
+            || '';
+          return (
+            <TouchableOpacity
+              style={videoShopStyles.shopBtn}
+              onPress={() => navigation.navigate('MarketplaceListing', { listingId })}
+              activeOpacity={0.85}
+            >
+              <Text style={videoShopStyles.shopBtnIcon}>🛍️</Text>
+              <Text style={videoShopStyles.shopBtnText}>
+                Shop Now{price ? ` — ${price} coins` : ''}
+              </Text>
+              <Feather name="chevron-right" size={14} color="#000" />
+            </TouchableOpacity>
+          );
+        })()}
       </View>
 
       {/* ── actions ── */}
@@ -1656,6 +1883,33 @@ const MediaPost = memo(function MediaPost({
           <View style={styles.iconContainer}><MaterialCommunityIcons name="gift-outline" size={32} color="#ffd700" /></View>
           <Text style={styles.actionTextRightGold}>{item.coins_received > 0 ? item.coins_received.toFixed(0) : 'Gift'}</Text>
         </TouchableOpacity>
+
+        {/* Co-Watch button */}
+        <TouchableOpacity style={styles.actionButtonRight} onPress={() => setCowatchModalVisible(true)} activeOpacity={0.7}>
+          <View style={styles.iconContainer}><Feather name="users" size={28} color="#fff" /></View>
+          <Text style={styles.actionTextRight}>Watch</Text>
+        </TouchableOpacity>
+
+        {/* Vibe Room button */}
+        {vibeRoom && vibeRoom.status !== 'ended' && (
+          <TouchableOpacity
+            style={styles.actionButtonRight}
+            onPress={() => navigation.navigate('VibeRoom', { id: vibeRoom.id })}
+            activeOpacity={0.7}
+          >
+            <View style={[styles.iconContainer, { position: 'relative' }]}>
+              <MaterialCommunityIcons name="television-play" size={28} color={vibeRoom.status === 'live' ? '#ff4444' : '#00ff88'} />
+              {vibeRoom.status === 'live' && (
+                <View style={{ position: 'absolute', top: 0, right: 0, width: 8, height: 8, borderRadius: 4, backgroundColor: '#ff4444' }} />
+              )}
+            </View>
+            <Text style={[styles.actionTextRight, { color: vibeRoom.status === 'live' ? '#ff4444' : '#00ff88', fontSize: 9 }]}>
+              {vibeRoom.status === 'live' ? '🔴 LIVE' : '⏰ Soon'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {item.coins_received > 0 && (<View style={styles.coinsOverlay}><MaterialCommunityIcons name="diamond" size={20} color="#ffd700" /><Text style={styles.coinsOverlayText}>{item.coins_received.toFixed(2)}</Text></View>)}
       </View>
     </View>
   );
@@ -2387,7 +2641,7 @@ export default function VideosScreen() {
           onLike={handleLike} onComment={handleComment} onGift={handleGift}
           onFollow={handleFollow} onUserPress={handleUserPress} onShare={handleShare}
           onDelete={handleDeletePost} onReport={handleReport}
-          user={user} onView={handleView} followStatusMap={followStatusMap} topOffset={HEADER_HEIGHT}
+          user={user} onView={handleView} followStatusMap={followStatusMap} vibeRoomMap={vibeRoomMap} topOffset={HEADER_HEIGHT}
         />
       );
     }
@@ -2455,10 +2709,10 @@ export default function VideosScreen() {
           <View style={styles.emptyContainer}>
             <Feather name="video" size={64} color="#333" />
             <Text style={styles.emptyText}>
-              {activeFeedTab === 'following' ? 'No posts yet from people you follow' : t.videos.noVideos}
+              {activeFeedTab === 'following' ? 'No posts yet from people you follow' : 'No posts yet'}
             </Text>
             <Text style={styles.emptySubtext}>
-              {activeFeedTab === 'following' ? 'Follow more creators to see their vibes here' : t.videos.noVideosSubtext}
+              {activeFeedTab === 'following' ? 'Follow more creators to see their vibes here' : 'Follow users to see their posts here'}
             </Text>
             <TouchableOpacity
               style={{ marginTop: 20, paddingHorizontal: 24, paddingVertical: 12, backgroundColor: '#00ff88', borderRadius: 24 }}
