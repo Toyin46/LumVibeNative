@@ -153,7 +153,7 @@ async function verifyPaystackAccount(
 }
 
 const { width } = Dimensions.get('window');
-const POST_SIZE = Math.floor((width - 4) / 3);
+const POST_SIZE = Math.floor((width - 6) / 3);
 
 const WITHDRAWAL_SPLIT = {
   PLATFORM_FEE:        0.20,
@@ -466,6 +466,13 @@ const bpStyles = StyleSheet.create({
 // the actual video thumbnail, with a small play badge on top so it still
 // reads as a video at a glance. Falls back to the plain box only if there
 // truly is no thumbnail yet.
+// 1200 -> 1.2K, 3400000 -> 3.4M
+function formatViewCount(n: number): string {
+  if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+  if (n >= 1000)    return (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+  return String(n);
+}
+
 const LazyPostThumb = memo(({ post, onPress }: { post: Post; onPress: () => void }) => {
   return (
     <TouchableOpacity style={s.postThumb} onPress={onPress} activeOpacity={0.85}>
@@ -500,6 +507,10 @@ const LazyPostThumb = memo(({ post, onPress }: { post: Post; onPress: () => void
           )
           : <View style={s.postThumbVideoBg} />
       }
+      <View style={s.postThumbViews} pointerEvents="none">
+        <Feather name="eye" size={14} color="#fff" />
+        <Text style={s.postThumbViewsText}>{formatViewCount(post.views_count || 0)}</Text>
+      </View>
       <View style={s.postThumbStats}>
         <View style={s.postThumbStat}>
           <Feather name="heart" size={10} color="#fff" />
@@ -2778,7 +2789,7 @@ export default function ProfileScreen() {
               ? <ActivityIndicator size="large" color="#00ff88" style={{ marginTop: 20 }} />
               : savedPosts.length === 0
                 ? <View style={s.emptyState}><Feather name="bookmark" size={48} color="#666" /><Text style={s.emptyText}>No saved posts yet</Text></View>
-                : <ScrollView style={{ padding: 10 }}>
+                : <ScrollView style={{ paddingVertical: 10 }}>
                   <View style={s.postsGrid}>
                     {savedPosts.map(post => (
                       <TouchableOpacity key={post.id} style={s.postThumb} onPress={() => navigateToPost(post.id)}>
@@ -3372,7 +3383,7 @@ const s = StyleSheet.create({
   levelProgress:       { marginTop: 10 },
   levelBar:            { height: 4, backgroundColor: '#2a2a2a', borderRadius: 2, overflow: 'hidden' },
   levelProgressText:   { color: '#555', fontSize: 10, textAlign: 'right', marginTop: 4 },
-  postsSection:        { paddingHorizontal: 20, paddingTop: 8 },
+  postsSection:        { paddingHorizontal: 0, paddingTop: 8 },
   sectionTitle:        { color: '#fff', fontSize: 16, fontWeight: 'bold', paddingHorizontal: 20, marginBottom: 12 },
   postsGrid:           { flexDirection: 'row', flexWrap: 'wrap' },
   postThumb:           { width: POST_SIZE, height: POST_SIZE, backgroundColor: '#111', position: 'relative', overflow: 'hidden', margin: 0.5 },
@@ -3382,6 +3393,8 @@ const s = StyleSheet.create({
   postThumbStats:      { position: 'absolute', bottom: 4, left: 4, flexDirection: 'row', gap: 6 },
   postThumbStat:       { flexDirection: 'row', alignItems: 'center', gap: 2 },
   postThumbStatText:   { color: '#fff', fontSize: 10 },
+  postThumbViews:      { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  postThumbViewsText:  { color: '#fff', fontSize: 13, fontWeight: '700', marginTop: 2, textShadowColor: 'rgba(0,0,0,0.7)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
   postThumbOverlay:    { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000066', zIndex: 1 },
   emptyState:          { alignItems: 'center', paddingVertical: 40, gap: 12 },
   emptyText:           { color: '#555', fontSize: 14 },

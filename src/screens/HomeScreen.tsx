@@ -1539,7 +1539,12 @@ const PostCard = memo(({
 });
 
 // ─── HOME SCREEN ──────────────────────────────────────────────────────────────
-export default function HomeScreen() {
+// The Home feed is now the ONE combined feed (videos, photos, voice and text in a
+// single swipe feed — see videos.tsx, which also owns the champion banner and the
+// glowing crown). The previous Home implementation is kept below, untouched, as
+// LegacyHomeFeed: to go back, delete the wrapper at the bottom and put
+// `export default` back on this function.
+function LegacyHomeFeed() {
   const { userProfile, user, loadProfile } = useAuthStore();
   const { t } = useTranslation();
   const userId = user?.id || (user as any)?.id;
@@ -2829,3 +2834,9 @@ const homeMenuStyles = StyleSheet.create({
   cancelText:  { color: '#fff', fontSize: 15, fontWeight: '600' },
   downloadBtn: { position: 'absolute', top: 12, left: 12, zIndex: 30, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
 });
+
+import VideosScreen from './videos';
+
+export default function HomeScreen() {
+  return <VideosScreen />;
+}

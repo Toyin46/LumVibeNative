@@ -302,6 +302,7 @@ const REPORT_CATEGORIES = [
 interface Post {
   id: string; user_id: string; username: string; display_name: string;
   user_photo_url?: string; media_url?: string; raw_media_url?: string; boost_id?: string; caption: string;
+  media_type?: string | null;   // 'video' | 'image' | 'voice' | 'text' | null — the feed now shows every post type
   likes_count: number; comments_count: number; views_count: number;
   coins_received: number; liked_by: string[]; location?: string;
   music_name?: string; music_artist?: string;
@@ -1395,6 +1396,263 @@ const VideoPost = memo(function VideoPost({
 // uploadVideoToCloudinary(). handleSaveMedia below just downloads the
 // pre-baked watermarked_url when available.) ────────────────────────────────
 
+// ─── FLOATING CHAMPION (moved here from the old Home feed) ───────────────────
+function FloatingChampion({ winner, onPress, isOfficial, top }: { winner: WeeklyWinner; onPress: () => void; isOfficial: boolean; top: number }) {
+  const pulse     = useRef(new Animated.Value(0)).current;
+  const ringScale = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 1000, useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0, duration: 1000, useNativeDriver: true }),
+    ])).start();
+    Animated.loop(Animated.sequence([
+      Animated.timing(ringScale, { toValue: 1.55, duration: 1400, useNativeDriver: true }),
+      Animated.timing(ringScale, { toValue: 1,    duration: 0,    useNativeDriver: true }),
+    ])).start();
+  }, []);
+  const glowOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] });
+  const ringOpacity = ringScale.interpolate({ inputRange: [1, 1.55], outputRange: [0.7, 0] });
+  return (
+    <TouchableOpacity style={[floatStyles.container, { top }]} onPress={onPress} activeOpacity={0.85}>
+      <Animated.View style={[floatStyles.ring, { transform: [{ scale: ringScale }], opacity: ringOpacity }]} pointerEvents="none" />
+      <Animated.View style={[floatStyles.halo, { opacity: glowOpacity }]} pointerEvents="none" />
+      <LinearGradient colors={['#FFD700', '#FFA500', '#FFD700']} style={floatStyles.avatarBorder}>
+        {winner.avatar_url
+          ? <Image source={{ uri: winner.avatar_url }} style={floatStyles.avatar} />
+          : <View style={[floatStyles.avatar, floatStyles.avatarFallback]}><Feather name="user" size={18} color="#FFD700" /></View>}
+      </LinearGradient>
+      <View style={floatStyles.crownWrap} pointerEvents="none"><Text style={floatStyles.crownText}>👑</Text></View>
+      <View style={floatStyles.label}>
+        <Text style={floatStyles.labelTop}>{isOfficial ? '#1 Champion' : 'Current Leader'}</Text>
+        <Text style={floatStyles.labelName} numberOfLines={1}>{winner.display_name.length > 10 ? winner.display_name.slice(0, 10) + '…' : winner.display_name}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+const floatStyles = StyleSheet.create({
+  container:      { position: 'absolute', right: 14, alignItems: 'center', zIndex: 60, width: 62 },
+  ring:           { position: 'absolute', width: 62, height: 62, borderRadius: 31, borderWidth: 2, borderColor: '#FFD700', top: 0 },
+  halo:           { position: 'absolute', width: 62, height: 62, borderRadius: 31, backgroundColor: '#FFD700', top: 0, shadowColor: '#FFD700', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 1, shadowRadius: 18, elevation: 2 },
+  avatarBorder:   { width: 62, height: 62, borderRadius: 31, padding: 2.5, justifyContent: 'center', alignItems: 'center' },
+  avatar:         { width: 54, height: 54, borderRadius: 27, backgroundColor: '#111' },
+  avatarFallback: { justifyContent: 'center', alignItems: 'center', backgroundColor: '#1a1a1a' },
+  crownWrap:      { position: 'absolute', top: -13, alignSelf: 'center' },
+  crownText:      { fontSize: 20 },
+  label:          { marginTop: 5, backgroundColor: 'rgba(0,0,0,0.82)', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 3, alignItems: 'center', borderWidth: 1, borderColor: '#FFD70055', width: 72, marginLeft: -5 },
+  labelTop:       { color: '#FFD700', fontSize: 8, fontWeight: '800', letterSpacing: 0.4, textTransform: 'uppercase' },
+  labelName:      { color: '#fff', fontSize: 10, fontWeight: '700', marginTop: 1 },
+});
+
+// ─── MEDIA POST: full-screen page for photo / voice / text posts ─────────────
+// Video posts keep using VideoPost (unchanged). Everything else in the one
+// combined feed uses this page, with the same like / comment / gift / share /
+// follow controls and the same one-view-per-account counting (onView).
+const TEXT_GRADIENTS: [string, string][] = [
+  ['#0f2027', '#2c5364'], ['#41295a', '#2f0743'], ['#134e5e', '#71b280'],
+  ['#8e2de2', '#4a00e0'], ['#c31432', '#240b36'], ['#1d976c', '#093028'], ['#f12711', '#b0480a'],
+];
+function hashStr(str: string): number { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0; return h; }
+function fmtClock(sec: number): string { const s = Math.max(0, Math.floor(sec)); return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`; }
+
+const MediaPost = memo(function MediaPost({
+  item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onDelete, onReport, user, onView, followStatusMap, topOffset,
+}: {
+  item: Post; activePostId: string | null; onLike: (post: Post) => void; onComment: (post: Post) => void;
+  onGift: (post: Post) => void; onFollow: (userId: string, isFollowing: boolean) => Promise<void>;
+  onUserPress: (userId: string) => void; onShare: (post: Post) => void;
+  onDelete: (post: Post) => void; onReport: (post: Post) => void;
+  user: any; onView: (postId: string) => void; followStatusMap: Map<string, boolean>; topOffset: number;
+}) {
+  const { t } = useTranslation();
+  const isActive    = activePostId === item.id;
+  const userId      = user?.id || (user as any)?.id;
+  const isLiked     = userId ? item.liked_by?.includes(userId) : false;
+  const isOwnPost   = userId === item.user_id;
+  const isFollowing = followStatusMap.get(item.user_id) || false;
+  const [checkingFollow, setCheckingFollow] = useState(false);
+  const viewedRef = useRef(false);
+
+  const kind: 'voice' | 'image' | 'text' =
+    item.media_type === 'voice' ? 'voice'
+    : (item.media_url && item.media_type !== 'text') ? 'image'
+    : 'text';
+
+  // voice posts play their recording; photo/text posts play their background music (if any)
+  const audioUrl = kind === 'voice' ? item.media_url : (item.music_url || null);
+  const [playing, setPlaying] = useState(false);
+  const [posSec,  setPosSec]  = useState(0);
+  const [durSec,  setDurSec]  = useState(item.voice_duration || 0);
+  const playerRef = useRef<AudioPlayer | null>(null);
+
+  useEffect(() => {
+    if (isActive && !viewedRef.current) { viewedRef.current = true; onView(item.id); }
+  }, [isActive]);
+
+  useEffect(() => {
+    if (!isActive || !audioUrl) return;
+    let cancelled = false;
+    let player: AudioPlayer | null = null;
+    let sub: { remove: () => void } | null = null;
+    try {
+      player = createAudioPlayer({ uri: audioUrl });
+      if (kind !== 'voice') player.volume = Math.min(Math.max(item.music_volume ?? 0.85, 0), 1);
+      playerRef.current = player;
+      sub = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        if (!player || cancelled) return;
+        const st: any = status;
+        setPosSec(st.currentTime || 0);
+        if (st.duration) setDurSec(st.duration);
+        setPlaying(!!st.playing);
+        if (st.didJustFinish) {
+          try { player.seekTo(0); if (kind !== 'voice') player.play(); else setPlaying(false); } catch {}
+        }
+      });
+      player.play(); setPlaying(true);
+    } catch (e) { console.warn('Post audio failed to load:', e); }
+    return () => {
+      cancelled = true;
+      try { sub?.remove(); } catch {}
+      try { player?.remove(); } catch {}
+      playerRef.current = null; setPlaying(false); setPosSec(0);
+    };
+  }, [isActive, audioUrl]);
+
+  const togglePlay = () => {
+    const p = playerRef.current; if (!p) return;
+    try { if (playing) { p.pause(); setPlaying(false); } else { p.play(); setPlaying(true); } } catch {}
+  };
+
+  const handleFollowPress = async () => {
+    if (checkingFollow) return;
+    setCheckingFollow(true);
+    try { await onFollow(item.user_id, isFollowing); } finally { setCheckingFollow(false); }
+  };
+
+  const openMenu = () => {
+    const buttons: any[] = [{ text: 'Share', onPress: () => onShare(item) }];
+    if (!isOwnPost) buttons.push({ text: 'Report', style: 'destructive', onPress: () => onReport(item) });
+    if (isOwnPost) buttons.push({
+      text: 'Delete post', style: 'destructive',
+      onPress: () => Alert.alert('Delete Post', 'Permanently delete this post? This cannot be undone.', [
+        { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => onDelete(item) },
+      ]),
+    });
+    buttons.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert('Post options', undefined, buttons);
+  };
+
+  const grad = TEXT_GRADIENTS[hashStr(item.id) % TEXT_GRADIENTS.length];
+  const bars = useMemo(() => Array.from({ length: 36 }, (_, i) => 14 + ((hashStr(item.id + i) % 100) / 100) * 56), [item.id]);
+  const progress = durSec > 0 ? Math.min(1, posSec / durSec) : 0;
+
+  return (
+    <View style={styles.videoContainer}>
+      {/* ── page background, by post type ── */}
+      {kind === 'image' && (
+        <>
+          <Image source={{ uri: item.media_url }} style={StyleSheet.absoluteFill} resizeMode="cover" blurRadius={28} />
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.35)' }]} />
+          <Image source={{ uri: item.media_url }} style={StyleSheet.absoluteFill} resizeMode="contain" />
+        </>
+      )}
+      {kind === 'text' && (
+        <LinearGradient colors={grad} style={StyleSheet.absoluteFill}>
+          <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: 28, paddingTop: topOffset, paddingBottom: 170 }}>
+            <Text style={{ color: '#fff', fontSize: item.caption.length > 140 ? 20 : item.caption.length > 60 ? 26 : 32, fontWeight: '800', textAlign: 'center', lineHeight: item.caption.length > 140 ? 28 : item.caption.length > 60 ? 35 : 42 }}>
+              {item.caption}
+            </Text>
+          </View>
+        </LinearGradient>
+      )}
+      {kind === 'voice' && (
+        <LinearGradient colors={['#0b1f17', '#06110d', '#000']} style={StyleSheet.absoluteFill}>
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: topOffset, paddingBottom: 150 }}>
+            {item.user_photo_url
+              ? <Image source={{ uri: item.user_photo_url }} style={{ width: 132, height: 132, borderRadius: 66, borderWidth: 3, borderColor: '#00ff88' }} />
+              : <View style={{ width: 132, height: 132, borderRadius: 66, borderWidth: 3, borderColor: '#00ff88', backgroundColor: '#1a1a1a', alignItems: 'center', justifyContent: 'center' }}><Feather name="user" size={56} color="#00ff88" /></View>}
+            <Text style={{ color: '#00ff88', fontSize: 12, fontWeight: '800', letterSpacing: 1.2, marginTop: 18 }}>🎙️ VOICE NOTE</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', height: 76, marginTop: 22, gap: 3 }}>
+              {bars.map((h, i) => (
+                <View key={i} style={{ width: 4, height: h, borderRadius: 2, backgroundColor: i / bars.length <= progress ? '#00ff88' : '#2e4a3f' }} />
+              ))}
+            </View>
+            <Text style={{ color: '#9fb8ad', fontSize: 13, marginTop: 10 }}>{fmtClock(posSec)} / {fmtClock(durSec)}</Text>
+            <TouchableOpacity onPress={togglePlay} activeOpacity={0.8}
+              style={{ marginTop: 20, width: 68, height: 68, borderRadius: 34, backgroundColor: '#00ff88', alignItems: 'center', justifyContent: 'center' }}>
+              <Feather name={playing ? 'pause' : 'play'} size={30} color="#000" />
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
+      )}
+
+      {kind !== 'text' && (
+        <LinearGradient colors={['transparent', 'rgba(0,0,0,0.75)']} style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 320 }} pointerEvents="none" />
+      )}
+
+      {/* ── more menu ── */}
+      <TouchableOpacity onPress={openMenu} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        style={{ position: 'absolute', top: topOffset + 4, right: 16, zIndex: 8, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' }}>
+        <Feather name="more-horizontal" size={20} color="#fff" />
+      </TouchableOpacity>
+
+      {item.music_name && kind !== 'voice' && (
+        <View style={styles.musicContainer}>
+          <Feather name="music" size={12} color="#00ff88" />
+          <Text style={styles.musicText}>{item.music_name}{item.music_artist ? ` - ${item.music_artist}` : ''}</Text>
+        </View>
+      )}
+
+      {/* ── user + caption ── */}
+      <View style={styles.videoInfo}>
+        <View style={styles.userInfoOverlay}>
+          <TouchableOpacity style={styles.userInfoContent} onPress={() => onUserPress(item.user_id)} activeOpacity={0.7}>
+            {item.user_photo_url ? <Image source={{ uri: item.user_photo_url }} style={styles.videoUserAvatar} /> : <View style={[styles.videoUserAvatar, styles.avatarPlaceholder]}><Feather name="user" size={20} color="#00ff88" /></View>}
+            <View style={styles.videoUserDetails}>
+              <Text style={styles.videoDisplayName}>{item.display_name}</Text>
+              <Text style={styles.videoUsername}>@{item.username}</Text>
+            </View>
+          </TouchableOpacity>
+          {!isOwnPost && (
+            <TouchableOpacity style={[styles.followButtonVideo, isFollowing && styles.followingButtonVideo, checkingFollow && styles.disabled]} onPress={handleFollowPress} disabled={checkingFollow} activeOpacity={0.7}>
+              <Text style={[styles.followButtonTextVideo, isFollowing && styles.followingButtonTextVideo]}>{checkingFollow ? '...' : isFollowing ? t.common.following : t.common.follow}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        {kind !== 'text' && !!item.caption && <Text style={styles.videoCaption} numberOfLines={3}>{item.caption}</Text>}
+        {item.location && (<View style={styles.locationContainer}><Feather name="map-pin" size={12} color="#00ff88" /><Text style={styles.locationText}>{item.location}</Text></View>)}
+      </View>
+
+      {/* ── actions ── */}
+      <View style={styles.actionsRight}>
+        <TouchableOpacity style={styles.actionButtonRight} onPress={() => onLike(item)} activeOpacity={0.7}>
+          <View style={styles.iconContainer}><MaterialCommunityIcons name={isLiked ? 'heart' : 'heart-outline'} size={32} color="#00ff88" /></View>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>{item.likes_count}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.actionButtonRight} onPress={() => onComment(item)} activeOpacity={0.7}>
+          <View style={styles.iconContainer}><Feather name="message-circle" size={30} color="#00ff88" /></View>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>{item.comments_count}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.actionButtonRight} onPress={() => onShare(item)} activeOpacity={0.7}>
+          <View style={styles.iconContainer}><Feather name="share" size={28} color="#00ff88" /></View>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>Share</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.actionButtonRight} onPress={() => onGift(item)} activeOpacity={0.7}>
+          <View style={styles.iconContainer}><MaterialCommunityIcons name="gift-outline" size={32} color="#ffd700" /></View>
+          <Text style={styles.actionTextRightGold}>{item.coins_received > 0 ? item.coins_received.toFixed(0) : 'Gift'}</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}, (prev, next) =>
+  prev.item.id             === next.item.id &&
+  prev.item.likes_count    === next.item.likes_count &&
+  prev.item.comments_count === next.item.comments_count &&
+  prev.item.coins_received === next.item.coins_received &&
+  prev.activePostId        === next.activePostId &&
+  prev.followStatusMap     === next.followStatusMap
+);
+
 // ─── MAIN SCREEN ──────────────────────────────────────────────────────────────
 export default function VideosScreen() {
   const { userProfile, user, loadProfile } = useAuthStore();
@@ -1438,6 +1696,7 @@ export default function VideosScreen() {
   const [followStatusMap,     setFollowStatusMap]     = useState<Map<string, boolean>>(new Map());
   const [weeklyWinners,       setWeeklyWinners]       = useState<WeeklyWinner[]>([]);
   const [showWinnersOverlay,  setShowWinnersOverlay]  = useState(true);
+  const [winnersAreOfficial, setWinnersAreOfficial]  = useState(false);
   const [giftModalVisible,    setGiftModalVisible]    = useState(false);
   const [customGiftMode,      setCustomGiftMode]      = useState(false);
   const [customGiftAmount,    setCustomGiftAmount]    = useState('');
@@ -1472,7 +1731,7 @@ export default function VideosScreen() {
     Promise.all([loadVideos(), loadWeeklyWinners()]);
     const videosChannel = supabase.channel('videos-changes')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, (payload) => {
-        if (payload.new?.media_type === 'video' && payload.new?.is_published === true) {
+        if (payload.new?.is_published !== false) {
           videoCacheRef.current = null;
           loadVideos(true);
         }
@@ -1505,6 +1764,7 @@ export default function VideosScreen() {
         const hydrated: WeeklyWinner[] = savedWinners.map((w: any) => { const u: any = userMap.get(w.user_id) || {}; return { rank: w.rank, user_id: w.user_id, username: u.username || w.username || 'unknown', display_name: u.display_name || w.display_name || 'Unknown', avatar_url: u.avatar_url || w.avatar_url, weekly_points: w.weekly_points || 0, week_start: w.week_start }; });
         setWeeklyWinners(hydrated);
         weeklyWinnersRef.current = hydrated;
+        setWinnersAreOfficial(true);
         return;
       }
       // Same weekly board as the Leaderboard and Weekly screens: weekly points, then votes during Top 10 voting week.
@@ -1515,6 +1775,7 @@ export default function VideosScreen() {
         const derived: WeeklyWinner[] = boardRows.slice(0, 3).map((u: any, idx: number) => ({ rank: (idx + 1) as 1|2|3, user_id: u.user_id, username: u.username || 'unknown', display_name: u.display_name || u.username || 'Unknown', avatar_url: u.avatar_url, weekly_points: (byVotes ? u.votes : u.points) || 0, unit: byVotes ? 'votes' as const : 'pts' as const, week_start: (board as any).week_start }));
         setWeeklyWinners(derived);
         weeklyWinnersRef.current = derived;
+        setWinnersAreOfficial(false);
       } else if (board) { setWeeklyWinners([]); weeklyWinnersRef.current = []; }
     } catch (e) { console.error('Error loading weekly winners:', e); }
   };
@@ -1551,7 +1812,6 @@ export default function VideosScreen() {
       const { data: postsData, error: postsError } = await supabase
         .from('posts')
         .select(FEED_POST_SELECT)
-        .eq('media_type', 'video')
         .or('is_published.is.null,is_published.eq.true')
         .order('created_at', { ascending: false })
         .limit(50);
@@ -1567,7 +1827,7 @@ export default function VideosScreen() {
           const have = new Set((postsData as any[]).map((p: any) => p.id));
           const need = boosts.map(b => b.post_id).filter(id => !have.has(id));
           if (need.length) {
-            const { data: extra } = await supabase.from('posts').select(FEED_POST_SELECT).in('id', need).eq('media_type', 'video');
+            const { data: extra } = await supabase.from('posts').select(FEED_POST_SELECT).in('id', need);
             if (extra && extra.length) (postsData as any[]).push(...(extra as any[]));
           }
         }
@@ -1599,7 +1859,8 @@ export default function VideosScreen() {
         return {
           id: p.id, user_id: p.user_id,
           username: postUser?.username || 'unknown', display_name: postUser?.display_name || 'Unknown',
-          user_photo_url: postUser?.avatar_url, media_url: cdnVideoUrl(p.media_url), raw_media_url: p.media_url, caption: p.caption || '',
+          user_photo_url: postUser?.avatar_url, media_type: p.media_type ?? null,
+          media_url: p.media_type === 'video' ? cdnVideoUrl(p.media_url) : p.media_url, raw_media_url: p.media_url, caption: p.caption || '',
           likes_count: likes.count, comments_count: p.comments_count ?? commentsMap.get(p.id) ?? 0,
           views_count: p.views_count || 0, coins_received: p.coins_received || 0,
           liked_by: likes.users, location: p.location,
@@ -1612,7 +1873,7 @@ export default function VideosScreen() {
           voice_duration: p.voice_duration || null,
           applied_filter: p.applied_filter || 'original',
           created_at: p.created_at, has_watermark: p.has_watermark || false,
-          watermarked_url: cdnVideoUrl(p.watermarked_url) || null,
+          watermarked_url: p.media_type === 'video' ? (cdnVideoUrl(p.watermarked_url) || null) : null,
           video_effect: p.video_effect || 'none', video_filter_tint: p.video_filter_tint || null,
           playback_rate: p.playback_rate || null,
           vibe_type: p.vibe_type ?? null,
@@ -2093,6 +2354,17 @@ export default function VideosScreen() {
     // ✅ CHANGED: real AdMob native ad; falls back to your own promo card if no ad loads.
     if (isAd(item)) return <AdSlot key={item.id} variant="page" adIndex={item.adIndex} fallback={<NativeAdPost adIndex={item.adIndex} />} />;
     if (isWinnerCard(item)) { if (weeklyWinners.length === 0) return null; return <WinnerCardVideo winners={weeklyWinners} onUserPress={handleUserPress} />; }
+    if ((item as Post).media_type !== 'video') {
+      return (
+        <MediaPost
+          item={item as Post} activePostId={activePostId}
+          onLike={handleLike} onComment={handleComment} onGift={handleGift}
+          onFollow={handleFollow} onUserPress={handleUserPress} onShare={handleShare}
+          onDelete={handleDeletePost} onReport={handleReport}
+          user={user} onView={handleView} followStatusMap={followStatusMap} topOffset={HEADER_HEIGHT}
+        />
+      );
+    }
     return (
       <VideoPost
         item={item as Post} activePostId={activePostId}
@@ -2157,7 +2429,7 @@ export default function VideosScreen() {
           <View style={styles.emptyContainer}>
             <Feather name="video" size={64} color="#333" />
             <Text style={styles.emptyText}>
-              {activeFeedTab === 'following' ? 'No videos yet from people you follow' : t.videos.noVideos}
+              {activeFeedTab === 'following' ? 'No posts yet from people you follow' : t.videos.noVideos}
             </Text>
             <Text style={styles.emptySubtext}>
               {activeFeedTab === 'following' ? 'Follow more creators to see their vibes here' : t.videos.noVideosSubtext}
@@ -2210,6 +2482,14 @@ export default function VideosScreen() {
 
       {weeklyWinners.length > 0 && showWinnersOverlay && (
         <WinnersVideoOverlay winners={weeklyWinners} onUserPress={handleUserPress} onDismiss={() => setShowWinnersOverlay(false)} />
+      )}
+
+      {/* Small glowing champion crown (moved here from the old Home feed) */}
+      {weeklyWinners.length > 0 && (
+        <FloatingChampion
+          winner={weeklyWinners[0]} isOfficial={winnersAreOfficial} top={HEADER_HEIGHT + 112}
+          onPress={() => handleUserPress(weeklyWinners[0].user_id)}
+        />
       )}
 
       {/* GIFT MODAL */}
