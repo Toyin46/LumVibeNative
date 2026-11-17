@@ -904,7 +904,7 @@ interface Message {
   // already rendering correctly in your screenshots, which proves
   // messages.message_type accepts new string values fine (it's not a
   // locked-down Postgres enum) — 'cowatch_log' will insert the same way.
-  message_type: 'text' | 'voice' | 'image' | 'video' | 'gif' | 'sticker' | 'system' | 'call_log' | 'cowatch_log';
+  message_type: 'text' | 'voice' | 'image' | 'video' | 'gif' | 'sticker' | 'system' | 'call_log' | 'cowatch_log' | 'gift';
   content?: string; media_url?: string; media_duration?: number;
   media_thumbnail?: string; shared_video_id?: string;
   shared_video_title?: string; shared_video_thumbnail?: string;
@@ -1321,13 +1321,36 @@ function useMessages(
     await addReaction(messageId, currentUserId, emoji);
   }, [currentUserId]);
 
+  // ✅ NEW: gifts in chat. Price and receiver are decided on the SERVER
+  // (public.send_chat_gift) — the app only says which gift in which chat.
+  const sendGift = useCallback(async (giftId: string): Promise<{ ok: boolean; error?: string; newBalance?: number }> => {
+    if (!conversationId || !currentUserId) return { ok: false, error: 'Chat not ready.' };
+    setSending(true);
+    try {
+      const { data, error } = await supabase.rpc('send_chat_gift', {
+        p_conversation_id: conversationId, p_gift_id: giftId,
+      });
+      if (error) return { ok: false, error: error.message };
+      if (!data?.success) return { ok: false, error: data?.error || 'Could not send gift.' };
+      const msg = { ...(data.message as Message), reactions: [] } as Message;
+      setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg]);
+      if (otherUserId) {
+        notifyNewMessage(
+          otherUserId, currentUserId, senderUsername, senderDisplayName,
+          '🎁 Sent you a gift', conversationId, senderPhoto
+        ).catch(e => console.warn('Push notify (gift) failed:', e));
+      }
+      return { ok: true, newBalance: data.new_balance };
+    } finally { setSending(false); }
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
+
   const deleteMessage = useCallback(async (messageId: string): Promise<void> => {
     if (!currentUserId) return;
     const ok = await softDeleteMessage(messageId, currentUserId);
     if (ok) setMessages(prev => prev.filter(m => m.id !== messageId));
   }, [currentUserId]);
 
-  return { messages, loading, sending, sendText, sendVoiceNote, sendImage, sendVideo, reactToMessage, deleteMessage };
+  return { messages, loading, sending, sendText, sendVoiceNote, sendImage, sendVideo, sendGift, reactToMessage, deleteMessage };
 }
 
 // ── WAVEFORM ──────────────────────────────────────────────────
@@ -1640,6 +1663,22 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
       // cowatch.tsx's setupSession() the moment a NEW session is created
       // (see insertCowatchLogMessage there) — joining an existing session
       // someone else started does not insert a second one.
+      // ✅ NEW: gift card. content is JSON written by send_chat_gift.
+      case 'gift': {
+        let g: { name?: string; emoji?: string; coins?: number } = {};
+        try { g = JSON.parse(message.content || '{}'); } catch (_) {}
+        return (
+          <TouchableOpacity onLongPress={() => onLongPress(message)} activeOpacity={0.9}
+            style={[styles.giftCard, isMe ? styles.giftCardMe : styles.giftCardThem]}>
+            <Text style={{ fontSize: 44 }}>{g.emoji || '🎁'}</Text>
+            <Text style={styles.giftCardTitle}>
+              {isMe ? `You sent ${g.name || 'a gift'}` : `${g.name || 'A gift'} for you`}
+            </Text>
+            <Text style={styles.giftCardCoins}>{g.coins ?? message.coin_amount ?? 0} coins</Text>
+          </TouchableOpacity>
+        );
+      }
+
       case 'cowatch_log': {
         return (
           <TouchableOpacity onLongPress={() => onLongPress(message)}
@@ -1762,6 +1801,35 @@ export default function ChatScreen() {
   const [isRecording,    setIsRecording]    = useState(false);
   const [recordingDur,   setRecordingDur]   = useState(0);
   const [uploadingVideo, setUploadingVideo] = useState(false);
+  // ✅ NEW: gifts
+  const [showGifts,   setShowGifts]   = useState(false);
+  const [giftList,    setGiftList]    = useState<{ id: string; name: string; emoji: string; coin_cost: number }[]>([]);
+  const [myCoins,     setMyCoins]     = useState<number | null>(null);
+  const [giftBusyId,  setGiftBusyId]  = useState<string | null>(null);
+
+  const openGifts = useCallback(async () => {
+    setShowGifts(true);
+    const [g, me] = await Promise.all([
+      supabase.from('gift_emojis').select('id, name, emoji, coin_cost').eq('is_active', true).order('sort_order'),
+      user?.id ? supabase.from('users').select('coins').eq('id', user.id).single() : Promise.resolve({ data: null } as any),
+    ]);
+    if (g.data) setGiftList(g.data as any);
+    if (me.data) setMyCoins(Number((me.data as any).coins) || 0);
+  }, [user?.id]);
+
+  const handleSendGift = useCallback((gift: { id: string; name: string; emoji: string; coin_cost: number }) => {
+    // confirm first so nobody sends an expensive gift by accident
+    Alert.alert(`Send ${gift.emoji} ${gift.name}?`, `This costs ${gift.coin_cost} coin${gift.coin_cost === 1 ? '' : 's'}. Gifts can't be refunded.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Send', onPress: async () => {
+        setGiftBusyId(gift.id);
+        const r = await sendGift(gift.id);
+        setGiftBusyId(null);
+        if (r.ok) { if (typeof r.newBalance === 'number') setMyCoins(r.newBalance); setShowGifts(false); }
+        else Alert.alert('Gift not sent', r.error || 'Please try again.');
+      } },
+    ]);
+  }, [sendGift]);
 
   // FIX: expo-audio recorder replaces expo-av Audio.Recording
   const recorder      = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -1771,7 +1839,7 @@ export default function ChatScreen() {
 
   const {
     messages, loading, sending, sendText, sendVoiceNote,
-    sendImage, sendVideo, reactToMessage, deleteMessage,
+    sendImage, sendVideo, sendGift, reactToMessage, deleteMessage,
   } = useMessages(
     id, user?.id || null, vanishOn, 86400,
     otherUserId || null, userProfile?.username || '', userProfile?.display_name || 'Someone',
@@ -2231,6 +2299,11 @@ export default function ChatScreen() {
               : <Ionicons name="videocam-outline" size={13} color={C.muted} />}
             <Text style={styles.attachChipText}>{uploadingVideo ? 'Uploading…' : 'Video'}</Text>
           </TouchableOpacity>
+          {/* ✅ NEW: real gift that turns into money for the receiver */}
+          <TouchableOpacity style={styles.attachChip} onPress={openGifts}>
+            <Ionicons name="gift-outline" size={13} color={C.gold} />
+            <Text style={[styles.attachChipText, { color: C.gold }]}>Gift</Text>
+          </TouchableOpacity>
         </ScrollView>
 
         <View style={styles.inputBar}>
@@ -2281,6 +2354,31 @@ export default function ChatScreen() {
       </KeyboardAvoidingView>
 
       {/* Reaction Picker */}
+      {/* ✅ NEW: gift tray */}
+      <Modal visible={showGifts} transparent animationType="slide" onRequestClose={() => setShowGifts(false)}>
+        <TouchableOpacity style={styles.giftBackdrop} activeOpacity={1} onPress={() => setShowGifts(false)} />
+        <View style={styles.giftSheet}>
+          <View style={styles.giftSheetHead}>
+            <Text style={styles.giftSheetTitle}>Send a gift</Text>
+            <Text style={styles.giftSheetBal}>{myCoins === null ? '…' : `${myCoins} coins`}</Text>
+          </View>
+          <ScrollView contentContainerStyle={styles.giftGrid}>
+            {giftList.map(g => {
+              const cant = myCoins !== null && myCoins < g.coin_cost;
+              return (
+                <TouchableOpacity key={g.id} disabled={!!giftBusyId}
+                  style={[styles.giftItem, cant && { opacity: 0.4 }]}
+                  onPress={() => cant ? Alert.alert('Not enough coins', `You need ${g.coin_cost} coins for this gift.`) : handleSendGift(g)}>
+                  {giftBusyId === g.id ? <ActivityIndicator color={C.green} /> : <Text style={{ fontSize: 34 }}>{g.emoji}</Text>}
+                  <Text style={styles.giftItemName}>{g.name}</Text>
+                  <Text style={styles.giftItemCost}>{g.coin_cost} coins</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </Modal>
+
       <Modal visible={showReactions} transparent animationType="fade"
         onRequestClose={() => setShowReactions(false)}>
         <TouchableOpacity style={styles.reactionOverlay} onPress={() => setShowReactions(false)}>
@@ -2469,6 +2567,20 @@ const styles = StyleSheet.create({
   replyBannerName:    { fontSize: 11, color: C.green, fontWeight: '700', marginBottom: 2 },
   replyBannerText:    { fontSize: 13, color: C.muted },
   replyCloseBtn:      { padding: 4 },
+  giftCard:     { alignItems: 'center', gap: 4, paddingVertical: 14, paddingHorizontal: 22, borderRadius: 18, borderWidth: 1, minWidth: 150 },
+  giftCardMe:   { backgroundColor: 'rgba(245,197,24,0.12)', borderColor: C.gold },
+  giftCardThem: { backgroundColor: C.card, borderColor: C.gold },
+  giftCardTitle:{ fontSize: 13, fontWeight: '700', color: C.white },
+  giftCardCoins:{ fontSize: 11.5, fontWeight: '700', color: C.gold },
+  giftBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' },
+  giftSheet:    { backgroundColor: C.card, borderTopLeftRadius: 22, borderTopRightRadius: 22, maxHeight: '60%', paddingBottom: 24 },
+  giftSheetHead:{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16 },
+  giftSheetTitle:{ fontSize: 16, fontWeight: '800', color: C.white },
+  giftSheetBal: { fontSize: 13, fontWeight: '700', color: C.gold },
+  giftGrid:     { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 10, gap: 8, justifyContent: 'center' },
+  giftItem:     { width: '30%', alignItems: 'center', gap: 3, paddingVertical: 12, borderRadius: 14, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border },
+  giftItemName: { fontSize: 12, fontWeight: '600', color: C.white },
+  giftItemCost: { fontSize: 11, fontWeight: '700', color: C.gold },
   emojiPanel: { backgroundColor: C.card, borderTopWidth: 1, borderTopColor: C.border, padding: 10 },
   emojiBtn:   { padding: 4, borderRadius: 8 },
   attachRow: { flexShrink: 0, maxHeight: 44, paddingVertical: 7 },
