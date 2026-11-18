@@ -6,7 +6,7 @@ import {
   View, Text, FlatList, TextInput, TouchableOpacity,
   StyleSheet, StatusBar, KeyboardAvoidingView,
   Platform, Modal, Alert, ActivityIndicator, Image,
-  ScrollView, Dimensions, PermissionsAndroid,
+  ScrollView, Dimensions, PermissionsAndroid, Linking,
 } from 'react-native';
 import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, createAudioPlayer } from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
@@ -1002,12 +1002,14 @@ async function sendTextMessage(
 async function sendMediaMessage(
   conversationId: string, senderId: string,
   mediaUrl: string, mediaType: 'voice' | 'image' | 'video', duration?: number,
+  replyToId?: string,
 ): Promise<Message | null> {
   try {
     const { data, error } = await supabase.from('messages')
       .insert({
         conversation_id: conversationId, sender_id: senderId,
         message_type: mediaType, media_url: mediaUrl, media_duration: duration,
+        ...(replyToId ? { reply_to_message_id: replyToId } : {}),
       })
       .select('*').single();
     if (error) throw error;
@@ -1208,7 +1210,10 @@ function useMessages(
     if (conversationId && currentUserId) markAsRead(conversationId, currentUserId);
     if (conversationId) {
       channelRef.current = subscribeToMessages(conversationId, (newMsg) => {
-        setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
+        setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, {
+          ...newMsg,
+          reply_to_message: newMsg.reply_to_message_id ? prev.find(m => m.id === newMsg.reply_to_message_id) : undefined,
+        }]);
         if (newMsg.sender_id !== currentUserId && conversationId && currentUserId)
           markAsRead(conversationId, currentUserId);
       });
@@ -1288,7 +1293,7 @@ function useMessages(
     } finally { setSending(false); }
   }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
-  const sendVideo = useCallback(async (fileUri: string): Promise<boolean> => {
+  const sendVideo = useCallback(async (fileUri: string, replyToId?: string, duration?: number): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
     // Same instant preview pattern as sendImage above.
     const tempId = `temp-${Date.now()}`;
@@ -1301,11 +1306,11 @@ function useMessages(
     try {
       const url = await uploadToCloudinary(fileUri, 'video');
       if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
-      const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'video'));
+      const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'video', duration, replyToId));
       if (ok && otherUserId) {
         notifyNewMessage(
           otherUserId, currentUserId, senderUsername, senderDisplayName,
-          '🎥 Video', conversationId, senderPhoto
+          replyToId ? '🎥 Video reply' : '🎥 Video', conversationId, senderPhoto
         ).catch(e => console.warn('Push notify (message) failed:', e));
       }
       setMessages(prev => prev.filter(m => m.id !== tempId));
@@ -1506,13 +1511,44 @@ function CallModal({
   );
 }
 
+// ✅ NEW (video replies): one-line description of a message, used in reply
+// previews so a replied-to photo / voice note / video doesn't show blank.
+function replyPreviewText(m?: Message): string {
+  if (!m) return '';
+  switch (m.message_type) {
+    case 'voice': return '🎤 Voice message';
+    case 'image': return '📷 Photo';
+    case 'video': return '🎥 Video';
+    case 'gift':  return '🎁 Gift';
+    default:      return m.content || '';
+  }
+}
+
+// ✅ NEW (video replies): Cloudinary makes a small still picture from a video
+// just by changing the link — no install, and the website can do the same.
+function videoPosterUrl(url?: string): string | undefined {
+  if (!url || !url.includes('res.cloudinary.com') || !url.includes('/video/upload/')) return undefined;
+  return url.replace('/video/upload/', '/video/upload/so_0,w_360,q_auto:low/').replace(/\.[a-z0-9]+(\?.*)?$/i, '.jpg');
+}
+
+// ✅ NEW (low-data mode): Cloudinary can hand back a small, low-quality copy of
+// an image just by changing the URL — no extra upload, no install, and the
+// website can use the exact same trick. Non-Cloudinary URLs are left alone.
+function lowDataImageUrl(url?: string): string | undefined {
+  if (!url || !url.includes('res.cloudinary.com') || !url.includes('/image/upload/')) return url;
+  if (/\/image\/upload\/[^/]*(w_|q_)/.test(url)) return url;
+  return url.replace('/image/upload/', '/image/upload/w_320,q_auto:low,f_auto/');
+}
+
 // ── MESSAGE BUBBLE ────────────────────────────────────────────
-function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
+function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData }: {
   message:     Message;
   isMe:        boolean;
   onLongPress: (msg: Message) => void;
   onCowatch?:  (msg: Message) => void;
+  lowData?:    boolean;
 }) {
+  const [fullLoaded, setFullLoaded] = useState(false); // ✅ NEW: tap-to-load in low-data mode
   const [isPlaying,  setIsPlaying]  = useState(false);
   const [imgError,   setImgError]   = useState(false);
 
@@ -1569,9 +1605,21 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
                 </View>
               : (
                 <View>
+                  {lowData && !fullLoaded && !(message as any)._uploading ? (
+                    <TouchableOpacity activeOpacity={0.85} onPress={() => setFullLoaded(true)}>
+                      <Image source={{ uri: lowDataImageUrl(message.media_url) }}
+                        style={styles.msgImage} resizeMode="cover" blurRadius={6}
+                        onError={() => setImgError(true)} />
+                      <View style={styles.lowDataOverlay}>
+                        <Ionicons name="cloud-download-outline" size={22} color="#fff" />
+                        <Text style={styles.lowDataText}>Tap to load</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ) : (
                   <Image source={{ uri: message.media_url }}
                     style={styles.msgImage} resizeMode="cover"
                     onError={() => setImgError(true)} />
+                  )}
                   {(message as any)._uploading && (
                     <View style={styles.uploadingOverlay}>
                       <ActivityIndicator color="#fff" size="small" />
@@ -1612,17 +1660,30 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
             </TouchableOpacity>
           );
         }
-        return (
-          <TouchableOpacity onLongPress={() => onLongPress(message)}
-            style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { padding: 3 }]}>
-            <View style={styles.videoPreviewBox}>
-              {(message as any)._uploading
-                ? <ActivityIndicator color={C.green} size="small" />
-                : <Ionicons name="videocam" size={32} color={C.green} />}
-              <Text style={styles.videoPreviewLabel}>{(message as any)._uploading ? 'Uploading…' : 'Video'}</Text>
-            </View>
-          </TouchableOpacity>
-        );
+        {
+          const uploading = !!(message as any)._uploading;
+          const poster = uploading ? undefined : videoPosterUrl(message.media_url);
+          return (
+            <TouchableOpacity onLongPress={() => onLongPress(message)} activeOpacity={0.85}
+              disabled={uploading || !message.media_url}
+              onPress={() => message.media_url && Linking.openURL(message.media_url).catch(() => Alert.alert('Could not open video'))}
+              style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { padding: 3 }]}>
+              {message.reply_to_message && (
+                <View style={[styles.replyPreview, isMe && styles.replyPreviewMe, { marginBottom: 3 }]}>
+                  <Text style={styles.replyName}>{message.reply_to_message.sender?.display_name || 'User'}</Text>
+                  <Text style={styles.replyText} numberOfLines={1}>{replyPreviewText(message.reply_to_message)}</Text>
+                </View>
+              )}
+              <View style={styles.videoPreviewBox}>
+                {poster ? <Image source={{ uri: poster }} style={StyleSheet.absoluteFillObject} resizeMode="cover" /> : null}
+                {uploading
+                  ? <ActivityIndicator color={C.green} size="small" />
+                  : <Ionicons name={poster ? 'play-circle' : 'videocam'} size={poster ? 44 : 32} color={poster ? '#fff' : C.green} />}
+                <Text style={styles.videoPreviewLabel}>{uploading ? 'Uploading…' : (message.reply_to_message ? 'Video reply' : 'Video')}</Text>
+              </View>
+            </TouchableOpacity>
+          );
+        }
 
       case 'call_log': {
         let parsed: { callType?: 'voice' | 'video'; outcome?: 'missed' | 'declined' | 'completed' } = {};
@@ -1706,7 +1767,7 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch }: {
             {message.reply_to_message && (
               <View style={[styles.replyPreview, isMe && styles.replyPreviewMe]}>
                 <Text style={styles.replyName}>{message.reply_to_message.sender?.display_name || 'User'}</Text>
-                <Text style={styles.replyText} numberOfLines={1}>{message.reply_to_message.content}</Text>
+                <Text style={styles.replyText} numberOfLines={1}>{replyPreviewText(message.reply_to_message)}</Text>
               </View>
             )}
             {message.is_disappearing && (
@@ -1801,6 +1862,22 @@ export default function ChatScreen() {
   const [isRecording,    setIsRecording]    = useState(false);
   const [recordingDur,   setRecordingDur]   = useState(0);
   const [uploadingVideo, setUploadingVideo] = useState(false);
+  // ✅ NEW: low-data mode — saved on the user's row (users.low_data_mode) so
+  // the app and the website share one setting.
+  const [lowData, setLowData] = useState(false);
+  useEffect(() => {
+    if (!user?.id) return;
+    supabase.from('users').select('low_data_mode').eq('id', user.id).single()
+      .then(({ data }) => { if (data) setLowData(!!(data as any).low_data_mode); });
+  }, [user?.id]);
+  const toggleLowData = useCallback(async () => {
+    if (!user?.id) return;
+    const next = !lowData;
+    setLowData(next);
+    const { error } = await supabase.from('users').update({ low_data_mode: next }).eq('id', user.id);
+    if (error) { setLowData(!next); Alert.alert('Could not save', error.message); }
+  }, [lowData, user?.id]);
+
   // ✅ NEW: gifts
   const [showGifts,   setShowGifts]   = useState(false);
   const [giftList,    setGiftList]    = useState<{ id: string; name: string; emoji: string; coin_cost: number }[]>([]);
@@ -2039,16 +2116,35 @@ export default function ChatScreen() {
   const handlePickImage = useCallback(async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) { Alert.alert('Permission needed', 'Please allow gallery access.'); return; }
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: lowData ? 0.4 : 0.8 });
     if (!result.canceled && result.assets[0]) await sendImage(result.assets[0].uri);
-  }, [sendImage]);
+  }, [sendImage, lowData]);
 
   const handlePickCamera = useCallback(async () => {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) { Alert.alert('Permission needed', 'Please allow camera access.'); return; }
-    const result = await ImagePicker.launchCameraAsync({ quality: 0.8 });
+    const result = await ImagePicker.launchCameraAsync({ quality: lowData ? 0.4 : 0.8 });
     if (!result.canceled && result.assets[0]) await sendImage(result.assets[0].uri);
-  }, [sendImage]);
+  }, [sendImage, lowData]);
+
+  // ✅ NEW: reply to a specific message with a short video (max 30 s),
+  // recorded right now. It stays inside this conversation — it is NOT posted
+  // to the feed.
+  const handleReplyWithVideo = useCallback(async (target: Message) => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) { Alert.alert('Permission needed', 'Please allow camera access.'); return; }
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Videos, videoMaxDuration: 30, quality: lowData ? 0.3 : 0.7,
+    });
+    if (result.canceled || !result.assets[0]) return;
+    const a: any = result.assets[0];
+    const secs = a.duration ? Math.round(a.duration > 1000 ? a.duration / 1000 : a.duration) : undefined;
+    setUploadingVideo(true);
+    try {
+      const ok = await sendVideo(a.uri, target.id, secs);
+      if (!ok) Alert.alert('Video not sent', 'Please check your connection and try again.');
+    } finally { setUploadingVideo(false); }
+  }, [sendVideo, lowData]);
 
   const handlePickVideo = useCallback(async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -2235,6 +2331,7 @@ export default function ChatScreen() {
               isMe={item.sender_id === user?.id}
               onLongPress={handleLongPress}
               onCowatch={(msg) => openCowatch()}
+              lowData={lowData}
             />
           )}
           contentContainerStyle={[styles.messagesList, { flexGrow: 1 }]}
@@ -2256,7 +2353,7 @@ export default function ChatScreen() {
             <View style={styles.replyBannerBar} />
             <View style={styles.replyBannerContent}>
               <Text style={styles.replyBannerName}>Replying to {replyTo.sender?.display_name}</Text>
-              <Text style={styles.replyBannerText} numberOfLines={1}>{replyTo.content}</Text>
+              <Text style={styles.replyBannerText} numberOfLines={1}>{replyPreviewText(replyTo)}</Text>
             </View>
             <TouchableOpacity onPress={() => setReplyTo(null)} style={styles.replyCloseBtn}>
               <Ionicons name="close" size={18} color={C.muted} />
@@ -2406,6 +2503,13 @@ export default function ChatScreen() {
               <Ionicons name="return-down-back-outline" size={14} color={C.white} />
               <Text style={{ color: C.white, fontSize: 14, fontWeight: '600', marginLeft: 6 }}>Reply</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={styles.msgOption} onPress={() => {
+              setShowReactions(false);
+              if (selectedMsg) handleReplyWithVideo(selectedMsg);
+            }}>
+              <Ionicons name="videocam-outline" size={14} color={C.green} />
+              <Text style={{ color: C.green, fontSize: 14, fontWeight: '600', marginLeft: 6 }}>Reply with video</Text>
+            </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -2422,6 +2526,12 @@ export default function ChatScreen() {
             }}>
               <Ionicons name="flag-outline" size={20} color={C.white} />
               <Text style={styles.sheetRowText}>Report {otherName || 'User'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.sheetRow} onPress={toggleLowData}>
+              <Ionicons name="cellular-outline" size={20} color={lowData ? C.green : C.white} />
+              <Text style={[styles.sheetRowText, lowData && { color: C.green }]}>
+                Low-data mode: {lowData ? 'On' : 'Off'}
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.sheetRow} onPress={handleBlockUser}>
               <Ionicons name="hand-left-outline" size={20} color={C.red} />
@@ -2551,7 +2661,7 @@ const styles = StyleSheet.create({
   videoViews:    { fontSize: 11, color: C.muted },
   cowatchMsgBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 7, backgroundColor: C.green, paddingVertical: 5, paddingHorizontal: 10, borderRadius: 8, alignSelf: 'flex-start' },
   cowatchMsgBtnText: { fontSize: 11, fontWeight: '700', color: '#000' },
-  videoPreviewBox: { width: 150, height: 100, borderRadius: 12, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center', gap: 6 },
+  videoPreviewBox: { width: 150, height: 100, borderRadius: 12, overflow: 'hidden', backgroundColor: C.card, alignItems: 'center', justifyContent: 'center', gap: 6 },
   videoPreviewLabel: { fontSize: 12, color: C.muted, fontWeight: '600' },
   reactionsRow:   { flexDirection: 'row', gap: 4, marginTop: 4, flexWrap: 'wrap' },
   reactionsRowMe: { justifyContent: 'flex-end' },
@@ -2567,6 +2677,8 @@ const styles = StyleSheet.create({
   replyBannerName:    { fontSize: 11, color: C.green, fontWeight: '700', marginBottom: 2 },
   replyBannerText:    { fontSize: 13, color: C.muted },
   replyCloseBtn:      { padding: 4 },
+  lowDataOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 12 },
+  lowDataText:    { color: '#fff', fontSize: 12, fontWeight: '700' },
   giftCard:     { alignItems: 'center', gap: 4, paddingVertical: 14, paddingHorizontal: 22, borderRadius: 18, borderWidth: 1, minWidth: 150 },
   giftCardMe:   { backgroundColor: 'rgba(245,197,24,0.12)', borderColor: C.gold },
   giftCardThem: { backgroundColor: C.card, borderColor: C.gold },
