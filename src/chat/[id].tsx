@@ -1,14 +1,18 @@
 // src/chat/[id].tsx
 // LumVibe — Direct Message Chat Screen
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
   StyleSheet, StatusBar, KeyboardAvoidingView,
   Platform, Modal, Alert, ActivityIndicator, Image,
   ScrollView, Dimensions, PermissionsAndroid, Linking,
 } from 'react-native';
-import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, createAudioPlayer } from 'expo-audio';
+import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+// ✅ NEW: already in your package.json — used for the in-app photo/video viewer
+// and a tiny tap-feedback buzz on the voice-note button.
+import { useVideoPlayer, VideoView as ExpoVideoView } from 'expo-video';
+import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 // ✅ NEW: lets startCall also ring the callee's GLOBAL signal channel
@@ -66,6 +70,35 @@ const C = {
   gold: '#f5c518', red: '#e53935', white: '#ffffff',
   muted: '#888888', muted2: '#555555',
 };
+
+// ✅ NEW: the SAME gifts, prices and coin→naira rate as the feed (videos.tsx),
+// so a gift looks and costs the same wherever it is sent.
+const COIN_TO_NGN = 150;
+function coinsToNGN(coins: number): string {
+  return `₦${(coins * COIN_TO_NGN).toLocaleString('en-NG')}`;
+}
+const GIFT_PACKAGES = [
+  { id: 'spark',        name: 'Spark',        icon: '✨', coins: 1,   color: '#ffdd55' },
+  { id: 'heart',        name: 'Heart',        icon: '❤️', coins: 3,   color: '#ff4757' },
+  { id: 'smile',        name: 'Smile',        icon: '😊', coins: 5,   color: '#ffd93d' },
+  { id: 'rose',         name: 'Rose',         icon: '🌹', coins: 10,  color: '#ff69b4' },
+  { id: 'candy',        name: 'Candy',        icon: '🍬', coins: 15,  color: '#ff85c8' },
+  { id: 'balloon',      name: 'Balloon',      icon: '🎈', coins: 20,  color: '#ff6b6b' },
+  { id: 'star',         name: 'Star',         icon: '⭐', coins: 25,  color: '#ffd700' },
+  { id: 'cupcake',      name: 'Cupcake',      icon: '🧁', coins: 30,  color: '#ffb6c1' },
+  { id: 'bouquet',      name: 'Bouquet',      icon: '💐', coins: 40,  color: '#ff8fab' },
+  { id: 'ice_cream',    name: 'Ice Cream',    icon: '🍦', coins: 50,  color: '#00bfff' },
+  { id: 'gift_box',     name: 'Gift Box',     icon: '🎁', coins: 60,  color: '#ff4d6d' },
+  { id: 'sparkler',     name: 'Sparkler',     icon: '🎇', coins: 70,  color: '#ffe066' },
+  { id: 'diamond_ring', name: 'Diamond Ring', icon: '💍', coins: 80,  color: '#00e5ff' },
+  { id: 'love_letter',  name: 'Love Letter',  icon: '💌', coins: 100, color: '#ff4d8f' },
+  { id: 'crown',        name: 'Crown',        icon: '👑', coins: 150, color: '#ffd700' },
+  { id: 'fireworks',    name: 'Fireworks',    icon: '🎆', coins: 200, color: '#ff6347' },
+  { id: 'rocket',       name: 'Rocket',       icon: '🚀', coins: 250, color: '#00ff88' },
+  { id: 'unicorn',      name: 'Unicorn',      icon: '🦄', coins: 300, color: '#c77dff' },
+  { id: 'castle',       name: 'Castle',       icon: '🏰', coins: 400, color: '#9d4edd' },
+  { id: 'trophy',       name: 'Trophy',       icon: '🏆', coins: 500, color: '#cd7f32' },
+];
 
 const QUICK_EMOJIS = ['😂','❤️','🔥','😭','🙌','💀','👀','🎬','⚡','✨','🎵','😍','💯','🤩','😎','🤣'];
 const REACTIONS    = ['❤️','😂','🔥','😮','😢','👏','💀','🙌'];
@@ -1120,22 +1153,36 @@ function subscribeToReactions(conversationId: string, onChange: () => void): Rea
 const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvllxm0wg';
 const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'Kinsta_unsigned';
 
-async function uploadToCloudinary(fileUri: string, type: 'voice' | 'image' | 'video'): Promise<string | null> {
-  try {
-    const ext      = type === 'voice' ? 'm4a' : type === 'video' ? 'mp4' : 'jpg';
-    const mime     = type === 'voice' ? 'audio/m4a' : type === 'video' ? 'video/mp4' : 'image/jpeg';
-    const resType  = type === 'image' ? 'image' : 'video';
-    const formData = new FormData();
-    formData.append('file', { uri: fileUri, type: mime, name: `${type}_${Date.now()}.${ext}` } as any);
-    formData.append('upload_preset', UPLOAD_PRESET);
-    formData.append('folder', `lumvibe_chat/${type}s`);
-    const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/${resType}/upload`, {
-      method: 'POST', body: formData,
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.secure_url || null;
-  } catch (error) { console.error('uploadToCloudinary error:', error); return null; }
+// ✅ CHANGED: XMLHttpRequest instead of fetch so we can report upload progress
+// and give up after a timeout (before, a bad network could leave "Uploading…"
+// spinning forever with no way to know).
+function uploadToCloudinary(fileUri: string, type: 'voice' | 'image' | 'video', onProgress?: (pct: number) => void): Promise<string | null> {
+  return new Promise(resolve => {
+    try {
+      const ext      = type === 'voice' ? 'm4a' : type === 'video' ? 'mp4' : 'jpg';
+      const mime     = type === 'voice' ? 'audio/m4a' : type === 'video' ? 'video/mp4' : 'image/jpeg';
+      const resType  = type === 'image' ? 'image' : 'video';
+      const formData = new FormData();
+      formData.append('file', { uri: fileUri, type: mime, name: `${type}_${Date.now()}.${ext}` } as any);
+      formData.append('upload_preset', UPLOAD_PRESET);
+      formData.append('folder', `lumvibe_chat/${type}s`);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/${resType}/upload`);
+      xhr.timeout = type === 'video' ? 180000 : 90000;
+      xhr.upload.onprogress = (e: any) => {
+        if (onProgress && e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        try {
+          if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText).secure_url || null);
+          else { console.warn('Cloudinary upload failed', xhr.status, (xhr.responseText || '').slice(0, 200)); resolve(null); }
+        } catch { resolve(null); }
+      };
+      xhr.onerror   = () => { console.warn('Cloudinary upload network error'); resolve(null); };
+      xhr.ontimeout = () => { console.warn('Cloudinary upload timed out'); resolve(null); };
+      xhr.send(formData);
+    } catch (error) { console.error('uploadToCloudinary error:', error); resolve(null); }
+  });
 }
 
 // ── usePresence ───────────────────────────────────────────────
@@ -1247,11 +1294,23 @@ function useMessages(
 
   const sendVoiceNote = useCallback(async (fileUri: string, duration: number): Promise<boolean> => {
     if (!conversationId || !currentUserId) return false;
-    setSending(true);
+    // ✅ NEW: the voice note appears in the chat INSTANTLY (greyed while it
+    // uploads), exactly like images and videos already do.
+    const tempId = `temp-${Date.now()}`;
+    setMessages(prev => [...prev, {
+      id: tempId, conversation_id: conversationId, sender_id: currentUserId,
+      message_type: 'voice', media_url: fileUri, media_duration: duration,
+      created_at: new Date().toISOString(),
+      is_read: false, is_deleted: false, is_disappearing: false, _uploading: true,
+    } as any]);
     try {
       const url = await uploadToCloudinary(fileUri, 'voice');
-      if (!url) return false;
+      if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
       const msg = await sendMediaMessage(conversationId, currentUserId, url, 'voice', duration);
+      setMessages(prev => {
+        const without = prev.filter(m => m.id !== tempId);
+        return msg && !without.find(m => m.id === msg.id) ? [...without, msg] : without;
+      });
       if (msg && otherUserId) {
         notifyNewMessage(
           otherUserId, currentUserId, senderUsername, senderDisplayName,
@@ -1259,7 +1318,10 @@ function useMessages(
         ).catch(e => console.warn('Push notify (message) failed:', e));
       }
       return !!msg;
-    } finally { setSending(false); }
+    } catch (e) {
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      return false;
+    }
   }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
   const sendImage = useCallback(async (fileUri: string): Promise<boolean> => {
@@ -1304,7 +1366,8 @@ function useMessages(
     } as any]);
     setSending(true);
     try {
-      const url = await uploadToCloudinary(fileUri, 'video');
+      const url = await uploadToCloudinary(fileUri, 'video', pct =>
+        setMessages(prev => prev.map(m => m.id === tempId ? ({ ...m, _progress: pct } as any) : m)));
       if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
       const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'video', duration, replyToId));
       if (ok && otherUserId) {
@@ -1326,14 +1389,14 @@ function useMessages(
     await addReaction(messageId, currentUserId, emoji);
   }, [currentUserId]);
 
-  // ✅ NEW: gifts in chat. Price and receiver are decided on the SERVER
-  // (public.send_chat_gift) — the app only says which gift in which chat.
-  const sendGift = useCallback(async (giftId: string): Promise<{ ok: boolean; error?: string; newBalance?: number }> => {
+  // ✅ NEW: gifts in chat — same server rules as feed gifts (send_gift):
+  // whole coins, 1–5,000. The receiver is decided on the SERVER.
+  const sendGift = useCallback(async (amount: number, label: string, icon: string): Promise<{ ok: boolean; error?: string; newBalance?: number }> => {
     if (!conversationId || !currentUserId) return { ok: false, error: 'Chat not ready.' };
     setSending(true);
     try {
       const { data, error } = await supabase.rpc('send_chat_gift', {
-        p_conversation_id: conversationId, p_gift_id: giftId,
+        p_conversation_id: conversationId, p_amount: amount, p_label: label, p_icon: icon,
       });
       if (error) return { ok: false, error: error.message };
       if (!data?.success) return { ok: false, error: data?.error || 'Could not send gift.' };
@@ -1531,6 +1594,58 @@ function videoPosterUrl(url?: string): string | undefined {
   return url.replace('/video/upload/', '/video/upload/so_0,w_360,q_auto:low/').replace(/\.[a-z0-9]+(\?.*)?$/i, '.jpg');
 }
 
+// ✅ NEW: in-app photo / video viewer (like WhatsApp): full screen, swipe left
+// and right through every photo and video in this chat, videos play with
+// controls, photos pinch-zoom on iPhone (Android shows them full-screen).
+function ViewerVideo({ uri, active, width, height }: { uri: string; active: boolean; width: number; height: number }) {
+  const player = useVideoPlayer(uri, p => { p.loop = false; });
+  useEffect(() => {
+    try { if (active) player.play(); else player.pause(); } catch (_) {}
+  }, [active, player]);
+  return <ExpoVideoView player={player} style={{ width, height: height * 0.8 }} contentFit="contain" nativeControls />;
+}
+
+function MediaViewer({ items, startIndex, onClose }: { items: Message[]; startIndex: number; onClose: () => void }) {
+  const { width, height } = Dimensions.get('window');
+  const [index, setIndex] = useState(startIndex);
+  const topPad = Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 52;
+  return (
+    <Modal visible animationType="fade" statusBarTranslucent onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+        <FlatList
+          data={items} horizontal pagingEnabled keyExtractor={m => m.id}
+          initialScrollIndex={startIndex}
+          getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
+          initialNumToRender={1} windowSize={3} showsHorizontalScrollIndicator={false}
+          onMomentumScrollEnd={e => setIndex(Math.round(e.nativeEvent.contentOffset.x / width))}
+          renderItem={({ item, index: i }) => (
+            <View style={{ width, height, alignItems: 'center', justifyContent: 'center' }}>
+              {item.message_type === 'video' ? (
+                i === index
+                  ? <ViewerVideo uri={item.media_url as string} active width={width} height={height} />
+                  : <Image source={{ uri: videoPosterUrl(item.media_url) }} style={{ width, height: height * 0.6 }} resizeMode="contain" />
+              ) : (
+                <ScrollView maximumZoomScale={4} minimumZoomScale={1} centerContent
+                  showsHorizontalScrollIndicator={false} showsVerticalScrollIndicator={false}
+                  contentContainerStyle={{ width, height, alignItems: 'center', justifyContent: 'center' }}>
+                  <Image source={{ uri: item.media_url }} style={{ width, height: height * 0.85 }} resizeMode="contain" />
+                </ScrollView>
+              )}
+            </View>
+          )}
+        />
+        <View style={[styles.viewerTop, { paddingTop: topPad }]} pointerEvents="box-none">
+          <TouchableOpacity onPress={onClose} style={styles.viewerClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="close" size={26} color="#fff" />
+          </TouchableOpacity>
+          <Text style={styles.viewerCount}>{index + 1} / {items.length}</Text>
+          <View style={{ width: 40 }} />
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 // ✅ NEW (low-data mode): Cloudinary can hand back a small, low-quality copy of
 // an image just by changing the URL — no extra upload, no install, and the
 // website can use the exact same trick. Non-Cloudinary URLs are left alone.
@@ -1541,14 +1656,14 @@ function lowDataImageUrl(url?: string): string | undefined {
 }
 
 // ── MESSAGE BUBBLE ────────────────────────────────────────────
-function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData }: {
+function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenMedia }: {
   message:     Message;
   isMe:        boolean;
   onLongPress: (msg: Message) => void;
   onCowatch?:  (msg: Message) => void;
   lowData?:    boolean;
+  onOpenMedia?: (msg: Message) => void;
 }) {
-  const [fullLoaded, setFullLoaded] = useState(false); // ✅ NEW: tap-to-load in low-data mode
   const [isPlaying,  setIsPlaying]  = useState(false);
   const [imgError,   setImgError]   = useState(false);
 
@@ -1581,7 +1696,7 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData }: {
       case 'voice':
         return (
           <TouchableOpacity
-            style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, styles.voiceBubble]}
+            style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, styles.voiceBubble, (message as any)._uploading && { opacity: 0.55 }]}
             onPress={playVoice} onLongPress={() => onLongPress(message)}
           >
             <View style={styles.voicePlayBtn}>
@@ -1596,7 +1711,8 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData }: {
 
       case 'image':
         return (
-          <TouchableOpacity onLongPress={() => onLongPress(message)}
+          <TouchableOpacity onLongPress={() => onLongPress(message)} activeOpacity={0.9}
+            onPress={() => { if (!(message as any)._uploading && !imgError) onOpenMedia?.(message); }}
             style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { padding: 3 }]}>
             {imgError
               ? <View style={styles.imgErrorBox}>
@@ -1605,16 +1721,16 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData }: {
                 </View>
               : (
                 <View>
-                  {lowData && !fullLoaded && !(message as any)._uploading ? (
-                    <TouchableOpacity activeOpacity={0.85} onPress={() => setFullLoaded(true)}>
+                  {lowData && !(message as any)._uploading ? (
+                    <View>
                       <Image source={{ uri: lowDataImageUrl(message.media_url) }}
                         style={styles.msgImage} resizeMode="cover" blurRadius={6}
                         onError={() => setImgError(true)} />
-                      <View style={styles.lowDataOverlay}>
+                      <View style={styles.lowDataOverlay} pointerEvents="none">
                         <Ionicons name="cloud-download-outline" size={22} color="#fff" />
-                        <Text style={styles.lowDataText}>Tap to load</Text>
+                        <Text style={styles.lowDataText}>Tap to view</Text>
                       </View>
-                    </TouchableOpacity>
+                    </View>
                   ) : (
                   <Image source={{ uri: message.media_url }}
                     style={styles.msgImage} resizeMode="cover"
@@ -1666,7 +1782,7 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData }: {
           return (
             <TouchableOpacity onLongPress={() => onLongPress(message)} activeOpacity={0.85}
               disabled={uploading || !message.media_url}
-              onPress={() => message.media_url && Linking.openURL(message.media_url).catch(() => Alert.alert('Could not open video'))}
+              onPress={() => message.media_url && onOpenMedia?.(message)}
               style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { padding: 3 }]}>
               {message.reply_to_message && (
                 <View style={[styles.replyPreview, isMe && styles.replyPreviewMe, { marginBottom: 3 }]}>
@@ -1679,7 +1795,7 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData }: {
                 {uploading
                   ? <ActivityIndicator color={C.green} size="small" />
                   : <Ionicons name={poster ? 'play-circle' : 'videocam'} size={poster ? 44 : 32} color={poster ? '#fff' : C.green} />}
-                <Text style={styles.videoPreviewLabel}>{uploading ? 'Uploading…' : (message.reply_to_message ? 'Video reply' : 'Video')}</Text>
+                <Text style={styles.videoPreviewLabel}>{uploading ? `Uploading${(message as any)._progress != null ? ' ' + (message as any)._progress + '%' : '…'}` : (message.reply_to_message ? 'Video reply' : 'Video')}</Text>
               </View>
             </TouchableOpacity>
           );
@@ -1847,7 +1963,7 @@ export default function ChatScreen() {
     };
   }, [navigation]);
 
-  const { user, userProfile } = useAuthStore();
+  const { user, userProfile, loadProfile } = useAuthStore();
   const flatRef = useRef<FlatList>(null);
 
   const [inputText,      setInputText]      = useState('');
@@ -1878,35 +1994,6 @@ export default function ChatScreen() {
     if (error) { setLowData(!next); Alert.alert('Could not save', error.message); }
   }, [lowData, user?.id]);
 
-  // ✅ NEW: gifts
-  const [showGifts,   setShowGifts]   = useState(false);
-  const [giftList,    setGiftList]    = useState<{ id: string; name: string; emoji: string; coin_cost: number }[]>([]);
-  const [myCoins,     setMyCoins]     = useState<number | null>(null);
-  const [giftBusyId,  setGiftBusyId]  = useState<string | null>(null);
-
-  const openGifts = useCallback(async () => {
-    setShowGifts(true);
-    const [g, me] = await Promise.all([
-      supabase.from('gift_emojis').select('id, name, emoji, coin_cost').eq('is_active', true).order('sort_order'),
-      user?.id ? supabase.from('users').select('coins').eq('id', user.id).single() : Promise.resolve({ data: null } as any),
-    ]);
-    if (g.data) setGiftList(g.data as any);
-    if (me.data) setMyCoins(Number((me.data as any).coins) || 0);
-  }, [user?.id]);
-
-  const handleSendGift = useCallback((gift: { id: string; name: string; emoji: string; coin_cost: number }) => {
-    // confirm first so nobody sends an expensive gift by accident
-    Alert.alert(`Send ${gift.emoji} ${gift.name}?`, `This costs ${gift.coin_cost} coin${gift.coin_cost === 1 ? '' : 's'}. Gifts can't be refunded.`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Send', onPress: async () => {
-        setGiftBusyId(gift.id);
-        const r = await sendGift(gift.id);
-        setGiftBusyId(null);
-        if (r.ok) { if (typeof r.newBalance === 'number') setMyCoins(r.newBalance); setShowGifts(false); }
-        else Alert.alert('Gift not sent', r.error || 'Please try again.');
-      } },
-    ]);
-  }, [sendGift]);
 
   // FIX: expo-audio recorder replaces expo-av Audio.Recording
   const recorder      = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -1928,6 +2015,52 @@ export default function ChatScreen() {
   );
 
   const displayName = userProfile?.display_name || userProfile?.username || 'LumVibe User';
+
+  // ✅ NEW: in-app photo/video viewer
+  const [viewerId, setViewerId] = useState<string | null>(null);
+  const mediaItems = useMemo(() => messages.filter(m =>
+    (m.message_type === 'image' || m.message_type === 'video') &&
+    !!m.media_url && !(m as any)._uploading && !m.is_deleted && !m.shared_video_id), [messages]);
+  const viewerStart = viewerId ? mediaItems.findIndex(m => m.id === viewerId) : -1;
+
+  // ✅ NEW: gifts — same list, prices, custom amount and coin→naira preview as
+  // the feed gift sheet in videos.tsx.
+  const [showGifts,        setShowGifts]        = useState(false);
+  const [customGiftMode,   setCustomGiftMode]   = useState(false);
+  const [customGiftAmount, setCustomGiftAmount] = useState('');
+  const [giftBusy,         setGiftBusy]         = useState(false);
+  const myCoins = Number((userProfile as any)?.coins) || 0;
+
+  const closeGifts = useCallback(() => { setShowGifts(false); setCustomGiftMode(false); setCustomGiftAmount(''); }, []);
+  const goBuyCoins = useCallback(() => {
+    closeGifts();
+    setTimeout(() => navigation.navigate('BuyCoins'), 300);
+  }, [closeGifts, navigation]);
+
+  const sendGiftAmount = useCallback(async (amount: number, label: string, icon: string) => {
+    if (giftBusy) return;
+    if (amount > myCoins) {
+      Alert.alert('Insufficient coins', `You need ${amount} coins but only have ${myCoins.toFixed(0)}.`, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Top up wallet', onPress: goBuyCoins },
+      ]);
+      return;
+    }
+    setGiftBusy(true);
+    const r = await sendGift(amount, label, icon);
+    setGiftBusy(false);
+    if (!r.ok) { Alert.alert('Could not send gift', r.error || 'Please try again.'); return; }
+    closeGifts();
+    try { await loadProfile?.(); } catch (_) {}
+  }, [giftBusy, myCoins, sendGift, closeGifts, goBuyCoins, loadProfile]);
+
+  const handleSendCustomGift = useCallback(() => {
+    const amount = parseFloat(customGiftAmount);
+    if (isNaN(amount) || amount < 10)  { Alert.alert('Invalid Amount', 'Minimum 10 coins'); return; }
+    if (!Number.isInteger(amount))     { Alert.alert('Invalid Amount', 'Please enter a whole number of coins'); return; }
+    if (amount > 5000)                 { Alert.alert('Invalid Amount', 'Maximum 5,000 coins (₦750,000)'); return; }
+    sendGiftAmount(amount, 'custom gift', '🎁');
+  }, [customGiftAmount, sendGiftAmount]);
 
   const {
     callState, incomingCall, localVideoTrack, remoteVideoTrack,
@@ -2154,58 +2287,93 @@ export default function ChatScreen() {
     });
     if (result.canceled || !result.assets[0]) return;
     setUploadingVideo(true);
-    try { await sendVideo(result.assets[0].uri); }
-    finally { setUploadingVideo(false); }
+    try {
+      const ok = await sendVideo(result.assets[0].uri);
+      if (!ok) Alert.alert('Video not sent', 'Please check your connection and try again.');
+    } finally { setUploadingVideo(false); }
   }, [sendVideo]);
 
-  // FIX: expo-audio recording pattern.
-  // FIX (real bug — recording never stops): startRecording awaits mic
-  // permission + prepareToRecordAsync before actually calling
-  // recorder.record(). If the user does a quick tap-and-release (a short
-  // voice note), onPressOut → stopRecording could fire and finish BEFORE
-  // that await chain resolves — so stopRecording ran on a recorder that
-  // hadn't started yet (a no-op), and moments later startRecording's
-  // record() call kicked in with nothing left to ever stop it. That's
-  // exactly "release the button but it keeps recording." These two refs
-  // close that race: if stop is requested while start is still in-flight,
-  // start bails out the instant its await resolves instead of recording.
-  const stopRequestedRef = useRef(false);
-  const isStartingRef    = useRef(false);
+  // ✅ REWRITTEN (voice notes): the old version needed you to HOLD a tiny 40px
+  // button, awaited permission + prepare on every press (slow start), used a
+  // stale `recordingDur` from a closure, and never set the audio mode. Now:
+  //   • TAP the mic once → it starts instantly (the recorder is pre-warmed),
+  //   • TAP the green ✓ to send, or the red 🗑 to cancel,
+  //   • duration comes from a clock (not a stale state value),
+  //   • the voice note shows in the chat immediately while it uploads.
+  const isRecordingRef = useRef(false);
+  const recStartRef    = useRef(0);
+  const recReadyRef    = useRef(false);
+  const recBusyRef     = useRef(false);
+  const finishRef      = useRef<(send: boolean) => void>(() => {});
 
-  const startRecording = useCallback(async () => {
-    stopRequestedRef.current = false;
-    isStartingRef.current = true;
+  const warmRecorder = useCallback(async (): Promise<boolean> => {
     try {
       const status = await AudioModule.requestRecordingPermissionsAsync();
-      if (!status.granted) {
-        Alert.alert('Permission needed', 'Please allow microphone access.');
-        return;
-      }
+      if (!status.granted) return false;
+      try { await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true }); } catch (_) {}
       await recorder.prepareToRecordAsync();
-      if (stopRequestedRef.current) return; // user already let go — don't start at all
-      recorder.record();
-      setIsRecording(true);
-      setRecordingDur(0);
-      recordTimerRef.current = setInterval(() => setRecordingDur(p => p + 1), 1000);
+      recReadyRef.current = true;
+      return true;
     } catch (e) {
-      console.error('startRecording error:', e);
-    } finally {
-      isStartingRef.current = false;
+      console.warn('warmRecorder failed:', e);
+      recReadyRef.current = false;
+      return false;
     }
   }, [recorder]);
 
-  const stopRecording = useCallback(async () => {
-    stopRequestedRef.current = true;
-    if (isStartingRef.current) return; // nothing recording yet — startRecording will bail itself out
+  const startRecording = useCallback(async () => {
+    if (recBusyRef.current || isRecordingRef.current) return;
+    recBusyRef.current = true;
     try {
-      if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+      if (!recReadyRef.current) {
+        const ok = await warmRecorder();
+        if (!ok) { Alert.alert('Permission needed', 'Please allow microphone access.'); return; }
+      }
+      recorder.record();
+      recReadyRef.current = false;
+      isRecordingRef.current = true;
+      recStartRef.current = Date.now();
+      setRecordingDur(0);
+      setIsRecording(true);
+      try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch (_) {}
+      recordTimerRef.current = setInterval(() => {
+        const d = Math.floor((Date.now() - recStartRef.current) / 1000);
+        setRecordingDur(d);
+        if (d >= 300) finishRef.current(true); // 5-minute cap
+      }, 250);
+    } catch (e) {
+      console.error('startRecording error:', e);
+      isRecordingRef.current = false; setIsRecording(false);
+      recReadyRef.current = false;
+    } finally { recBusyRef.current = false; }
+  }, [recorder, warmRecorder]);
+
+  const finishRecording = useCallback(async (send: boolean) => {
+    if (!isRecordingRef.current) return;
+    isRecordingRef.current = false;
+    if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
+    setIsRecording(false);
+    const dur = Math.max(0, Math.round((Date.now() - recStartRef.current) / 1000));
+    try {
       await recorder.stop();
       const uri = recorder.uri;
-      setIsRecording(false);
-      if (uri && recordingDur > 0) await sendVoiceNote(uri, recordingDur);
-      setRecordingDur(0);
-    } catch (e) { console.error('stopRecording error:', e); }
-  }, [recorder, recordingDur, sendVoiceNote]);
+      try { await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }); } catch (_) {}
+      try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch (_) {}
+      if (send && uri) {
+        if (dur < 1) Alert.alert('Too short', 'Hold the idea a little longer — voice notes need at least 1 second.');
+        else sendVoiceNote(uri, dur).then(ok => { if (!ok) Alert.alert('Voice note not sent', 'Please check your connection and try again.'); });
+      }
+    } catch (e) { console.error('finishRecording error:', e); }
+    setRecordingDur(0);
+    warmRecorder(); // get ready for the next one in the background
+  }, [recorder, sendVoiceNote, warmRecorder]);
+  useEffect(() => { finishRef.current = finishRecording; }, [finishRecording]);
+
+  // stop cleanly if you leave the chat mid-recording
+  useEffect(() => () => {
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    if (isRecordingRef.current) { isRecordingRef.current = false; try { recorder.stop(); } catch (_) {} }
+  }, []);
 
   const toggleVanish = useCallback(async () => {
     const newVal = !vanishOn; setVanishOn(newVal);
@@ -2332,6 +2500,7 @@ export default function ChatScreen() {
               onLongPress={handleLongPress}
               onCowatch={(msg) => openCowatch()}
               lowData={lowData}
+              onOpenMedia={(m) => setViewerId(m.id)}
             />
           )}
           contentContainerStyle={[styles.messagesList, { flexGrow: 1 }]}
@@ -2397,7 +2566,7 @@ export default function ChatScreen() {
             <Text style={styles.attachChipText}>{uploadingVideo ? 'Uploading…' : 'Video'}</Text>
           </TouchableOpacity>
           {/* ✅ NEW: real gift that turns into money for the receiver */}
-          <TouchableOpacity style={styles.attachChip} onPress={openGifts}>
+          <TouchableOpacity style={styles.attachChip} onPress={() => setShowGifts(true)}>
             <Ionicons name="gift-outline" size={13} color={C.gold} />
             <Text style={[styles.attachChipText, { color: C.gold }]}>Gift</Text>
           </TouchableOpacity>
@@ -2405,18 +2574,17 @@ export default function ChatScreen() {
 
         <View style={styles.inputBar}>
           <TouchableOpacity
-            style={[styles.inputIconBtn, isRecording && { borderColor: C.red }]}
-            onPressIn={startRecording} onPressOut={stopRecording}
+            style={[styles.inputIconBtn, isRecording && { borderColor: C.red, backgroundColor: 'rgba(229,57,53,0.12)' }]}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            onPress={isRecording ? () => finishRecording(false) : startRecording}
           >
             {isRecording
-              ? <Text style={{ color: C.red, fontSize: 10, fontWeight: '700' }}>
-                  {formatSecs(recordingDur)}
-                </Text>
-              : <Ionicons name="mic-outline" size={18} color={C.muted} />}
+              ? <Ionicons name="trash-outline" size={19} color={C.red} />
+              : <Ionicons name="mic-outline" size={20} color={C.green} />}
           </TouchableOpacity>
           <View style={[styles.inputWrap, isRecording && { borderColor: C.red }]}>
             {isRecording
-              ? <Text style={styles.recordingText}>🔴 Recording… release to send</Text>
+              ? <Text style={styles.recordingText}>🔴 {formatSecs(recordingDur)}  Recording… tap ✓ to send</Text>
               : <TextInput
                   style={styles.inputField}
                   placeholder={`Message ${(otherName || 'them').split(' ')[0]}…`}
@@ -2440,39 +2608,80 @@ export default function ChatScreen() {
             )}
           </View>
           <TouchableOpacity
-            style={[styles.sendBtn, (sending || !inputText.trim()) && { opacity: 0.45 }]}
-            onPress={handleSend} disabled={sending || !inputText.trim()}
+            style={[styles.sendBtn, (isRecording ? false : (sending || !inputText.trim())) && { opacity: 0.45 }]}
+            onPress={isRecording ? () => finishRecording(true) : handleSend}
+            disabled={isRecording ? false : (sending || !inputText.trim())}
           >
-            {sending
+            {sending && !isRecording
               ? <ActivityIndicator color="#000" size="small" />
-              : <Ionicons name="send" size={17} color="#000" />}
+              : <Ionicons name={isRecording ? 'checkmark' : 'send'} size={isRecording ? 22 : 17} color="#000" />}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
 
       {/* Reaction Picker */}
-      {/* ✅ NEW: gift tray */}
-      <Modal visible={showGifts} transparent animationType="slide" onRequestClose={() => setShowGifts(false)}>
-        <TouchableOpacity style={styles.giftBackdrop} activeOpacity={1} onPress={() => setShowGifts(false)} />
-        <View style={styles.giftSheet}>
-          <View style={styles.giftSheetHead}>
-            <Text style={styles.giftSheetTitle}>Send a gift</Text>
-            <Text style={styles.giftSheetBal}>{myCoins === null ? '…' : `${myCoins} coins`}</Text>
-          </View>
-          <ScrollView contentContainerStyle={styles.giftGrid}>
-            {giftList.map(g => {
-              const cant = myCoins !== null && myCoins < g.coin_cost;
-              return (
-                <TouchableOpacity key={g.id} disabled={!!giftBusyId}
-                  style={[styles.giftItem, cant && { opacity: 0.4 }]}
-                  onPress={() => cant ? Alert.alert('Not enough coins', `You need ${g.coin_cost} coins for this gift.`) : handleSendGift(g)}>
-                  {giftBusyId === g.id ? <ActivityIndicator color={C.green} /> : <Text style={{ fontSize: 34 }}>{g.emoji}</Text>}
-                  <Text style={styles.giftItemName}>{g.name}</Text>
-                  <Text style={styles.giftItemCost}>{g.coin_cost} coins</Text>
+      {viewerId && viewerStart >= 0 && (
+        <MediaViewer items={mediaItems} startIndex={viewerStart} onClose={() => setViewerId(null)} />
+      )}
+
+      {/* ✅ NEW: gift sheet — same look and flow as the feed (videos.tsx) */}
+      <Modal visible={showGifts} transparent animationType="slide" onRequestClose={closeGifts}>
+        <View style={styles.giftBackdrop}>
+          <View style={styles.giftModal}>
+            <View style={styles.giftModalHeader}>
+              <Text style={styles.giftModalTitle} numberOfLines={1}>Send gift to {otherName || 'them'}</Text>
+              <TouchableOpacity onPress={closeGifts} style={{ padding: 4 }}>
+                <Ionicons name="close" size={24} color="#fff" />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.giftBalance}>
+              <Ionicons name="diamond" size={18} color="#ffd700" />
+              <Text style={styles.giftBalanceText}>{myCoins.toFixed(0)} coins ({coinsToNGN(myCoins)})</Text>
+            </View>
+            {!customGiftMode ? (
+              <>
+                <ScrollView style={{ padding: 16 }}>
+                  {GIFT_PACKAGES.map(g => (
+                    <TouchableOpacity key={g.id} disabled={giftBusy} activeOpacity={0.7}
+                      style={[styles.giftPackage, { borderColor: g.color }, giftBusy && { opacity: 0.5 }]}
+                      onPress={() => sendGiftAmount(g.coins, g.name, g.icon)}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+                        <Text style={{ fontSize: 40 }}>{g.icon}</Text>
+                        <View style={{ gap: 4 }}>
+                          <Text style={styles.giftName}>{g.name}</Text>
+                          <Text style={styles.giftAmount}>{g.coins} coins</Text>
+                        </View>
+                      </View>
+                      <Ionicons name="chevron-forward" size={24} color={g.color} />
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <TouchableOpacity style={styles.customGiftButton} activeOpacity={0.7} onPress={() => setCustomGiftMode(true)}>
+                  <Ionicons name="create-outline" size={20} color="#00ff88" />
+                  <Text style={styles.customGiftButtonText}>Custom amount</Text>
                 </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
+              </>
+            ) : (
+              <View style={{ padding: 20 }}>
+                <Text style={styles.customGiftLabel}>Enter amount (coins)</Text>
+                <TextInput style={styles.customGiftInput} value={customGiftAmount} onChangeText={setCustomGiftAmount}
+                  placeholder="10" placeholderTextColor="#555" keyboardType="number-pad" autoFocus />
+                {!!customGiftAmount && !isNaN(parseFloat(customGiftAmount)) && (
+                  <Text style={styles.customGiftPreview}>{coinsToNGN(parseFloat(customGiftAmount))}</Text>
+                )}
+                <View style={{ flexDirection: 'row', gap: 12, marginTop: 24 }}>
+                  <TouchableOpacity style={[styles.customGiftAction, { backgroundColor: '#222' }]}
+                    onPress={() => { setCustomGiftMode(false); setCustomGiftAmount(''); }}>
+                    <Text style={{ color: '#fff', fontWeight: '700' }}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity disabled={giftBusy} style={[styles.customGiftAction, { backgroundColor: '#00ff88' }, giftBusy && { opacity: 0.5 }]}
+                    onPress={handleSendCustomGift}>
+                    {giftBusy ? <ActivityIndicator color="#000" /> : <Text style={{ color: '#000', fontWeight: '800' }}>Send gift</Text>}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </View>
         </View>
       </Modal>
 
@@ -2677,22 +2886,31 @@ const styles = StyleSheet.create({
   replyBannerName:    { fontSize: 11, color: C.green, fontWeight: '700', marginBottom: 2 },
   replyBannerText:    { fontSize: 13, color: C.muted },
   replyCloseBtn:      { padding: 4 },
+  viewerTop:   { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingBottom: 10, backgroundColor: 'rgba(0,0,0,0.35)' },
+  viewerClose: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  viewerCount: { color: '#fff', fontSize: 14, fontWeight: '700' },
   lowDataOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 12 },
   lowDataText:    { color: '#fff', fontSize: 12, fontWeight: '700' },
+  giftBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  giftModal: { backgroundColor: '#0a0a0a', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 30, maxHeight: '85%' },
+  giftModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
+  giftModalTitle: { color: '#fff', fontSize: 18, fontWeight: '600', flex: 1 },
+  giftBalance: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingVertical: 12 },
+  giftBalanceText: { color: '#ffd700', fontSize: 14, fontWeight: '700' },
+  giftPackage: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, backgroundColor: '#1a1a1a', borderWidth: 1.5, borderRadius: 16, marginBottom: 12 },
+  giftName: { color: '#fff', fontSize: 18, fontWeight: '600' },
+  giftAmount: { color: '#00ff88', fontSize: 14, fontWeight: '500' },
+  customGiftButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 16, marginHorizontal: 16, borderRadius: 12, borderWidth: 1, borderColor: '#00ff88' },
+  customGiftButtonText: { color: '#00ff88', fontSize: 16, fontWeight: '600' },
+  customGiftLabel: { color: '#fff', fontSize: 16, fontWeight: '600', marginBottom: 12 },
+  customGiftInput: { backgroundColor: '#1a1a1a', color: '#fff', fontSize: 24, fontWeight: '600', padding: 16, borderRadius: 12, borderWidth: 2, borderColor: '#00ff88' },
+  customGiftPreview: { color: '#ffd700', fontSize: 16, fontWeight: '700', textAlign: 'center', marginTop: 8 },
+  customGiftAction: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 16, borderRadius: 12 },
   giftCard:     { alignItems: 'center', gap: 4, paddingVertical: 14, paddingHorizontal: 22, borderRadius: 18, borderWidth: 1, minWidth: 150 },
   giftCardMe:   { backgroundColor: 'rgba(245,197,24,0.12)', borderColor: C.gold },
   giftCardThem: { backgroundColor: C.card, borderColor: C.gold },
   giftCardTitle:{ fontSize: 13, fontWeight: '700', color: C.white },
   giftCardCoins:{ fontSize: 11.5, fontWeight: '700', color: C.gold },
-  giftBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' },
-  giftSheet:    { backgroundColor: C.card, borderTopLeftRadius: 22, borderTopRightRadius: 22, maxHeight: '60%', paddingBottom: 24 },
-  giftSheetHead:{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16 },
-  giftSheetTitle:{ fontSize: 16, fontWeight: '800', color: C.white },
-  giftSheetBal: { fontSize: 13, fontWeight: '700', color: C.gold },
-  giftGrid:     { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 10, gap: 8, justifyContent: 'center' },
-  giftItem:     { width: '30%', alignItems: 'center', gap: 3, paddingVertical: 12, borderRadius: 14, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border },
-  giftItemName: { fontSize: 12, fontWeight: '600', color: C.white },
-  giftItemCost: { fontSize: 11, fontWeight: '700', color: C.gold },
   emojiPanel: { backgroundColor: C.card, borderTopWidth: 1, borderTopColor: C.border, padding: 10 },
   emojiBtn:   { padding: 4, borderRadius: 8 },
   attachRow: { flexShrink: 0, maxHeight: 44, paddingVertical: 7 },
