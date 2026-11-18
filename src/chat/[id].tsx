@@ -13,6 +13,8 @@ import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, create
 // and a tiny tap-feedback buzz on the voice-note button.
 import { useVideoPlayer, VideoView as ExpoVideoView } from 'expo-video';
 import * as Haptics from 'expo-haptics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import NetInfo from '@react-native-community/netinfo';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 // ✅ NEW: lets startCall also ring the callee's GLOBAL signal channel
@@ -1156,7 +1158,7 @@ const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'Kinst
 // ✅ CHANGED: XMLHttpRequest instead of fetch so we can report upload progress
 // and give up after a timeout (before, a bad network could leave "Uploading…"
 // spinning forever with no way to know).
-function uploadToCloudinary(fileUri: string, type: 'voice' | 'image' | 'video', onProgress?: (pct: number) => void): Promise<string | null> {
+function uploadToCloudinary(fileUri: string, type: 'voice' | 'image' | 'video', onProgress?: (pct: number) => void, handle?: { abort?: () => void }): Promise<string | null> {
   return new Promise(resolve => {
     try {
       const ext      = type === 'voice' ? 'm4a' : type === 'video' ? 'mp4' : 'jpg';
@@ -1179,6 +1181,8 @@ function uploadToCloudinary(fileUri: string, type: 'voice' | 'image' | 'video', 
         } catch { resolve(null); }
       };
       xhr.onerror   = () => { console.warn('Cloudinary upload network error'); resolve(null); };
+      xhr.onabort   = () => resolve(null);
+      if (handle) handle.abort = () => { try { xhr.abort(); } catch (_) {} };
       xhr.ontimeout = () => { console.warn('Cloudinary upload timed out'); resolve(null); };
       xhr.send(formData);
     } catch (error) { console.error('uploadToCloudinary error:', error); resolve(null); }
@@ -1292,97 +1296,136 @@ function useMessages(
     } finally { setSending(false); }
   }, [conversationId, currentUserId, disappearingEnabled, disappearingDuration, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
-  const sendVoiceNote = useCallback(async (fileUri: string, duration: number): Promise<boolean> => {
-    if (!conversationId || !currentUserId) return false;
-    // ✅ NEW: the voice note appears in the chat INSTANTLY (greyed while it
-    // uploads), exactly like images and videos already do.
-    const tempId = `temp-${Date.now()}`;
-    setMessages(prev => [...prev, {
-      id: tempId, conversation_id: conversationId, sender_id: currentUserId,
-      message_type: 'voice', media_url: fileUri, media_duration: duration,
-      created_at: new Date().toISOString(),
-      is_read: false, is_deleted: false, is_disappearing: false, _uploading: true,
-    } as any]);
+  // ═════════ ✅ NEW: OUTBOX — photos, videos and voice notes ═════════
+  // Before: sending set one global "sending" flag (so you could not type while
+  // a voice note uploaded), and a failed upload simply vanished. Now every
+  // item uploads on its own: you can keep typing, recording and sending other
+  // things; a failed item stays in the chat (playable) with a Retry button, is
+  // saved on the phone so it survives closing the app, and is retried
+  // automatically when the internet comes back.
+  const [outbox, setOutbox] = useState<any[]>([]);
+  const outboxRef       = useRef<any[]>([]);
+  const abortersRef     = useRef<Record<string, { abort?: () => void }>>({});
+  const cancelledRef    = useRef<Set<string>>(new Set());
+  const uploadedUrlRef  = useRef<Record<string, string>>({});
+  const persistChain    = useRef<Promise<void>>(Promise.resolve());
+  const outboxKey       = conversationId ? `lumvibe_outbox_${conversationId}` : null;
+  useEffect(() => { outboxRef.current = outbox; }, [outbox]);
+
+  const persistOutbox = useCallback((mutate: (list: any[]) => any[]) => {
+    if (!outboxKey) return;
+    persistChain.current = persistChain.current.then(async () => {
+      try {
+        const raw = await AsyncStorage.getItem(outboxKey);
+        await AsyncStorage.setItem(outboxKey, JSON.stringify(mutate(raw ? JSON.parse(raw) : [])));
+      } catch (_) {}
+    });
+  }, [outboxKey]);
+
+  const patchOutbox = useCallback((id: string, patch: any) =>
+    setOutbox(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m)), []);
+
+  const runJob = useCallback(async (job: any) => {
+    if (!conversationId || !currentUserId) return;
+    if (abortersRef.current[job.id]) return;            // already uploading
+    cancelledRef.current.delete(job.id);
+    const handle: { abort?: () => void } = {};
+    abortersRef.current[job.id] = handle;
+    patchOutbox(job.id, { _uploading: true, _failed: false, _progress: 0 });
+    let url: string | null = uploadedUrlRef.current[job.id] || null;
     try {
-      const url = await uploadToCloudinary(fileUri, 'voice');
-      if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
-      const msg = await sendMediaMessage(conversationId, currentUserId, url, 'voice', duration);
-      setMessages(prev => {
-        const without = prev.filter(m => m.id !== tempId);
-        return msg && !without.find(m => m.id === msg.id) ? [...without, msg] : without;
-      });
-      if (msg && otherUserId) {
-        notifyNewMessage(
-          otherUserId, currentUserId, senderUsername, senderDisplayName,
-          '🎤 Voice message', conversationId, senderPhoto
-        ).catch(e => console.warn('Push notify (message) failed:', e));
+      if (!url) {
+        url = await uploadToCloudinary(job.uri, job.kind, pct => patchOutbox(job.id, { _progress: pct }), handle);
+        if (url) uploadedUrlRef.current[job.id] = url;
       }
-      return !!msg;
-    } catch (e) {
-      setMessages(prev => prev.filter(m => m.id !== tempId));
-      return false;
+    } catch (_) {}
+    delete abortersRef.current[job.id];
+    if (cancelledRef.current.has(job.id)) { cancelledRef.current.delete(job.id); return; }
+    if (!url) { patchOutbox(job.id, { _uploading: false, _failed: true }); return; }
+    const msg = await sendMediaMessage(conversationId, currentUserId, url, job.kind, job.duration, job.replyToId);
+    if (!msg) { patchOutbox(job.id, { _uploading: false, _failed: true }); return; }
+    delete uploadedUrlRef.current[job.id];
+    setOutbox(prev => prev.filter(m => m.id !== job.id));
+    setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg]);
+    persistOutbox(list => list.filter(j => j.id !== job.id));
+    if (otherUserId) {
+      const label = job.kind === 'voice' ? '🎤 Voice message' : job.kind === 'video' ? (job.replyToId ? '🎥 Video reply' : '🎥 Video') : '📷 Photo';
+      notifyNewMessage(
+        otherUserId, currentUserId, senderUsername, senderDisplayName, label, conversationId, senderPhoto
+      ).catch(e => console.warn('Push notify (message) failed:', e));
     }
-  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
+  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto, patchOutbox, persistOutbox]);
 
-  const sendImage = useCallback(async (fileUri: string): Promise<boolean> => {
+  const enqueueMedia = useCallback((kind: 'voice' | 'image' | 'video', uri: string, duration?: number, replyToId?: string): boolean => {
     if (!conversationId || !currentUserId) return false;
-    // NEW: same instant local preview as circle/[id].tsx and group/[id].tsx —
-    // shows the picked image immediately while it uploads, instead of a
-    // blank wait. Removed once the real row lands via the realtime
-    // subscription, or on failure.
-    const tempId = `temp-${Date.now()}`;
-    setMessages(prev => [...prev, {
-      id: tempId, conversation_id: conversationId, sender_id: currentUserId,
-      message_type: 'image', media_url: fileUri, created_at: new Date().toISOString(),
-      is_read: false, is_deleted: false, is_disappearing: false, _uploading: true,
-    } as any]);
-    setSending(true);
-    try {
-      const url = await uploadToCloudinary(fileUri, 'image');
-      if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
-      const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'image'));
-      if (ok && otherUserId) {
-        notifyNewMessage(
-          otherUserId, currentUserId, senderUsername, senderDisplayName,
-          '📷 Photo', conversationId, senderPhoto
-        ).catch(e => console.warn('Push notify (message) failed:', e));
-      }
-      setMessages(prev => prev.filter(m => m.id !== tempId));
-      return ok;
-    } catch (e) {
-      setMessages(prev => prev.filter(m => m.id !== tempId));
-      return false;
-    } finally { setSending(false); }
-  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
+    const job = {
+      id: `temp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      kind, uri, duration, replyToId, createdAt: new Date().toISOString(),
+    };
+    setOutbox(prev => [...prev, jobToMessage(job, conversationId, currentUserId, false)]);
+    persistOutbox(list => [...list, job]);
+    runJob(job);
+    return true;
+  }, [conversationId, currentUserId, persistOutbox, runJob]);
 
-  const sendVideo = useCallback(async (fileUri: string, replyToId?: string, duration?: number): Promise<boolean> => {
-    if (!conversationId || !currentUserId) return false;
-    // Same instant preview pattern as sendImage above.
-    const tempId = `temp-${Date.now()}`;
-    setMessages(prev => [...prev, {
-      id: tempId, conversation_id: conversationId, sender_id: currentUserId,
-      message_type: 'video', media_url: fileUri, created_at: new Date().toISOString(),
-      is_read: false, is_deleted: false, is_disappearing: false, _uploading: true,
-    } as any]);
-    setSending(true);
-    try {
-      const url = await uploadToCloudinary(fileUri, 'video', pct =>
-        setMessages(prev => prev.map(m => m.id === tempId ? ({ ...m, _progress: pct } as any) : m)));
-      if (!url) { setMessages(prev => prev.filter(m => m.id !== tempId)); return false; }
-      const ok = !!(await sendMediaMessage(conversationId, currentUserId, url, 'video', duration, replyToId));
-      if (ok && otherUserId) {
-        notifyNewMessage(
-          otherUserId, currentUserId, senderUsername, senderDisplayName,
-          replyToId ? '🎥 Video reply' : '🎥 Video', conversationId, senderPhoto
-        ).catch(e => console.warn('Push notify (message) failed:', e));
+  const sendVoiceNote = useCallback(async (fileUri: string, duration: number): Promise<boolean> =>
+    enqueueMedia('voice', fileUri, duration), [enqueueMedia]);
+  const sendImage = useCallback(async (fileUri: string): Promise<boolean> =>
+    enqueueMedia('image', fileUri), [enqueueMedia]);
+  const sendVideo = useCallback(async (fileUri: string, replyToId?: string, duration?: number): Promise<boolean> =>
+    enqueueMedia('video', fileUri, duration, replyToId), [enqueueMedia]);
+
+  const retryUpload = useCallback((m: any) => {
+    const found = outboxRef.current.find(x => x.id === m.id);
+    if (found?._job) runJob(found._job);
+  }, [runJob]);
+
+  const cancelUpload = useCallback((m: any) => {
+    const id = m.id as string;
+    cancelledRef.current.add(id);
+    abortersRef.current[id]?.abort?.();
+    delete abortersRef.current[id];
+    delete uploadedUrlRef.current[id];
+    setOutbox(prev => prev.filter(x => x.id !== id));
+    persistOutbox(list => list.filter(j => j.id !== id));
+  }, [persistOutbox]);
+
+  // bring back anything that was still unsent when the app was closed
+  useEffect(() => {
+    if (!outboxKey || !conversationId || !currentUserId) return;
+    let dead = false;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(outboxKey);
+        const list: any[] = raw ? JSON.parse(raw) : [];
+        if (dead || !list.length) return;
+        setOutbox(prev => {
+          const have = new Set(prev.map(m => m.id));
+          return [...prev, ...list.filter(j => !have.has(j.id)).map(j => jobToMessage(j, conversationId, currentUserId, true))];
+        });
+        const net = await NetInfo.fetch();
+        if (!dead && net.isConnected && net.isInternetReachable !== false) list.forEach(j => runJob(j));
+      } catch (_) {}
+    })();
+    return () => { dead = true; };
+  }, [outboxKey, conversationId, currentUserId, runJob]);
+
+  // when the internet comes back, retry whatever failed
+  useEffect(() => {
+    let wasOnline: boolean | null = null;
+    const unsub = NetInfo.addEventListener(state => {
+      const online = !!state.isConnected && state.isInternetReachable !== false;
+      if (online && wasOnline === false) {
+        outboxRef.current.filter(m => m._failed && m._job).forEach(m => runJob(m._job));
       }
-      setMessages(prev => prev.filter(m => m.id !== tempId));
-      return ok;
-    } catch (e) {
-      setMessages(prev => prev.filter(m => m.id !== tempId));
-      return false;
-    } finally { setSending(false); }
-  }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
+      wasOnline = online;
+    });
+    return () => { unsub(); };
+  }, [runJob]);
+
+  const allMessages = useMemo(() => outbox.length
+    ? [...messages, ...outbox].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+    : messages, [messages, outbox]);
 
   const reactToMessage = useCallback(async (messageId: string, emoji: string): Promise<void> => {
     if (!currentUserId) return;
@@ -1414,11 +1457,12 @@ function useMessages(
 
   const deleteMessage = useCallback(async (messageId: string): Promise<void> => {
     if (!currentUserId) return;
+    if (messageId.startsWith('temp-')) { cancelUpload({ id: messageId }); return; }
     const ok = await softDeleteMessage(messageId, currentUserId);
     if (ok) setMessages(prev => prev.filter(m => m.id !== messageId));
-  }, [currentUserId]);
+  }, [currentUserId, cancelUpload]);
 
-  return { messages, loading, sending, sendText, sendVoiceNote, sendImage, sendVideo, sendGift, reactToMessage, deleteMessage };
+  return { messages: allMessages, loading, sending, sendText, sendVoiceNote, sendImage, sendVideo, sendGift, retryUpload, cancelUpload, reactToMessage, deleteMessage };
 }
 
 // ── WAVEFORM ──────────────────────────────────────────────────
@@ -1574,6 +1618,42 @@ function CallModal({
   );
 }
 
+// ✅ NEW (outbox): a photo / video / voice note that is still sending, or that
+// could not be sent yet. It lives in the chat like a normal message, keeps the
+// LOCAL file so you can still look at it / play it, and shows Retry if it failed.
+function jobToMessage(job: any, conversationId: string, senderId: string, failed: boolean) {
+  return {
+    id: job.id, conversation_id: conversationId, sender_id: senderId,
+    message_type: job.kind, media_url: job.uri, media_duration: job.duration,
+    reply_to_message_id: job.replyToId, created_at: job.createdAt,
+    is_read: false, is_deleted: false, is_disappearing: false,
+    _job: job, _uploading: !failed, _failed: failed, _progress: 0,
+  } as any;
+}
+
+// ✅ NEW (outbox): the little control on a sending item — ✕ with % while it
+// uploads, "Retry" if it failed (same idea as WhatsApp).
+function UploadBadge({ message, onCancel, onRetry }: { message: Message; onCancel?: (m: Message) => void; onRetry?: (m: Message) => void }) {
+  const m: any = message;
+  if (m._failed) {
+    return (
+      <TouchableOpacity style={styles.retryPill} onPress={() => onRetry?.(message)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <Ionicons name="cloud-upload-outline" size={16} color="#fff" />
+        <Text style={styles.retryText}>Retry</Text>
+      </TouchableOpacity>
+    );
+  }
+  if (m._uploading) {
+    return (
+      <TouchableOpacity style={styles.cancelPill} onPress={() => onCancel?.(message)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <Ionicons name="close" size={16} color="#fff" />
+        <Text style={styles.retryText}>{m._progress ? `${m._progress}%` : '…'}</Text>
+      </TouchableOpacity>
+    );
+  }
+  return null;
+}
+
 // ✅ NEW (video replies): one-line description of a message, used in reply
 // previews so a replied-to photo / voice note / video doesn't show blank.
 function replyPreviewText(m?: Message): string {
@@ -1599,10 +1679,30 @@ function videoPosterUrl(url?: string): string | undefined {
 // controls, photos pinch-zoom on iPhone (Android shows them full-screen).
 function ViewerVideo({ uri, active, width, height }: { uri: string; active: boolean; width: number; height: number }) {
   const player = useVideoPlayer(uri, p => { p.loop = false; });
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const sub: any = player.addListener('statusChange', (e: any) => { if (e?.status === 'error') setFailed(true); });
+    return () => { try { sub?.remove?.(); } catch (_) {} };
+  }, [player]);
   useEffect(() => {
     try { if (active) player.play(); else player.pause(); } catch (_) {}
   }, [active, player]);
-  return <ExpoVideoView player={player} style={{ width, height: height * 0.8 }} contentFit="contain" nativeControls />;
+  if (failed) {
+    return (
+      <View style={{ width, height: height * 0.5, alignItems: 'center', justifyContent: 'center', gap: 14 }}>
+        <Ionicons name="alert-circle-outline" size={40} color="#aaa" />
+        <Text style={{ color: '#ccc', fontSize: 14 }}>This video could not be played here.</Text>
+        <TouchableOpacity onPress={() => Linking.openURL(uri).catch(() => {})}
+          style={{ paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20, backgroundColor: '#222' }}>
+          <Text style={{ color: '#fff', fontWeight: '700' }}>Open in browser</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+  // surfaceType="textureView": on Android the default surface shows a BLACK
+  // picture (only the controls) when the player sits inside a Modal.
+  return <ExpoVideoView player={player} style={{ width, height: height * 0.8 }} contentFit="contain"
+    nativeControls surfaceType="textureView" />;
 }
 
 function MediaViewer({ items, startIndex, onClose }: { items: Message[]; startIndex: number; onClose: () => void }) {
@@ -1656,13 +1756,15 @@ function lowDataImageUrl(url?: string): string | undefined {
 }
 
 // ── MESSAGE BUBBLE ────────────────────────────────────────────
-function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenMedia }: {
+function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenMedia, onRetryUpload, onCancelUpload }: {
   message:     Message;
   isMe:        boolean;
   onLongPress: (msg: Message) => void;
   onCowatch?:  (msg: Message) => void;
   lowData?:    boolean;
   onOpenMedia?: (msg: Message) => void;
+  onRetryUpload?: (msg: Message) => void;
+  onCancelUpload?: (msg: Message) => void;
 }) {
   const [isPlaying,  setIsPlaying]  = useState(false);
   const [imgError,   setImgError]   = useState(false);
@@ -1699,20 +1801,36 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
             style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, styles.voiceBubble, (message as any)._uploading && { opacity: 0.55 }]}
             onPress={playVoice} onLongPress={() => onLongPress(message)}
           >
-            <View style={styles.voicePlayBtn}>
-              <Text style={{ fontSize: 13, color: isMe ? '#000' : C.green }}>{isPlaying ? '⏸' : '▶'}</Text>
-            </View>
+            {(message as any)._failed ? (
+              <TouchableOpacity style={styles.voicePlayBtn} onPress={() => onRetryUpload?.(message)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="cloud-upload-outline" size={17} color={isMe ? '#000' : C.green} />
+              </TouchableOpacity>
+            ) : (message as any)._uploading ? (
+              <View style={styles.voicePlayBtn}><ActivityIndicator size="small" color={isMe ? '#000' : C.green} /></View>
+            ) : (
+              <View style={styles.voicePlayBtn}>
+                <Text style={{ fontSize: 13, color: isMe ? '#000' : C.green }}>{isPlaying ? '⏸' : '▶'}</Text>
+              </View>
+            )}
             <Waveform isMe={isMe} />
             <Text style={[styles.voiceDur, isMe && { color: '#000' }]}>
               {message.media_duration ? formatSecs(message.media_duration) : '0:00'}
             </Text>
+            {(message as any)._failed && (
+              <Text style={{ fontSize: 11, fontWeight: '700', color: isMe ? '#000' : C.green, marginLeft: 6 }}>Retry</Text>
+            )}
+            {(message as any)._uploading && (
+              <TouchableOpacity onPress={() => onCancelUpload?.(message)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={{ marginLeft: 6 }}>
+                <Ionicons name="close-circle" size={18} color={isMe ? '#000' : C.muted} />
+              </TouchableOpacity>
+            )}
           </TouchableOpacity>
         );
 
       case 'image':
         return (
           <TouchableOpacity onLongPress={() => onLongPress(message)} activeOpacity={0.9}
-            onPress={() => { if (!(message as any)._uploading && !imgError) onOpenMedia?.(message); }}
+            onPress={() => { if (!imgError) onOpenMedia?.(message); }}
             style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { padding: 3 }]}>
             {imgError
               ? <View style={styles.imgErrorBox}>
@@ -1721,7 +1839,7 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
                 </View>
               : (
                 <View>
-                  {lowData && !(message as any)._uploading ? (
+                  {lowData && !(message as any)._job ? (
                     <View>
                       <Image source={{ uri: lowDataImageUrl(message.media_url) }}
                         style={styles.msgImage} resizeMode="cover" blurRadius={6}
@@ -1736,9 +1854,9 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
                     style={styles.msgImage} resizeMode="cover"
                     onError={() => setImgError(true)} />
                   )}
-                  {(message as any)._uploading && (
-                    <View style={styles.uploadingOverlay}>
-                      <ActivityIndicator color="#fff" size="small" />
+                  {((message as any)._uploading || (message as any)._failed) && (
+                    <View style={styles.uploadingOverlay} pointerEvents="box-none">
+                      <UploadBadge message={message} onCancel={onCancelUpload} onRetry={onRetryUpload} />
                     </View>
                   )}
                 </View>
@@ -1778,10 +1896,12 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
         }
         {
           const uploading = !!(message as any)._uploading;
-          const poster = uploading ? undefined : videoPosterUrl(message.media_url);
+          const failed = !!(message as any)._failed;
+          const pending = !!(message as any)._job;
+          const poster = pending ? undefined : videoPosterUrl(message.media_url);
           return (
             <TouchableOpacity onLongPress={() => onLongPress(message)} activeOpacity={0.85}
-              disabled={uploading || !message.media_url}
+              disabled={!message.media_url}
               onPress={() => message.media_url && onOpenMedia?.(message)}
               style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem, { padding: 3 }]}>
               {message.reply_to_message && (
@@ -1792,10 +1912,13 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
               )}
               <View style={styles.videoPreviewBox}>
                 {poster ? <Image source={{ uri: poster }} style={StyleSheet.absoluteFillObject} resizeMode="cover" /> : null}
-                {uploading
-                  ? <ActivityIndicator color={C.green} size="small" />
-                  : <Ionicons name={poster ? 'play-circle' : 'videocam'} size={poster ? 44 : 32} color={poster ? '#fff' : C.green} />}
-                <Text style={styles.videoPreviewLabel}>{uploading ? `Uploading${(message as any)._progress != null ? ' ' + (message as any)._progress + '%' : '…'}` : (message.reply_to_message ? 'Video reply' : 'Video')}</Text>
+                <Ionicons name={poster || pending ? 'play-circle' : 'videocam'} size={poster || pending ? 44 : 32} color={poster || pending ? '#fff' : C.green} />
+                {(uploading || failed) && (
+                  <View style={styles.uploadingOverlay} pointerEvents="box-none">
+                    <UploadBadge message={message} onCancel={onCancelUpload} onRetry={onRetryUpload} />
+                  </View>
+                )}
+                <Text style={styles.videoPreviewLabel}>{failed ? 'Not sent' : uploading ? 'Sending…' : (message.reply_to_message ? 'Video reply' : 'Video')}</Text>
               </View>
             </TouchableOpacity>
           );
@@ -1922,11 +2045,13 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
         )}
         <View style={[styles.msgMeta, isMe && styles.msgMetaMe]}>
           <Text style={styles.msgTime}>{formatTime(message.created_at)}</Text>
-          {isMe && (
-            <Text style={[styles.readTick, message.is_read && { color: C.green }]}>
-              {message.is_read ? '✓✓' : '✓'}
-            </Text>
-          )}
+          {isMe && ((message as any)._job
+            ? <Ionicons name={(message as any)._failed ? 'alert-circle-outline' : 'time-outline'} size={12} color={(message as any)._failed ? C.red : C.muted2} />
+            : (
+              <Text style={[styles.readTick, message.is_read && { color: C.green }]}>
+                {message.is_read ? '✓✓' : '✓'}
+              </Text>
+            ))}
         </View>
       </View>
     </View>
@@ -2003,7 +2128,7 @@ export default function ChatScreen() {
 
   const {
     messages, loading, sending, sendText, sendVoiceNote,
-    sendImage, sendVideo, sendGift, reactToMessage, deleteMessage,
+    sendImage, sendVideo, sendGift, retryUpload, cancelUpload, reactToMessage, deleteMessage,
   } = useMessages(
     id, user?.id || null, vanishOn, 86400,
     otherUserId || null, userProfile?.username || '', userProfile?.display_name || 'Someone',
@@ -2020,7 +2145,7 @@ export default function ChatScreen() {
   const [viewerId, setViewerId] = useState<string | null>(null);
   const mediaItems = useMemo(() => messages.filter(m =>
     (m.message_type === 'image' || m.message_type === 'video') &&
-    !!m.media_url && !(m as any)._uploading && !m.is_deleted && !m.shared_video_id), [messages]);
+    !!m.media_url && !m.is_deleted && !m.shared_video_id), [messages]);
   const viewerStart = viewerId ? mediaItems.findIndex(m => m.id === viewerId) : -1;
 
   // ✅ NEW: gifts — same list, prices, custom amount and coin→naira preview as
@@ -2284,14 +2409,34 @@ export default function ChatScreen() {
     if (!perm.granted) { Alert.alert('Permission needed', 'Please allow gallery access.'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Videos, videoMaxDuration: 120, quality: 0.7,
-    });
-    if (result.canceled || !result.assets[0]) return;
-    setUploadingVideo(true);
-    try {
-      const ok = await sendVideo(result.assets[0].uri);
-      if (!ok) Alert.alert('Video not sent', 'Please check your connection and try again.');
-    } finally { setUploadingVideo(false); }
+      allowsMultipleSelection: true, selectionLimit: 10, orderedSelection: true,
+    } as any);
+    if (result.canceled || !result.assets?.length) return;
+    for (const a of result.assets as any[]) {
+      const secs = a.duration ? Math.round(a.duration > 1000 ? a.duration / 1000 : a.duration) : undefined;
+      sendVideo(a.uri, undefined, secs);
+    }
   }, [sendVideo]);
+
+  // ✅ NEW: Gallery now takes up to 10 photos AND videos at once (mixed), like
+  // WhatsApp. Each one uploads separately with its own progress / Retry.
+  const handlePickGallery = useCallback(async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) { Alert.alert('Permission needed', 'Please allow gallery access.'); return; }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.All, quality: lowData ? 0.4 : 0.8,
+      allowsMultipleSelection: true, selectionLimit: 10, orderedSelection: true,
+    } as any);
+    if (result.canceled || !result.assets?.length) return;
+    for (const a of result.assets as any[]) {
+      if (a.type === 'video') {
+        const secs = a.duration ? Math.round(a.duration > 1000 ? a.duration / 1000 : a.duration) : undefined;
+        sendVideo(a.uri, undefined, secs);
+      } else {
+        sendImage(a.uri);
+      }
+    }
+  }, [sendVideo, sendImage, lowData]);
 
   // ✅ REWRITTEN (voice notes): the old version needed you to HOLD a tiny 40px
   // button, awaited permission + prepare on every press (slow start), used a
@@ -2501,6 +2646,8 @@ export default function ChatScreen() {
               onCowatch={(msg) => openCowatch()}
               lowData={lowData}
               onOpenMedia={(m) => setViewerId(m.id)}
+              onRetryUpload={retryUpload}
+              onCancelUpload={cancelUpload}
             />
           )}
           contentContainerStyle={[styles.messagesList, { flexGrow: 1 }]}
@@ -2552,7 +2699,7 @@ export default function ChatScreen() {
             <Ionicons name="camera-outline" size={13} color={C.muted} />
             <Text style={styles.attachChipText}>Camera</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.attachChip} onPress={handlePickImage}>
+          <TouchableOpacity style={styles.attachChip} onPress={handlePickGallery}>
             <Ionicons name="image-outline" size={13} color={C.muted} />
             <Text style={styles.attachChipText}>Gallery</Text>
           </TouchableOpacity>
@@ -2889,6 +3036,9 @@ const styles = StyleSheet.create({
   viewerTop:   { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingBottom: 10, backgroundColor: 'rgba(0,0,0,0.35)' },
   viewerClose: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
   viewerCount: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  retryPill:  { position: 'absolute', left: 8, bottom: 8, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.62)' },
+  cancelPill: { position: 'absolute', left: 8, bottom: 8, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.62)' },
+  retryText:  { color: '#fff', fontSize: 12.5, fontWeight: '700' },
   lowDataOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 12 },
   lowDataText:    { color: '#fff', fontSize: 12, fontWeight: '700' },
   giftBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
