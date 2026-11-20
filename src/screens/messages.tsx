@@ -443,7 +443,17 @@ function subscribeConversations(userId: string, onUpdate: () => void): RealtimeC
     .on('postgres_changes', {
       event: 'INSERT', schema: 'public',
       table: 'messages',
-    }, () => onUpdate())
+    }, (payload: any) => {
+      // ✅ NEW: a message just reached THIS phone → tell the server, so the
+      // sender's ✓ becomes ✓✓ (delivered) even if this chat is not open.
+      try {
+        const row = payload?.new;
+        if (row && row.sender_id !== userId) {
+          supabase.rpc('mark_messages_delivered', { p_conversation_id: row.conversation_id }).then(() => {}, () => {});
+        }
+      } catch (_) {}
+      onUpdate();
+    })
     .subscribe();
 }
 
@@ -1057,7 +1067,12 @@ export default function MessagesScreen() {
   // every time the screen regains focus, on top of the mount-time load
   // and subscription above (which stay as-is, so the realtime channel
   // isn't torn down and rebuilt on every focus).
-  useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
+  useFocusEffect(useCallback(() => {
+    loadAll();
+    // ✅ NEW: messages that arrived while the app was closed count as delivered
+    // the moment the app is opened and this screen shows.
+    supabase.rpc('mark_messages_delivered', { p_conversation_id: null }).then(() => {}, () => {});
+  }, [loadAll]));
 
   const handleRefresh = () => { setRefreshing(true); loadAll(); };
 

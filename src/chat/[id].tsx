@@ -6,7 +6,7 @@ import {
   View, Text, FlatList, TextInput, TouchableOpacity,
   StyleSheet, StatusBar, KeyboardAvoidingView,
   Platform, Modal, Alert, ActivityIndicator, Image,
-  ScrollView, Dimensions, PermissionsAndroid, Linking,
+  ScrollView, Dimensions, PermissionsAndroid, Linking, Share,
 } from 'react-native';
 import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 // ✅ NEW: already in your package.json — used for the in-app photo/video viewer
@@ -15,6 +15,7 @@ import { useVideoPlayer, VideoView as ExpoVideoView } from 'expo-video';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 // ✅ NEW: lets startCall also ring the callee's GLOBAL signal channel
@@ -101,6 +102,10 @@ const GIFT_PACKAGES = [
   { id: 'castle',       name: 'Castle',       icon: '🏰', coins: 400, color: '#9d4edd' },
   { id: 'trophy',       name: 'Trophy',       icon: '🏆', coins: 500, color: '#cd7f32' },
 ];
+
+// ✅ NEW: voice notes are recorded in mono at 32 kbps (clear for speech) instead
+// of stereo 128 kbps — about 4× smaller to upload and download.
+const VOICE_PRESET = { ...RecordingPresets.HIGH_QUALITY, numberOfChannels: 1, sampleRate: 22050, bitRate: 32000 };
 
 const QUICK_EMOJIS = ['😂','❤️','🔥','😭','🙌','💀','👀','🎬','⚡','✨','🎵','😍','💯','🤩','😎','🤣'];
 const REACTIONS    = ['❤️','😂','🔥','😮','😢','👏','💀','🙌'];
@@ -944,6 +949,7 @@ interface Message {
   media_thumbnail?: string; shared_video_id?: string;
   shared_video_title?: string; shared_video_thumbnail?: string;
   shared_video_views?: string; is_read: boolean; is_deleted: boolean;
+  delivered_at?: string | null; media_opened_at?: string | null;
   is_disappearing: boolean; disappears_at?: string;
   reply_to_message_id?: string; reply_to_message?: Message;
   reactions?: MessageReaction[]; sender?: ChatUser;
@@ -1014,41 +1020,59 @@ async function getMessages(conversationId: string, limit = 50, before?: string):
   } catch (error) { console.error('getMessages error:', error); return []; }
 }
 
+// ✅ NEW: every message gets its id on the PHONE before it is sent. If the
+// network drops right after the server saved it and we retry, the server says
+// "already exists" and we just fetch it — so a retry can never send it twice.
+function uuidv4(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+async function insertMessageRow(payload: any): Promise<Message> {
+  const { data, error } = await supabase.from('messages').insert(payload).select('*').single();
+  if (error) {
+    if ((error as any).code === '23505' && payload.id) {
+      const { data: existing } = await supabase.from('messages').select('*').eq('id', payload.id).single();
+      if (existing) return { ...existing, reactions: [] } as Message;
+    }
+    throw error;
+  }
+  return { ...data, reactions: [] } as Message;
+}
+
 async function sendTextMessage(
   conversationId: string, senderId: string, content: string,
-  replyToId?: string, isDisappearing?: boolean, duration?: number,
+  replyToId?: string, isDisappearing?: boolean, duration?: number, id?: string,
 ): Promise<Message | null> {
   try {
     const payload: any = {
       conversation_id: conversationId, sender_id: senderId,
       message_type: 'text', content, is_disappearing: isDisappearing || false,
     };
+    if (id) payload.id = id;
     if (replyToId) payload.reply_to_message_id = replyToId;
     if (isDisappearing && duration) {
       const exp = new Date(); exp.setSeconds(exp.getSeconds() + duration);
       payload.disappears_at = exp.toISOString();
     }
-    const { data, error } = await supabase.from('messages').insert(payload).select('*').single();
-    if (error) throw error;
-    return { ...data, reactions: [] };
+    return await insertMessageRow(payload);
   } catch (error) { console.error('sendTextMessage error:', error); return null; }
 }
 
 async function sendMediaMessage(
   conversationId: string, senderId: string,
   mediaUrl: string, mediaType: 'voice' | 'image' | 'video', duration?: number,
-  replyToId?: string,
+  replyToId?: string, caption?: string, id?: string,
 ): Promise<Message | null> {
   try {
-    const { data, error } = await supabase.from('messages')
-      .insert({
-        conversation_id: conversationId, sender_id: senderId,
-        message_type: mediaType, media_url: mediaUrl, media_duration: duration,
-        ...(replyToId ? { reply_to_message_id: replyToId } : {}),
-      })
-      .select('*').single();
-    if (error) throw error;
-    return { ...data, reactions: [] };
+    return await insertMessageRow({
+      conversation_id: conversationId, sender_id: senderId,
+      message_type: mediaType, media_url: mediaUrl, media_duration: duration,
+      ...(id ? { id } : {}),
+      ...(caption ? { content: caption } : {}),
+      ...(replyToId ? { reply_to_message_id: replyToId } : {}),
+    });
   } catch (error) { console.error('sendMediaMessage error:', error); return null; }
 }
 
@@ -1129,7 +1153,7 @@ async function getStreak(userId: string, otherUserId: string): Promise<number> {
   } catch { return 0; }
 }
 
-function subscribeToMessages(conversationId: string, onMessage: (msg: Message) => void): RealtimeChannel {
+function subscribeToMessages(conversationId: string, onMessage: (msg: Message) => void, onUpdate?: (row: any) => void): RealtimeChannel {
   // FIX: same remount race fixed in circle/group/messages.tsx.
   const mountId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return supabase.channel(`messages:${conversationId}:${mountId}`)
@@ -1139,7 +1163,14 @@ function subscribeToMessages(conversationId: string, onMessage: (msg: Message) =
     }, async (payload: any) => {
       const { data } = await supabase.from('messages').select('*').eq('id', payload.new.id).single();
       if (data) onMessage({ ...data, reactions: [] } as Message);
-    }).subscribe();
+    })
+    // ✅ NEW: before, the chat never listened for UPDATEs, so the sender's ticks
+    // only changed after reloading the chat. Now they change live.
+    .on('postgres_changes', {
+      event: 'UPDATE', schema: 'public', table: 'messages',
+      filter: `conversation_id=eq.${conversationId}`,
+    }, (payload: any) => { try { onUpdate?.(payload.new); } catch (_) {} })
+    .subscribe();
 }
 
 function subscribeToReactions(conversationId: string, onChange: () => void): RealtimeChannel {
@@ -1247,14 +1278,32 @@ function useMessages(
   const channelRef   = useRef<RealtimeChannel | null>(null);
   const reactionsRef = useRef<RealtimeChannel | null>(null);
 
+  const cacheLoadedRef = useRef(false);
+  const messagesRef    = useRef<Message[]>([]);
   const loadMessages = useCallback(async () => {
     if (!conversationId || !isValidUUID(conversationId)) { setLoading(false); return; }
     try {
+      // ✅ NEW: show the last saved copy of this chat INSTANTLY (even with no
+      // internet), then refresh it from the server.
+      const cacheKey = `lumvibe_chat_cache_${conversationId}`;
+      if (!cacheLoadedRef.current) {
+        cacheLoadedRef.current = true;
+        try {
+          const raw = await AsyncStorage.getItem(cacheKey);
+          if (raw) { setMessages(JSON.parse(raw)); setLoading(false); }
+        } catch (_) {}
+      }
       const data = await getMessages(conversationId);
-      setMessages(data);
+      if (data.length > 0) {
+        setMessages(data);
+        AsyncStorage.setItem(cacheKey, JSON.stringify(data.slice(-60))).catch(() => {});
+      } else {
+        setMessages(prev => prev.length ? prev : data);   // offline: keep what we have
+      }
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, [conversationId]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   useEffect(() => {
     loadMessages();
@@ -1267,6 +1316,10 @@ function useMessages(
         }]);
         if (newMsg.sender_id !== currentUserId && conversationId && currentUserId)
           markAsRead(conversationId, currentUserId);
+      }, (row) => {
+        setMessages(prev => prev.map(m => m.id === row.id
+          ? { ...m, is_read: row.is_read, delivered_at: row.delivered_at, media_opened_at: row.media_opened_at } as any
+          : m));
       });
       reactionsRef.current = subscribeToReactions(conversationId, loadMessages);
     }
@@ -1275,26 +1328,6 @@ function useMessages(
       if (reactionsRef.current) { supabase.removeChannel(reactionsRef.current); reactionsRef.current = null; }
     };
   }, [conversationId, currentUserId, loadMessages]);
-
-  const sendText = useCallback(async (text: string, replyToId?: string): Promise<boolean> => {
-    if (!conversationId || !currentUserId) return false;
-    setSending(true);
-    try {
-      const msg = await sendTextMessage(conversationId, currentUserId, text, replyToId, disappearingEnabled, disappearingDuration);
-      // ✅ NEW: nothing anywhere previously sent an actual push notification
-      // for a chat message — this was a completely separate gap from the
-      // like/comment/follow one (chat messages were never even in the
-      // PushNotificationData type at all). Fire-and-forget: never blocks
-      // sending even if the push itself fails.
-      if (msg && otherUserId) {
-        notifyNewMessage(
-          otherUserId, currentUserId, senderUsername, senderDisplayName,
-          text, conversationId, senderPhoto
-        ).catch(e => console.warn('Push notify (message) failed:', e));
-      }
-      return !!msg;
-    } finally { setSending(false); }
-  }, [conversationId, currentUserId, disappearingEnabled, disappearingDuration, otherUserId, senderUsername, senderDisplayName, senderPhoto]);
 
   // ═════════ ✅ NEW: OUTBOX — photos, videos and voice notes ═════════
   // Before: sending set one global "sending" flag (so you could not type while
@@ -1327,53 +1360,85 @@ function useMessages(
 
   const runJob = useCallback(async (job: any) => {
     if (!conversationId || !currentUserId) return;
-    if (abortersRef.current[job.id]) return;            // already uploading
+    if (abortersRef.current[job.id]) return;            // already sending
     cancelledRef.current.delete(job.id);
     const handle: { abort?: () => void } = {};
     abortersRef.current[job.id] = handle;
     patchOutbox(job.id, { _uploading: true, _failed: false, _progress: 0 });
-    let url: string | null = uploadedUrlRef.current[job.id] || null;
-    try {
-      if (!url) {
-        url = await uploadToCloudinary(job.uri, job.kind, pct => patchOutbox(job.id, { _progress: pct }), handle);
-        if (url) uploadedUrlRef.current[job.id] = url;
-      }
-    } catch (_) {}
-    delete abortersRef.current[job.id];
+    let msg: Message | null = null;
+
+    if (job.kind === 'text') {
+      try {
+        msg = await sendTextMessage(conversationId, currentUserId, job.text, job.replyToId, job.disappearing, job.dur, job.msgId);
+      } catch (_) {}
+      delete abortersRef.current[job.id];
+    } else {
+      let url: string | null = uploadedUrlRef.current[job.id] || null;
+      try {
+        if (!url) {
+          const src = job.kind === 'image' ? await compressImage(job.uri) : job.uri;
+          url = await uploadToCloudinary(src, job.kind, pct => patchOutbox(job.id, { _progress: pct }), handle);
+          if (url) uploadedUrlRef.current[job.id] = url;
+        }
+      } catch (_) {}
+      delete abortersRef.current[job.id];
+      if (cancelledRef.current.has(job.id)) { cancelledRef.current.delete(job.id); return; }
+      if (!url) { patchOutbox(job.id, { _uploading: false, _failed: true }); return; }
+      msg = await sendMediaMessage(conversationId, currentUserId, url, job.kind, job.duration, job.replyToId, job.caption, job.msgId);
+    }
+
     if (cancelledRef.current.has(job.id)) { cancelledRef.current.delete(job.id); return; }
-    if (!url) { patchOutbox(job.id, { _uploading: false, _failed: true }); return; }
-    const msg = await sendMediaMessage(conversationId, currentUserId, url, job.kind, job.duration, job.replyToId);
     if (!msg) { patchOutbox(job.id, { _uploading: false, _failed: true }); return; }
     delete uploadedUrlRef.current[job.id];
+    const done = msg;
     setOutbox(prev => prev.filter(m => m.id !== job.id));
-    setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg]);
+    setMessages(prev => prev.find(m => m.id === done.id) ? prev : [...prev, done]);
     persistOutbox(list => list.filter(j => j.id !== job.id));
     if (otherUserId) {
-      const label = job.kind === 'voice' ? '🎤 Voice message' : job.kind === 'video' ? (job.replyToId ? '🎥 Video reply' : '🎥 Video') : '📷 Photo';
+      const label = job.kind === 'text' ? job.text
+        : job.kind === 'voice' ? '🎤 Voice message'
+        : job.kind === 'video' ? (job.replyToId ? '🎥 Video reply' : '🎥 Video') : '📷 Photo';
       notifyNewMessage(
         otherUserId, currentUserId, senderUsername, senderDisplayName, label, conversationId, senderPhoto
       ).catch(e => console.warn('Push notify (message) failed:', e));
     }
   }, [conversationId, currentUserId, otherUserId, senderUsername, senderDisplayName, senderPhoto, patchOutbox, persistOutbox]);
 
-  const enqueueMedia = useCallback((kind: 'voice' | 'image' | 'video', uri: string, duration?: number, replyToId?: string): boolean => {
+  const enqueueJob = useCallback((p: { kind: 'text' | 'voice' | 'image' | 'video'; uri?: string; text?: string; duration?: number; replyToId?: string; caption?: string }): boolean => {
     if (!conversationId || !currentUserId) return false;
     const job = {
       id: `temp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      kind, uri, duration, replyToId, createdAt: new Date().toISOString(),
+      msgId: uuidv4(), ...p,
+      disappearing: disappearingEnabled, dur: disappearingDuration,
+      createdAt: new Date().toISOString(),
     };
-    setOutbox(prev => [...prev, jobToMessage(job, conversationId, currentUserId, false)]);
+    const temp = jobToMessage(job, conversationId, currentUserId, false);
+    if (p.replyToId) temp.reply_to_message = messagesRef.current.find(m => m.id === p.replyToId);
+    setOutbox(prev => [...prev, temp]);
     persistOutbox(list => [...list, job]);
     runJob(job);
     return true;
-  }, [conversationId, currentUserId, persistOutbox, runJob]);
+  }, [conversationId, currentUserId, disappearingEnabled, disappearingDuration, persistOutbox, runJob]);
 
   const sendVoiceNote = useCallback(async (fileUri: string, duration: number): Promise<boolean> =>
-    enqueueMedia('voice', fileUri, duration), [enqueueMedia]);
-  const sendImage = useCallback(async (fileUri: string): Promise<boolean> =>
-    enqueueMedia('image', fileUri), [enqueueMedia]);
-  const sendVideo = useCallback(async (fileUri: string, replyToId?: string, duration?: number): Promise<boolean> =>
-    enqueueMedia('video', fileUri, duration, replyToId), [enqueueMedia]);
+    enqueueJob({ kind: 'voice', uri: fileUri, duration }), [enqueueJob]);
+  const sendImage = useCallback(async (fileUri: string, caption?: string): Promise<boolean> =>
+    enqueueJob({ kind: 'image', uri: fileUri, caption }), [enqueueJob]);
+  const sendVideo = useCallback(async (fileUri: string, replyToId?: string, duration?: number, caption?: string): Promise<boolean> =>
+    enqueueJob({ kind: 'video', uri: fileUri, duration, replyToId, caption }), [enqueueJob]);
+  // ✅ CHANGED: text now shows in the chat the instant you press send (before,
+  // it waited for the server and then for the realtime echo — slow, and with no
+  // internet it simply never appeared). It waits in the outbox until it is saved.
+  const sendText = useCallback(async (text: string, replyToId?: string): Promise<boolean> =>
+    enqueueJob({ kind: 'text', text, replyToId }), [enqueueJob]);
+
+  // receiver opened / watched / played a photo, video or voice note → green ticks for the sender
+  const markMediaOpened = useCallback((m: Message) => {
+    if (!currentUserId || m.sender_id === currentUserId || (m as any).media_opened_at || String(m.id).startsWith('temp-')) return;
+    const now = new Date().toISOString();
+    setMessages(prev => prev.map(x => x.id === m.id ? ({ ...x, media_opened_at: now, is_read: true } as any) : x));
+    supabase.rpc('mark_media_opened', { p_message_id: m.id }).then(() => {}, () => {});
+  }, [currentUserId]);
 
   const retryUpload = useCallback((m: any) => {
     const found = outboxRef.current.find(x => x.id === m.id);
@@ -1462,7 +1527,7 @@ function useMessages(
     if (ok) setMessages(prev => prev.filter(m => m.id !== messageId));
   }, [currentUserId, cancelUpload]);
 
-  return { messages: allMessages, loading, sending, sendText, sendVoiceNote, sendImage, sendVideo, sendGift, retryUpload, cancelUpload, reactToMessage, deleteMessage };
+  return { messages: allMessages, loading, sending, sendText, sendVoiceNote, sendImage, sendVideo, sendGift, retryUpload, cancelUpload, markMediaOpened, reactToMessage, deleteMessage };
 }
 
 // ── WAVEFORM ──────────────────────────────────────────────────
@@ -1618,15 +1683,61 @@ function CallModal({
   );
 }
 
+// ✅ NEW: WhatsApp-style ticks.
+//   ✓   saved on the server (sent)
+//   ✓✓  grey  = reached the other person's phone (delivered)
+//   ✓✓  green = read — and for photos / videos / voice notes, only once the
+//               person actually opened, watched or played it.
+// Messages from before this change count as "opened" so old chats don't go grey.
+const MEDIA_TICK_CUTOFF = Date.parse('2026-11-20T00:00:00Z');
+function tickState(m: any): { text: string; green: boolean } {
+  const isMedia = (m.message_type === 'voice' || m.message_type === 'image' || m.message_type === 'video') && !m.shared_video_id;
+  const legacy = Date.parse(m.created_at) < MEDIA_TICK_CUTOFF;
+  if (m.is_read && (!isMedia || m.media_opened_at || legacy)) return { text: '✓✓', green: true };
+  if (m.delivered_at || m.is_read) return { text: '✓✓', green: false };
+  return { text: '✓', green: false };
+}
+
+// ✅ NEW: make a photo smaller BEFORE it uploads (less data, faster, works on weak
+// networks). If anything goes wrong we just send the original.
+async function compressImage(uri: string): Promise<string> {
+  try {
+    const M: any = ImageManipulator;
+    if (M.ImageManipulator?.manipulate) {
+      const ctx = M.ImageManipulator.manipulate(uri);
+      ctx.resize({ width: 1280 });
+      const ref = await ctx.renderAsync();
+      const out = await ref.saveAsync({ compress: 0.7, format: M.SaveFormat?.JPEG || 'jpeg' });
+      return out.uri || uri;
+    }
+    if (M.manipulateAsync) {
+      const out = await M.manipulateAsync(uri, [{ resize: { width: 1280 } }], { compress: 0.7, format: M.SaveFormat?.JPEG || 'jpeg' });
+      return out.uri || uri;
+    }
+  } catch (e) { console.warn('compressImage skipped:', e); }
+  return uri;
+}
+
+type PickedAsset = { uri: string; type: 'image' | 'video'; duration?: number };
+function toPickedAsset(a: any): PickedAsset {
+  return {
+    uri: a.uri, type: a.type === 'video' ? 'video' : 'image',
+    duration: a.duration ? Math.round(a.duration > 1000 ? a.duration / 1000 : a.duration) : undefined,
+  };
+}
+
 // ✅ NEW (outbox): a photo / video / voice note that is still sending, or that
 // could not be sent yet. It lives in the chat like a normal message, keeps the
 // LOCAL file so you can still look at it / play it, and shows Retry if it failed.
 function jobToMessage(job: any, conversationId: string, senderId: string, failed: boolean) {
   return {
     id: job.id, conversation_id: conversationId, sender_id: senderId,
-    message_type: job.kind, media_url: job.uri, media_duration: job.duration,
+    message_type: job.kind,
+    content: job.kind === 'text' ? job.text : job.caption,
+    media_url: job.kind === 'text' ? undefined : job.uri,
+    media_duration: job.duration,
     reply_to_message_id: job.replyToId, created_at: job.createdAt,
-    is_read: false, is_deleted: false, is_disappearing: false,
+    is_read: false, is_deleted: false, is_disappearing: !!job.disappearing,
     _job: job, _uploading: !failed, _failed: failed, _progress: 0,
   } as any;
 }
@@ -1674,10 +1785,76 @@ function videoPosterUrl(url?: string): string | undefined {
   return url.replace('/video/upload/', '/video/upload/so_0,w_360,q_auto:low/').replace(/\.[a-z0-9]+(\?.*)?$/i, '.jpg');
 }
 
+// ✅ NEW: the "add a caption" screen shown after you pick photos / videos (or
+// take one with the camera): preview, a caption for EACH item, remove items,
+// then send. Same idea as WhatsApp.
+function MediaComposer({ assets, onClose, onSend }: {
+  assets: PickedAsset[]; onClose: () => void; onSend: (items: (PickedAsset & { caption: string })[]) => void;
+}) {
+  const { width, height } = Dimensions.get('window');
+  const [list, setList]         = useState<PickedAsset[]>(assets);
+  const [captions, setCaptions] = useState<string[]>(() => assets.map(() => ''));
+  const [index, setIndex]       = useState(0);
+  const safeIndex = Math.min(index, Math.max(list.length - 1, 0));
+  const cur = list[safeIndex];
+  const topPad = Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 52;
+
+  const removeAt = (i: number) => {
+    if (list.length <= 1) { onClose(); return; }
+    setList(prev => prev.filter((_, k) => k !== i));
+    setCaptions(prev => prev.filter((_, k) => k !== i));
+    setIndex(prev => Math.max(0, Math.min(prev, list.length - 2)));
+  };
+  const setCaption = (t: string) => setCaptions(prev => prev.map((c, k) => k === safeIndex ? t : c));
+  const submit = () => onSend(list.map((a, i) => ({ ...a, caption: (captions[i] || '').trim() })));
+  if (!cur) return null;
+
+  return (
+    <Modal visible animationType="slide" statusBarTranslucent onRequestClose={onClose}>
+      <KeyboardAvoidingView style={{ flex: 1, backgroundColor: '#000' }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={[styles.composerTop, { paddingTop: topPad }]}>
+          <TouchableOpacity onPress={onClose} style={styles.viewerClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="close" size={26} color="#fff" />
+          </TouchableOpacity>
+          <Text style={styles.viewerCount}>{list.length > 1 ? `${safeIndex + 1} / ${list.length}` : (cur.type === 'video' ? 'Video' : 'Photo')}</Text>
+          <TouchableOpacity onPress={() => removeAt(safeIndex)} style={styles.viewerClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="trash-outline" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          {cur.type === 'video'
+            ? <ViewerVideo key={cur.uri} uri={cur.uri} active autoPlay={false} width={width} height={height * 0.9} />
+            : <Image source={{ uri: cur.uri }} style={{ width, height: height * 0.62 }} resizeMode="contain" />}
+        </View>
+        {list.length > 1 && (
+          <FlatList data={list} horizontal keyExtractor={(a, i) => a.uri + i} showsHorizontalScrollIndicator={false}
+            style={{ flexGrow: 0, paddingVertical: 8 }} contentContainerStyle={{ paddingHorizontal: 10, gap: 8 }}
+            renderItem={({ item, index: i }) => (
+              <TouchableOpacity onPress={() => setIndex(i)} style={[styles.composerThumb, i === safeIndex && { borderColor: C.green }]}>
+                {item.type === 'video'
+                  ? <View style={[StyleSheet.absoluteFillObject, { backgroundColor: '#222', alignItems: 'center', justifyContent: 'center' }]}><Ionicons name="videocam" size={20} color="#fff" /></View>
+                  : <Image source={{ uri: item.uri }} style={StyleSheet.absoluteFillObject} resizeMode="cover" />}
+                {!!captions[i] && <View style={styles.composerThumbDot} />}
+              </TouchableOpacity>
+            )} />
+        )}
+        <View style={styles.composerBar}>
+          <TextInput style={styles.composerInput} value={captions[safeIndex] || ''} onChangeText={setCaption}
+            placeholder="Add a caption…" placeholderTextColor="#777" multiline maxLength={500} />
+          <TouchableOpacity style={styles.composerSend} onPress={submit}>
+            <Ionicons name="send" size={19} color="#000" />
+            {list.length > 1 && <View style={styles.composerBadge}><Text style={styles.composerBadgeText}>{list.length}</Text></View>}
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 // ✅ NEW: in-app photo / video viewer (like WhatsApp): full screen, swipe left
 // and right through every photo and video in this chat, videos play with
 // controls, photos pinch-zoom on iPhone (Android shows them full-screen).
-function ViewerVideo({ uri, active, width, height }: { uri: string; active: boolean; width: number; height: number }) {
+function ViewerVideo({ uri, active, width, height, autoPlay = true }: { uri: string; active: boolean; width: number; height: number; autoPlay?: boolean }) {
   const player = useVideoPlayer(uri, p => { p.loop = false; });
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -1685,8 +1862,8 @@ function ViewerVideo({ uri, active, width, height }: { uri: string; active: bool
     return () => { try { sub?.remove?.(); } catch (_) {} };
   }, [player]);
   useEffect(() => {
-    try { if (active) player.play(); else player.pause(); } catch (_) {}
-  }, [active, player]);
+    try { if (active && autoPlay) player.play(); else if (!active) player.pause(); } catch (_) {}
+  }, [active, autoPlay, player]);
   if (failed) {
     return (
       <View style={{ width, height: height * 0.5, alignItems: 'center', justifyContent: 'center', gap: 14 }}>
@@ -1705,9 +1882,10 @@ function ViewerVideo({ uri, active, width, height }: { uri: string; active: bool
     nativeControls surfaceType="textureView" />;
 }
 
-function MediaViewer({ items, startIndex, onClose }: { items: Message[]; startIndex: number; onClose: () => void }) {
+function MediaViewer({ items, startIndex, onClose, onSeen }: { items: Message[]; startIndex: number; onClose: () => void; onSeen?: (m: Message) => void }) {
   const { width, height } = Dimensions.get('window');
   const [index, setIndex] = useState(startIndex);
+  useEffect(() => { const m = items[index]; if (m) onSeen?.(m); }, [index]);
   const topPad = Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 52;
   return (
     <Modal visible animationType="fade" statusBarTranslucent onRequestClose={onClose}>
@@ -1734,6 +1912,11 @@ function MediaViewer({ items, startIndex, onClose }: { items: Message[]; startIn
             </View>
           )}
         />
+        {!!items[index]?.content && (
+          <View style={styles.viewerCaption} pointerEvents="none">
+            <Text style={styles.viewerCaptionText}>{items[index].content}</Text>
+          </View>
+        )}
         <View style={[styles.viewerTop, { paddingTop: topPad }]} pointerEvents="box-none">
           <TouchableOpacity onPress={onClose} style={styles.viewerClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Ionicons name="close" size={26} color="#fff" />
@@ -1756,7 +1939,7 @@ function lowDataImageUrl(url?: string): string | undefined {
 }
 
 // ── MESSAGE BUBBLE ────────────────────────────────────────────
-function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenMedia, onRetryUpload, onCancelUpload }: {
+function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenMedia, onRetryUpload, onCancelUpload, onSeen }: {
   message:     Message;
   isMe:        boolean;
   onLongPress: (msg: Message) => void;
@@ -1765,12 +1948,14 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
   onOpenMedia?: (msg: Message) => void;
   onRetryUpload?: (msg: Message) => void;
   onCancelUpload?: (msg: Message) => void;
+  onSeen?: (msg: Message) => void;
 }) {
   const [isPlaying,  setIsPlaying]  = useState(false);
   const [imgError,   setImgError]   = useState(false);
 
   // FIX: expo-audio player replaces expo-av Audio.Sound
   const player = useAudioPlayer(message.media_url ? { uri: message.media_url } : null);
+  useEffect(() => { if (isPlaying && !isMe) onSeen?.(message); }, [isPlaying]);
 
   const playVoice = async () => {
     try {
@@ -1861,6 +2046,9 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
                   )}
                 </View>
               )}
+            {!!message.content && (
+              <Text style={[styles.mediaCaption, isMe && { color: '#000' }]}>{message.content}</Text>
+            )}
           </TouchableOpacity>
         );
 
@@ -1920,6 +2108,9 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
                 )}
                 <Text style={styles.videoPreviewLabel}>{failed ? 'Not sent' : uploading ? 'Sending…' : (message.reply_to_message ? 'Video reply' : 'Video')}</Text>
               </View>
+              {!!message.content && (
+                <Text style={[styles.mediaCaption, isMe && { color: '#000' }]}>{message.content}</Text>
+              )}
             </TouchableOpacity>
           );
         }
@@ -2046,12 +2237,18 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
         <View style={[styles.msgMeta, isMe && styles.msgMetaMe]}>
           <Text style={styles.msgTime}>{formatTime(message.created_at)}</Text>
           {isMe && ((message as any)._job
-            ? <Ionicons name={(message as any)._failed ? 'alert-circle-outline' : 'time-outline'} size={12} color={(message as any)._failed ? C.red : C.muted2} />
-            : (
-              <Text style={[styles.readTick, message.is_read && { color: C.green }]}>
-                {message.is_read ? '✓✓' : '✓'}
-              </Text>
-            ))}
+            ? (
+              <TouchableOpacity disabled={!(message as any)._failed} onPress={() => onRetryUpload?.(message)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                <Ionicons name={(message as any)._failed ? 'alert-circle-outline' : 'time-outline'} size={12}
+                  color={(message as any)._failed ? C.red : C.muted2} />
+                {(message as any)._failed && <Text style={{ fontSize: 10, color: C.red, fontWeight: '700' }}>Tap to retry</Text>}
+              </TouchableOpacity>
+            )
+            : (() => {
+                const tk = tickState(message);
+                return <Text style={[styles.readTick, tk.green && { color: C.green }]}>{tk.text}</Text>;
+              })())}
         </View>
       </View>
     </View>
@@ -2121,14 +2318,14 @@ export default function ChatScreen() {
 
 
   // FIX: expo-audio recorder replaces expo-av Audio.Recording
-  const recorder      = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorder      = useAudioRecorder(VOICE_PRESET as any);
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isOnline = usePresence(user?.id || null, otherUserId || null);
 
   const {
     messages, loading, sending, sendText, sendVoiceNote,
-    sendImage, sendVideo, sendGift, retryUpload, cancelUpload, reactToMessage, deleteMessage,
+    sendImage, sendVideo, sendGift, retryUpload, cancelUpload, markMediaOpened, reactToMessage, deleteMessage,
   } = useMessages(
     id, user?.id || null, vanishOn, 86400,
     otherUserId || null, userProfile?.username || '', userProfile?.display_name || 'Someone',
@@ -2141,8 +2338,20 @@ export default function ChatScreen() {
 
   const displayName = userProfile?.display_name || userProfile?.username || 'LumVibe User';
 
+  // ✅ NEW: share my chat invite link — anyone who opens it (after they log in or
+  // sign up) lands in a one-to-one chat with me.
+  const shareInvite = useCallback(async () => {
+    try {
+      const { data, error } = await supabase.rpc('create_chat_invite', { p_rotate: false });
+      if (error || !data) throw error || new Error('Could not create the link');
+      const link = `https://lumvibe.site/chat/invite/${data}`;
+      await Share.share({ message: `Chat with me on LumVibe 💬\n${link}`, url: link });
+    } catch (e: any) { Alert.alert('Could not create link', e?.message || 'Please try again.'); }
+  }, []);
+
   // ✅ NEW: in-app photo/video viewer
   const [viewerId, setViewerId] = useState<string | null>(null);
+  const [composerAssets, setComposerAssets] = useState<PickedAsset[] | null>(null);   // ✅ NEW: caption screen
   const mediaItems = useMemo(() => messages.filter(m =>
     (m.message_type === 'image' || m.message_type === 'video') &&
     !!m.media_url && !m.is_deleted && !m.shared_video_id), [messages]);
@@ -2381,9 +2590,19 @@ export default function ChatScreen() {
   const handlePickCamera = useCallback(async () => {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) { Alert.alert('Permission needed', 'Please allow camera access.'); return; }
-    const result = await ImagePicker.launchCameraAsync({ quality: lowData ? 0.4 : 0.8 });
-    if (!result.canceled && result.assets[0]) await sendImage(result.assets[0].uri);
-  }, [sendImage, lowData]);
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.All, videoMaxDuration: 60, quality: lowData ? 0.4 : 0.8,
+    });
+    if (!result.canceled && result.assets[0]) setComposerAssets([toPickedAsset(result.assets[0])]);
+  }, [lowData]);
+
+  const sendComposed = useCallback((items: (PickedAsset & { caption: string })[]) => {
+    setComposerAssets(null);
+    for (const it of items) {
+      if (it.type === 'video') sendVideo(it.uri, undefined, it.duration, it.caption || undefined);
+      else sendImage(it.uri, it.caption || undefined);
+    }
+  }, [sendVideo, sendImage]);
 
   // ✅ NEW: reply to a specific message with a short video (max 30 s),
   // recorded right now. It stays inside this conversation — it is NOT posted
@@ -2412,11 +2631,8 @@ export default function ChatScreen() {
       allowsMultipleSelection: true, selectionLimit: 10, orderedSelection: true,
     } as any);
     if (result.canceled || !result.assets?.length) return;
-    for (const a of result.assets as any[]) {
-      const secs = a.duration ? Math.round(a.duration > 1000 ? a.duration / 1000 : a.duration) : undefined;
-      sendVideo(a.uri, undefined, secs);
-    }
-  }, [sendVideo]);
+    setComposerAssets((result.assets as any[]).map(toPickedAsset));
+  }, []);
 
   // ✅ NEW: Gallery now takes up to 10 photos AND videos at once (mixed), like
   // WhatsApp. Each one uploads separately with its own progress / Retry.
@@ -2428,15 +2644,8 @@ export default function ChatScreen() {
       allowsMultipleSelection: true, selectionLimit: 10, orderedSelection: true,
     } as any);
     if (result.canceled || !result.assets?.length) return;
-    for (const a of result.assets as any[]) {
-      if (a.type === 'video') {
-        const secs = a.duration ? Math.round(a.duration > 1000 ? a.duration / 1000 : a.duration) : undefined;
-        sendVideo(a.uri, undefined, secs);
-      } else {
-        sendImage(a.uri);
-      }
-    }
-  }, [sendVideo, sendImage, lowData]);
+    setComposerAssets((result.assets as any[]).map(toPickedAsset));
+  }, [lowData]);
 
   // ✅ REWRITTEN (voice notes): the old version needed you to HOLD a tiny 40px
   // button, awaited permission + prepare on every press (slow start), used a
@@ -2448,14 +2657,26 @@ export default function ChatScreen() {
   const isRecordingRef = useRef(false);
   const recStartRef    = useRef(0);
   const recReadyRef    = useRef(false);
+  const recLiveRef     = useRef(false);   // the recorder is REALLY recording
   const recBusyRef     = useRef(false);
   const finishRef      = useRef<(send: boolean) => void>(() => {});
 
-  const warmRecorder = useCallback(async (): Promise<boolean> => {
+  // ✅ CHANGED (instant start): the slow steps — mic permission, audio mode and
+  // preparing the recorder — now happen when the chat OPENS (and again right
+  // after each voice note), not when you tap. So the tap only has to press
+  // "record", and the recording bar shows on the very first frame.
+  const warmRecorder = useCallback(async (askPermission = true): Promise<boolean> => {
     try {
-      const status = await AudioModule.requestRecordingPermissionsAsync();
-      if (!status.granted) return false;
-      try { await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true }); } catch (_) {}
+      let granted = false;
+      try { granted = !!(await AudioModule.getRecordingPermissionsAsync()).granted; } catch (_) {}
+      if (!granted) {
+        if (!askPermission) return false;
+        granted = !!(await AudioModule.requestRecordingPermissionsAsync()).granted;
+      }
+      if (!granted) return false;
+      if (Platform.OS === 'android') {
+        try { await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true }); } catch (_) {}
+      }
       await recorder.prepareToRecordAsync();
       recReadyRef.current = true;
       return true;
@@ -2465,31 +2686,36 @@ export default function ChatScreen() {
       return false;
     }
   }, [recorder]);
+  useEffect(() => { warmRecorder(false); }, []);
 
   const startRecording = useCallback(async () => {
     if (recBusyRef.current || isRecordingRef.current) return;
     recBusyRef.current = true;
+    isRecordingRef.current = true; recLiveRef.current = false;
+    setRecordingDur(0); setIsRecording(true);                       // bar appears NOW
+    try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch (_) {}
     try {
       if (!recReadyRef.current) {
-        const ok = await warmRecorder();
-        if (!ok) { Alert.alert('Permission needed', 'Please allow microphone access.'); return; }
+        const ok = await warmRecorder(true);                         // only the very first time
+        if (!ok) throw new Error('mic');
+      }
+      if (!isRecordingRef.current) return;                           // cancelled while getting ready
+      if (Platform.OS === 'ios') {
+        try { await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true }); } catch (_) {}
       }
       recorder.record();
-      recReadyRef.current = false;
-      isRecordingRef.current = true;
+      recReadyRef.current = false; recLiveRef.current = true;
       recStartRef.current = Date.now();
-      setRecordingDur(0);
-      setIsRecording(true);
-      try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch (_) {}
       recordTimerRef.current = setInterval(() => {
         const d = Math.floor((Date.now() - recStartRef.current) / 1000);
         setRecordingDur(d);
-        if (d >= 300) finishRef.current(true); // 5-minute cap
+        if (d >= 300) finishRef.current(true);                       // 5-minute cap
       }, 250);
     } catch (e) {
-      console.error('startRecording error:', e);
-      isRecordingRef.current = false; setIsRecording(false);
-      recReadyRef.current = false;
+      console.warn('startRecording error:', e);
+      isRecordingRef.current = false; recLiveRef.current = false; recReadyRef.current = false;
+      setIsRecording(false);
+      Alert.alert('Microphone', 'Please allow microphone access to send voice notes.');
     } finally { recBusyRef.current = false; }
   }, [recorder, warmRecorder]);
 
@@ -2498,6 +2724,8 @@ export default function ChatScreen() {
     isRecordingRef.current = false;
     if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
     setIsRecording(false);
+    if (!recLiveRef.current) { setRecordingDur(0); return; }          // never really started
+    recLiveRef.current = false;
     const dur = Math.max(0, Math.round((Date.now() - recStartRef.current) / 1000));
     try {
       await recorder.stop();
@@ -2505,12 +2733,12 @@ export default function ChatScreen() {
       try { await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }); } catch (_) {}
       try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch (_) {}
       if (send && uri) {
-        if (dur < 1) Alert.alert('Too short', 'Hold the idea a little longer — voice notes need at least 1 second.');
-        else sendVoiceNote(uri, dur).then(ok => { if (!ok) Alert.alert('Voice note not sent', 'Please check your connection and try again.'); });
+        if (dur < 1) Alert.alert('Too short', 'Voice notes need at least 1 second.');
+        else sendVoiceNote(uri, dur);
       }
     } catch (e) { console.error('finishRecording error:', e); }
     setRecordingDur(0);
-    warmRecorder(); // get ready for the next one in the background
+    warmRecorder(false);                                              // ready for the next one
   }, [recorder, sendVoiceNote, warmRecorder]);
   useEffect(() => { finishRef.current = finishRecording; }, [finishRecording]);
 
@@ -2648,6 +2876,7 @@ export default function ChatScreen() {
               onOpenMedia={(m) => setViewerId(m.id)}
               onRetryUpload={retryUpload}
               onCancelUpload={cancelUpload}
+              onSeen={markMediaOpened}
             />
           )}
           contentContainerStyle={[styles.messagesList, { flexGrow: 1 }]}
@@ -2767,8 +2996,12 @@ export default function ChatScreen() {
       </KeyboardAvoidingView>
 
       {/* Reaction Picker */}
+      {composerAssets && (
+        <MediaComposer assets={composerAssets} onClose={() => setComposerAssets(null)} onSend={sendComposed} />
+      )}
+
       {viewerId && viewerStart >= 0 && (
-        <MediaViewer items={mediaItems} startIndex={viewerStart} onClose={() => setViewerId(null)} />
+        <MediaViewer items={mediaItems} startIndex={viewerStart} onClose={() => setViewerId(null)} onSeen={markMediaOpened} />
       )}
 
       {/* ✅ NEW: gift sheet — same look and flow as the feed (videos.tsx) */}
@@ -2882,6 +3115,10 @@ export default function ChatScreen() {
             }}>
               <Ionicons name="flag-outline" size={20} color={C.white} />
               <Text style={styles.sheetRowText}>Report {otherName || 'User'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.sheetRow} onPress={shareInvite}>
+              <Ionicons name="link-outline" size={20} color={C.white} />
+              <Text style={styles.sheetRowText}>Share my chat invite link</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.sheetRow} onPress={toggleLowData}>
               <Ionicons name="cellular-outline" size={20} color={lowData ? C.green : C.white} />
@@ -3036,6 +3273,17 @@ const styles = StyleSheet.create({
   viewerTop:   { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingBottom: 10, backgroundColor: 'rgba(0,0,0,0.35)' },
   viewerClose: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
   viewerCount: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  mediaCaption: { color: C.white, fontSize: 14.5, paddingHorizontal: 8, paddingTop: 6, paddingBottom: 3, maxWidth: 230 },
+  viewerCaption: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 18, paddingTop: 12, paddingBottom: 34, backgroundColor: 'rgba(0,0,0,0.55)' },
+  viewerCaptionText: { color: '#fff', fontSize: 15 },
+  composerTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingBottom: 10 },
+  composerThumb: { width: 54, height: 54, borderRadius: 8, overflow: 'hidden', borderWidth: 2, borderColor: 'transparent' },
+  composerThumbDot: { position: 'absolute', right: 3, top: 3, width: 8, height: 8, borderRadius: 4, backgroundColor: C.green },
+  composerBar: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, paddingHorizontal: 12, paddingTop: 8, paddingBottom: Platform.OS === 'ios' ? 30 : 16 },
+  composerInput: { flex: 1, maxHeight: 110, backgroundColor: '#1c1c1c', color: '#fff', fontSize: 15, borderRadius: 22, paddingHorizontal: 16, paddingVertical: 10 },
+  composerSend: { width: 46, height: 46, borderRadius: 23, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center' },
+  composerBadge: { position: 'absolute', top: -4, right: -4, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
+  composerBadgeText: { fontSize: 11, fontWeight: '800', color: '#000' },
   retryPill:  { position: 'absolute', left: 8, bottom: 8, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.62)' },
   cancelPill: { position: 'absolute', left: 8, bottom: 8, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.62)' },
   retryText:  { color: '#fff', fontSize: 12.5, fontWeight: '700' },
