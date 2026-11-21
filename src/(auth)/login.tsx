@@ -27,6 +27,7 @@ import { useAuthStore } from '../store/authStore';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../config/supabase';
 import { checkAndApplyPendingReferral } from '../utils/referralUtils';
+import PendingInviteBanner from '../components/PendingInviteBanner';       // ✅ NEW
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -122,6 +123,9 @@ export default function LoginScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.form}>
+          {/* ✅ NEW: shown only when you arrived through a chat invite link */}
+          <PendingInviteBanner />
+
           <View style={styles.inputContainer}>
             <Text style={styles.label}>Email</Text>
             <View style={[

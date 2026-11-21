@@ -34,6 +34,17 @@ export default {
     },
         "android": {
       "package": "com.lumvibeapp2",
+      // ✅ NEW: lets https://lumvibe.site/chat/invite/<code> links open the app
+      // directly (Android "App Links"). Needs the assetlinks.json file on the
+      // website too — see the setup notes. Needs a NEW EAS build.
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [{ "scheme": "https", "host": "lumvibe.site", "pathPrefix": "/chat/invite" }],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ],
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./src/assets/images/adaptive-icon.png",
@@ -76,7 +87,7 @@ export default {
       // ✅ NEW: Play requires a new version code for every upload — your
       // last one used code 1, so this build must be 2 or higher. Bump this
       // by 1 every time you build again after this.
-      "versionCode": 11
+      "versionCode": 12
     },
     "plugins": [
       "expo-audio",

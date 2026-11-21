@@ -55,6 +55,9 @@ import { useNotificationPushNavigation } from './src/lib/notificationPushNavigat
 // link) when it opens the app — see authDeepLink.ts for the full picture
 // of what was missing and why the verification link used to freeze/crash.
 import { useAuthDeepLink } from './src/lib/authDeepLink';
+// ✅ NEW: "Share my chat invite link" — opens the one-to-one chat with whoever
+// sent the link, as soon as the person is logged in (see chatInviteLink.ts).
+import { useChatInviteLink } from './src/lib/chatInviteLink';
 // ✅ NEW: fixes "the ring only shows if I'm already on the chat screen" —
 // see globalIncomingSignal.tsx for the full explanation. Needs the
 // current user's id to subscribe to their personal signal channel.
@@ -88,6 +91,7 @@ export default function App() {
   // ✅ NEW: handles Answer/tap on the notifee full-screen call banner.
   useNotifeeCallNavigation(navigationRef);
   useAuthDeepLink();
+  useChatInviteLink(navigationRef);
 
   // ✅ NEW: the actual global, any-screen ring — see globalIncomingSignal.tsx.
   const { user } = useAuthStore();

@@ -44,6 +44,7 @@ import { Feather } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { generateReferralCode, processReferralReward } from '../utils/referralRewards';
 import { savePendingReferral, peekPendingReferralCode } from '../utils/referralUtils';
+import PendingInviteBanner from '../components/PendingInviteBanner';       // ✅ NEW
 import { useNavigation } from '@react-navigation/native';
 import * as Contacts from 'expo-contacts';
 
@@ -734,6 +735,9 @@ export default function SignupScreen() {
           </View>
 
           <View style={s.form}>
+            {/* ✅ NEW: shown only when you arrived through a chat invite link */}
+            <PendingInviteBanner />
+
             <View style={s.inputGroup}>
               <Text style={s.label}>Email *</Text>
               <View style={s.inputContainer}>

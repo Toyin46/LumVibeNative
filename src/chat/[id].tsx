@@ -6,7 +6,7 @@ import {
   View, Text, FlatList, TextInput, TouchableOpacity,
   StyleSheet, StatusBar, KeyboardAvoidingView,
   Platform, Modal, Alert, ActivityIndicator, Image,
-  ScrollView, Dimensions, PermissionsAndroid, Linking, Share,
+  ScrollView, Dimensions, PermissionsAndroid, Linking, Share, Keyboard,
 } from 'react-native';
 import { useAudioPlayer, useAudioRecorder, AudioModule, RecordingPresets, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 // ✅ NEW: already in your package.json — used for the in-app photo/video viewer
@@ -33,6 +33,7 @@ import { parseRingData } from '../lib/ringPayload';
 import { cancelChatNotification } from '../lib/chatNotifications';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import ContextStoryBar from './components/ContextStoryBar';
 // FIX: react-native's own SafeAreaView is iOS-only — on Android it's a
 // no-op View, which is exactly why the header (back button, avatar, call
@@ -1130,11 +1131,11 @@ async function softDeleteMessage(messageId: string, userId: string): Promise<boo
 
 async function markAsRead(conversationId: string, userId: string): Promise<void> {
   try {
-    await supabase.from('messages').update({ is_read: true })
-      .eq('conversation_id', conversationId).neq('sender_id', userId).eq('is_read', false);
-    await supabase.from('conversation_participants')
-      .update({ unread_count: 0, last_read_at: new Date().toISOString() })
-      .eq('conversation_id', conversationId).eq('user_id', userId);
+    // ✅ CHANGED: the old direct update was silently refused by the database
+    // (only the SENDER may edit a message), so messages never became "read" and
+    // the sender never saw green ticks. This server function does it properly.
+    const { error } = await supabase.rpc('mark_conversation_read', { p_conversation_id: conversationId });
+    if (error) throw error;
   } catch (error) { console.error('markAsRead error:', error); }
 }
 
@@ -1785,6 +1786,67 @@ function videoPosterUrl(url?: string): string | undefined {
   return url.replace('/video/upload/', '/video/upload/so_0,w_360,q_auto:low/').replace(/\.[a-z0-9]+(\?.*)?$/i, '.jpg');
 }
 
+// ✅ NEW: chat wallpaper — a very soft green-black gradient with small doodles
+// (chat bubbles, hearts, music, gifts…) drawn faintly, a bit like WhatsApp's.
+// Drawn once, never re-rendered, and it ignores touches.
+const DOODLES = [
+  'chatbubble-outline', 'heart-outline', 'musical-notes-outline', 'gift-outline', 'star-outline',
+  'videocam-outline', 'camera-outline', 'flash-outline', 'leaf-outline', 'call-outline',
+  'happy-outline', 'flame-outline', 'diamond-outline', 'paw-outline', 'planet-outline',
+] as const;
+const ChatWallpaper = React.memo(function ChatWallpaper() {
+  const { width, height } = Dimensions.get('window');
+  const size = 62;
+  const cols = Math.ceil(width / size) + 1;
+  const rows = Math.ceil(height / size) + 1;
+  const items: React.ReactNode[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const name = DOODLES[(r * 4 + c * 7) % DOODLES.length];
+      const x = c * size + (r % 2 ? size / 2 : 0) - 8;
+      const y = r * size;
+      const rot = (((r * 5 + c * 3) % 5) - 2) * 14;
+      items.push(
+        <Ionicons key={`${r}-${c}`} name={name as any} size={22 + ((r + c) % 3) * 2}
+          color="#00ff88" style={{ position: 'absolute', left: x, top: y, opacity: 0.07, transform: [{ rotate: `${rot}deg` }] }} />
+      );
+    }
+  }
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <LinearGradient colors={['#031a0f', '#020a06', '#000000']} start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 1 }}
+        style={StyleSheet.absoluteFill} />
+      {items}
+    </View>
+  );
+});
+
+// ✅ NEW (keyboard fix): on newer Android (your Expo 55 / RN 0.83 build draws
+// edge-to-edge) the screen is NOT shrunk when the keyboard opens, so the message
+// bar ended up hidden BEHIND the keyboard and you could not see what you typed.
+// This measures how much of the screen the keyboard really covers and lifts the
+// content by exactly that much. If the phone already shrinks the screen itself,
+// the overlap is 0 and nothing extra is added. (iPhone keeps using the normal
+// KeyboardAvoidingView.)
+function useKeyboardOverlap(onShow?: () => void) {
+  const ref = useRef<View>(null);
+  const [overlap, setOverlap] = useState(0);
+  const onShowRef = useRef(onShow);
+  onShowRef.current = onShow;
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const show = Keyboard.addListener('keyboardDidShow', (e: any) => {
+      ref.current?.measureInWindow((_x: number, y: number, _w: number, h: number) => {
+        setOverlap(Math.max(0, Math.round(y + h - e.endCoordinates.screenY)));
+        setTimeout(() => onShowRef.current?.(), 60);
+      });
+    });
+    const hide = Keyboard.addListener('keyboardDidHide', () => setOverlap(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+  return { ref, overlap };
+}
+
 // ✅ NEW: the "add a caption" screen shown after you pick photos / videos (or
 // take one with the camera): preview, a caption for EACH item, remove items,
 // then send. Same idea as WhatsApp.
@@ -1798,6 +1860,8 @@ function MediaComposer({ assets, onClose, onSend }: {
   const safeIndex = Math.min(index, Math.max(list.length - 1, 0));
   const cur = list[safeIndex];
   const topPad = Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 52;
+  const { ref: kbRef, overlap: kbOverlap } = useKeyboardOverlap();
+  const KbWrap: any = Platform.OS === 'ios' ? KeyboardAvoidingView : View;
 
   const removeAt = (i: number) => {
     if (list.length <= 1) { onClose(); return; }
@@ -1811,7 +1875,9 @@ function MediaComposer({ assets, onClose, onSend }: {
 
   return (
     <Modal visible animationType="slide" statusBarTranslucent onRequestClose={onClose}>
-      <KeyboardAvoidingView style={{ flex: 1, backgroundColor: '#000' }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <KbWrap ref={kbRef} collapsable={false}
+        style={{ flex: 1, backgroundColor: '#000', paddingBottom: Platform.OS === 'ios' ? 0 : kbOverlap }}
+        {...(Platform.OS === 'ios' ? { behavior: 'padding' } : {})}>
         <View style={[styles.composerTop, { paddingTop: topPad }]}>
           <TouchableOpacity onPress={onClose} style={styles.viewerClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Ionicons name="close" size={26} color="#fff" />
@@ -1846,7 +1912,7 @@ function MediaComposer({ assets, onClose, onSend }: {
             {list.length > 1 && <View style={styles.composerBadge}><Text style={styles.composerBadgeText}>{list.length}</Text></View>}
           </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
+      </KbWrap>
     </Modal>
   );
 }
@@ -2781,6 +2847,9 @@ export default function ChatScreen() {
     );
   }
 
+  const { ref: kbRef, overlap: kbOverlap } = useKeyboardOverlap(() => flatRef.current?.scrollToEnd?.({ animated: true }));
+  const KbWrap: any = Platform.OS === 'ios' ? KeyboardAvoidingView : View;
+
   const charCount     = inputText.length;
   const showCharCount = charCount >= 1800;
 
@@ -2857,11 +2926,12 @@ export default function ChatScreen() {
         </View>
       )}
 
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={HEADER_H}
+      <KbWrap
+        ref={kbRef} collapsable={false}
+        style={{ flex: 1, paddingBottom: Platform.OS === 'ios' ? 0 : kbOverlap }}
+        {...(Platform.OS === 'ios' ? { behavior: 'padding', keyboardVerticalOffset: HEADER_H } : {})}
       >
+        <ChatWallpaper />
         <FlatList
           ref={flatRef}
           data={messages}
@@ -2993,7 +3063,7 @@ export default function ChatScreen() {
               : <Ionicons name={isRecording ? 'checkmark' : 'send'} size={isRecording ? 22 : 17} color="#000" />}
           </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
+      </KbWrap>
 
       {/* Reaction Picker */}
       {composerAssets && (
@@ -3223,7 +3293,7 @@ const styles = StyleSheet.create({
   msgCol:   { maxWidth: '74%', gap: 2 },
   msgColMe: { alignItems: 'flex-end' },
   bubble:     { borderRadius: 18, paddingVertical: 10, paddingHorizontal: 14 },
-  bubbleThem: { backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderBottomLeftRadius: 5 },
+  bubbleThem: { backgroundColor: '#0f1a14', borderWidth: 1, borderColor: '#1b3427', borderBottomLeftRadius: 5 },
   bubbleMe:   { backgroundColor: C.green, borderBottomRightRadius: 5 },
   bubbleText:   { fontSize: 14, lineHeight: 21, color: C.white },
   bubbleTextMe: { color: '#000', fontWeight: '500' },
