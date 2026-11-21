@@ -2839,6 +2839,11 @@ export default function ChatScreen() {
     });
   }, [navigation, id, otherUserId, otherName, otherPhoto]);
 
+  // ✅ FIX: hooks must run on EVERY render, so this sits ABOVE the early return below.
+  // (Placing it below the loading check made React crash when loading finished.)
+  const { ref: kbRef, overlap: kbOverlap } = useKeyboardOverlap(() => flatRef.current?.scrollToEnd?.({ animated: true }));
+  const KbWrap: any = Platform.OS === 'ios' ? KeyboardAvoidingView : View;
+
   if (loading) {
     return (
       <SafeAreaView edges={['top']} style={[styles.safe, { alignItems: 'center', justifyContent: 'center' }]}>
@@ -2846,9 +2851,6 @@ export default function ChatScreen() {
       </SafeAreaView>
     );
   }
-
-  const { ref: kbRef, overlap: kbOverlap } = useKeyboardOverlap(() => flatRef.current?.scrollToEnd?.({ animated: true }));
-  const KbWrap: any = Platform.OS === 'ios' ? KeyboardAvoidingView : View;
 
   const charCount     = inputText.length;
   const showCharCount = charCount >= 1800;
