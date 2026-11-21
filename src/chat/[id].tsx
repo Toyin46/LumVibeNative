@@ -2005,7 +2005,7 @@ function lowDataImageUrl(url?: string): string | undefined {
 }
 
 // ── MESSAGE BUBBLE ────────────────────────────────────────────
-function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenMedia, onRetryUpload, onCancelUpload, onSeen }: {
+function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenMedia, onRetryUpload, onCancelUpload, onSeen, fallbackPhoto, fallbackName }: {
   message:     Message;
   isMe:        boolean;
   onLongPress: (msg: Message) => void;
@@ -2015,6 +2015,8 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
   onRetryUpload?: (msg: Message) => void;
   onCancelUpload?: (msg: Message) => void;
   onSeen?: (msg: Message) => void;
+  fallbackPhoto?: string;
+  fallbackName?: string;
 }) {
   const [isPlaying,  setIsPlaying]  = useState(false);
   const [imgError,   setImgError]   = useState(false);
@@ -2279,11 +2281,11 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
     <View style={[styles.msgRow, isMe && styles.msgRowMe]}>
       {!isMe && (
         <View style={styles.msgAv}>
-          {message.sender?.photo_url
-            ? <Image source={{ uri: message.sender.photo_url }} style={styles.msgAvImg} />
+          {(message.sender?.photo_url || (message.sender as any)?.avatar_url || fallbackPhoto)
+            ? <Image source={{ uri: (message.sender?.photo_url || (message.sender as any)?.avatar_url || fallbackPhoto) as string }} style={styles.msgAvImg} />
             : <View style={styles.msgAvPlaceholder}>
                 <Text style={{ color: C.green, fontSize: 10, fontWeight: '700' }}>
-                  {(message.sender?.display_name || 'U')[0].toUpperCase()}
+                  {String((message.sender as any)?.username || message.sender?.display_name || fallbackName || 'U').charAt(0).toUpperCase()}
                 </Text>
               </View>}
         </View>
@@ -2841,6 +2843,18 @@ export default function ChatScreen() {
 
   // ✅ FIX: hooks must run on EVERY render, so this sits ABOVE the early return below.
   // (Placing it below the loading check made React crash when loading finished.)
+  // ✅ NEW: always show the other person's REAL profile picture. The screen is sometimes
+  // opened without one (push notification, invite link, old list), so look it up here.
+  const [livePhoto, setLivePhoto] = useState('');
+  useEffect(() => {
+    if (!otherUserId) return;
+    let dead = false;
+    supabase.from('users').select('avatar_url, photo_url').eq('id', otherUserId).maybeSingle()
+      .then(({ data }) => { if (!dead && data) setLivePhoto((data as any).avatar_url || (data as any).photo_url || ''); });
+    return () => { dead = true; };
+  }, [otherUserId]);
+  const shownPhoto = otherPhoto || livePhoto;
+
   const { ref: kbRef, overlap: kbOverlap } = useKeyboardOverlap(() => flatRef.current?.scrollToEnd?.({ animated: true }));
   const KbWrap: any = Platform.OS === 'ios' ? KeyboardAvoidingView : View;
 
@@ -2865,10 +2879,10 @@ export default function ChatScreen() {
           <Ionicons name="chevron-back" size={22} color={C.white} />
         </TouchableOpacity>
         <TouchableOpacity style={{ position: 'relative' }}>
-          {otherPhoto
-            ? <Image source={{ uri: otherPhoto }} style={styles.chatAv} />
+          {shownPhoto
+            ? <Image source={{ uri: shownPhoto }} style={styles.chatAv} />
             : <View style={[styles.chatAv, { backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' }]}>
-                <Text style={{ color: C.green, fontSize: 15, fontWeight: '700' }}>{(otherName || 'U')[0]}</Text>
+                <Text style={{ color: C.green, fontSize: 15, fontWeight: '700' }}>{(otherName || 'U')[0].toUpperCase()}</Text>
               </View>}
           <View style={[styles.chatOnlineDot, { backgroundColor: isOnline ? C.green : C.muted2 }]} />
         </TouchableOpacity>
@@ -2949,6 +2963,8 @@ export default function ChatScreen() {
               onRetryUpload={retryUpload}
               onCancelUpload={cancelUpload}
               onSeen={markMediaOpened}
+              fallbackPhoto={shownPhoto}
+              fallbackName={otherName}
             />
           )}
           contentContainerStyle={[styles.messagesList, { flexGrow: 1 }]}
