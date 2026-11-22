@@ -10,6 +10,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from '../locales/LanguageContext';
 import { useAuthStore } from '../store/authStore';
+import { useUserStatusInfo } from '../components/StatusAvatar';   // ✅ NEW: status ring on my picture
 import { supabase } from '../config/supabase';
 import { notifyNewFollower } from '../utils/notificationHelpers';
 // ✅ FIX: this import was missing entirely — I added the notifyBadgeEarned()
@@ -844,6 +845,7 @@ function ContactInviteModal({
 
 export default function ProfileScreen() {
   const { userProfile, user, logout, loadProfile } = useAuthStore();
+  const myStatus = useUserStatusInfo(user?.id);   // ✅ NEW: do I have a status right now?
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
   // ✅ NEW: ProfileScreen never read route params at all before this —
@@ -2068,6 +2070,22 @@ export default function ProfileScreen() {
     ? <ReferralGlowBorder color={theme.primary} size={80}>{AvatarImg}</ReferralGlowBorder>
     : AvatarImg;
 
+  // ✅ NEW: Status on my own picture.
+  //   • green ring around the picture while I have a status
+  //   • tap  → watch my status (with views, who viewed, gifts)   — or the big picture if I have none
+  //   • hold → always the big picture
+  const onAvatarPress = () => {
+    if (myStatus.count > 0 && user?.id) {
+      navigation.navigate('StatusViewer', { userId: user.id, name: 'My status', avatar: userProfile.avatar_url || '' });
+    } else {
+      setProfilePictureModalVisible(true);
+    }
+  };
+  const ringSize = hasGlowingAvatar ? 100 : 90;
+  const StatusRingOverlay = myStatus.count > 0 ? (
+    <View pointerEvents="none" style={{ position: 'absolute', left: -5, top: -5, width: ringSize, height: ringSize, borderRadius: ringSize / 2, borderWidth: 2.5, borderColor: '#00ff88' }} />
+  ) : null;
+
   const activeSocialLinks = SOCIAL_PLATFORMS.filter(p => socialLinks[p.id]);
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -2157,11 +2175,12 @@ export default function ProfileScreen() {
                   </View>
                 )}
                 <View style={s.avatarContainer}>
-                  <TouchableOpacity onPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
+                  <TouchableOpacity onPress={onAvatarPress} onLongPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
                     {hasGlowingAvatar
                       ? <ReferralGlowBorder color={theme.primary} size={90}>{AvatarImg}</ReferralGlowBorder>
                       : AvatarImg}
                   </TouchableOpacity>
+                  {StatusRingOverlay}
                   <TouchableOpacity style={[th.cameraBadge, { bottom: -2, right: -2 }]} onPress={handleChangeAvatar}>
                     {uploadingAvatar
                       ? <ActivityIndicator size="small" color="#fff" />
@@ -2253,7 +2272,7 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </View>
 
-              <View style={s.quickActionsRow}>
+              <View style={[s.quickActionsRow, { flexWrap: 'wrap' }]}>
                 <TouchableOpacity
                   style={s.btnSecondary}
                   onPress={async () => { await Promise.all([loadUserCoins(), loadTransactions()]); setWalletVisible(true); }}
@@ -2268,6 +2287,11 @@ export default function ProfileScreen() {
                 <TouchableOpacity style={s.btnSecondary} onPress={async () => { await loadSavedPosts(); setSavedPostsModalVisible(true); }}>
                   <Feather name="bookmark" size={16} color={th.icon} />
                   <Text style={s.btnSecondaryText}>Saved</Text>
+                </TouchableOpacity>
+                {/* ✅ NEW: my status list (views, who viewed, delete, who can see it) */}
+                <TouchableOpacity style={s.btnSecondary} onPress={() => navigation.navigate('MyStatus')}>
+                  <Feather name="aperture" size={16} color={myStatus.count > 0 ? '#00ff88' : th.icon} />
+                  <Text style={s.btnSecondaryText}>Status</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -2312,9 +2336,10 @@ export default function ProfileScreen() {
                     <ChampionPill />
                   </View>
                 )}
-                <TouchableOpacity onPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
+                <TouchableOpacity onPress={onAvatarPress} onLongPress={() => setProfilePictureModalVisible(true)} activeOpacity={0.8}>
                   {AvatarNode}
                 </TouchableOpacity>
+                {StatusRingOverlay}
                 <TouchableOpacity style={[th.cameraBadge, hasGlowingAvatar && { bottom: -2, right: -10 }]} onPress={handleChangeAvatar}>
                   {uploadingAvatar ? <ActivityIndicator size="small" color="#fff" /> : <Feather name="camera" size={14} color="#fff" />}
                 </TouchableOpacity>

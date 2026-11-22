@@ -30,10 +30,19 @@ export default function MyStatusScreen() {
   const [color, setColor]         = useState(BG_COLORS[0]);
   const [vis, setVis]             = useState<'friends' | 'public'>('public');
   const [posting, setPosting]     = useState(false);
+  // default privacy for NEW statuses (null = the database setting is not installed yet → hide the control)
+  const [pref, setPref]           = useState<'friends' | 'public' | null>(null);
 
   const load = useCallback(async () => {
     if (!user?.id) return;
     setItems(await fetchUserStatuses(user.id).then(l => [...l].reverse()));   // newest first
+    try {
+      const { data, error } = await supabase.from('users').select('status_privacy').eq('id', user.id).maybeSingle();
+      if (!error && data && ((data as any).status_privacy === 'friends' || (data as any).status_privacy === 'public')) {
+        setPref((data as any).status_privacy);
+        setVis((data as any).status_privacy);
+      } else setPref(null);
+    } catch { setPref(null); }
     setLoading(false); setRef(false);
   }, [user?.id]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -50,6 +59,23 @@ export default function MyStatusScreen() {
       ]) },
       { text: 'Cancel', style: 'cancel' },
     ]);
+  };
+
+  const changePref = () => {
+    if (!user?.id || !pref) return;
+    const next = pref === 'public' ? 'friends' : 'public';
+    Alert.alert(
+      next === 'friends' ? 'New statuses: Friends only?' : 'New statuses: Public?',
+      next === 'friends'
+        ? 'From now on, only your friends can see the statuses you post. Statuses you already posted are not changed.'
+        : 'From now on, your friends, followers and people who open your profile can see the statuses you post. Statuses you already posted are not changed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: next === 'friends' ? 'Friends only' : 'Public', onPress: async () => {
+            const { error } = await supabase.from('users').update({ status_privacy: next }).eq('id', user.id);
+            if (error) Alert.alert('Could not save', error.message); else { setPref(next); setVis(next); }
+        } },
+      ]);
   };
 
   const postText = async () => {
@@ -95,6 +121,17 @@ export default function MyStatusScreen() {
         </TouchableOpacity>
         <Text style={styles.title}>My status</Text>
       </View>
+
+      {pref && (
+        <TouchableOpacity style={styles.prefRow} activeOpacity={0.8} onPress={changePref}>
+          <Ionicons name={pref === 'public' ? 'earth' : 'lock-closed'} size={20} color={GREEN} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.prefTitle}>Who can see my new status</Text>
+            <Text style={styles.prefSub}>{pref === 'public' ? 'Public — friends, followers and profile visitors' : 'Friends only — private'}</Text>
+          </View>
+          <Text style={styles.prefChange}>Change</Text>
+        </TouchableOpacity>
+      )}
 
       {loading ? <ActivityIndicator color={GREEN} style={{ marginTop: 40 }} /> : (
         <FlatList
@@ -155,6 +192,10 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#0b0f12' },
   header: { flexDirection: 'row', alignItems: 'center', gap: 16, paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#1b2126' },
   title: { color: '#fff', fontSize: 22, fontWeight: '600' },
+  prefRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: '#141a1e' },
+  prefTitle: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  prefSub: { color: '#8a8f93', fontSize: 12.5, marginTop: 2 },
+  prefChange: { color: GREEN, fontSize: 14, fontWeight: '700' },
   row: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#141a1e' },
   ring: { width: 64, height: 64, borderRadius: 32, borderWidth: 2.5, borderColor: GREEN, alignItems: 'center', justifyContent: 'center' },
   thumb: { width: 54, height: 54, borderRadius: 27, backgroundColor: '#1a1a1a' },
