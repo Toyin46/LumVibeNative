@@ -34,6 +34,7 @@ import { cancelChatNotification } from '../lib/chatNotifications';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import StatusAvatar from '../components/StatusAvatar';   // ✅ NEW: status ring + tap for the BIG picture
 import ContextStoryBar from './components/ContextStoryBar';
 // FIX: react-native's own SafeAreaView is iOS-only — on Android it's a
 // no-op View, which is exactly why the header (back button, avatar, call
@@ -2878,14 +2879,12 @@ export default function ChatScreen() {
         <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="chevron-back" size={22} color={C.white} />
         </TouchableOpacity>
-        <TouchableOpacity style={{ position: 'relative' }}>
-          {shownPhoto
-            ? <Image source={{ uri: shownPhoto }} style={styles.chatAv} />
-            : <View style={[styles.chatAv, { backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' }]}>
-                <Text style={{ color: C.green, fontSize: 15, fontWeight: '700' }}>{(otherName || 'U')[0].toUpperCase()}</Text>
-              </View>}
+        <View style={{ position: 'relative' }}>
+          {/* ✅ CHANGED: tap = BIG profile picture (or their status if they have one: green ring);
+              hold = always the big picture. No picture → big first letter. */}
+          <StatusAvatar userId={otherUserId} avatarUrl={shownPhoto} name={otherName} size={40} />
           <View style={[styles.chatOnlineDot, { backgroundColor: isOnline ? C.green : C.muted2 }]} />
-        </TouchableOpacity>
+        </View>
         <View style={styles.chatUserInfo}>
           <Text style={styles.chatName} numberOfLines={1}>{otherName || 'Chat'}</Text>
           {isOnline

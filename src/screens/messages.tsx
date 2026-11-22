@@ -51,6 +51,7 @@ import { RealtimeChannel } from '@supabase/supabase-js';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+import StatusStrip from '../status/StatusStrip';   // ✅ NEW
 // ✅ NEW: "watch with someone who isn't on LumVibe" (invite by link)
 import { createLinkRoom, LINK_ROOM_MARKER } from '../lib/linkRoom';
 import NetInfo from '@react-native-community/netinfo';
@@ -1492,22 +1493,11 @@ export default function MessagesScreen() {
         )}
       </View>
 
-      {/* ── Stories row ── */}
-      {/* ✅ FIX: onPress now opens the story viewer at the correct index */}
-      {stories.length > 0 && (
-        <View style={styles.storiesWrap}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.storiesRow}>
-            {stories.map((story, idx) => (
-              <StoryItem
-                key={story.id}
-                story={story}
-                onPress={() => setViewingStoryIndex(idx)}
-              />
-            ))}
-          </ScrollView>
-        </View>
-      )}
+      {/* ── Status row ── */}
+      {/* ✅ CHANGED: replaces the old per-story circles. One circle per PERSON (like
+          WhatsApp): My status first, then friends / people you follow. Private
+          (friends-only) statuses are hidden from everyone else by the database. */}
+      <StatusStrip />
 
       {/* ── Tabs ── */}
       <View style={styles.tabsWrap}>
@@ -1541,16 +1531,6 @@ export default function MessagesScreen() {
         {renderTabContent()}
       </View>
 
-      {/* ── Story viewer ── */}
-      {/* ✅ NEW: Full-screen story viewer rendered at root level so it covers everything */}
-      {viewingStoryIndex !== null && (
-        <StoryViewer
-          stories={stories}
-          startIndex={viewingStoryIndex}
-          currentUserId={user?.id || ''}
-          onClose={() => setViewingStoryIndex(null)}
-        />
-      )}
     </SafeAreaView>
   );
 }

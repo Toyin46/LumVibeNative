@@ -29,6 +29,9 @@ export type RootStackParamList = {
   // always a normal public-to-profile story.
   Story: { contextType?: 'dm' | 'group' | 'circle'; contextId?: string; contextLabel?: string } | undefined;
   QuickPost: { mode?: 'text' | 'photo'} | undefined;
+  // ✅ NEW: Status (see src/status)
+  StatusViewer: { userId: string; startStoryId?: string; name?: string; avatar?: string };
+  MyStatus: undefined;
 };
 
 export type MainTabParamList = {
