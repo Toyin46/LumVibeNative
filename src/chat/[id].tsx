@@ -2895,7 +2895,7 @@ export default function ChatScreen() {
         <View style={styles.chatActions}>
           <TouchableOpacity
             style={styles.chatActBtn}
-            onPress={() => (navigation as any).navigate('Story', {
+            onPress={() => (navigation as any).navigate('AddStatus', {
               contextType: 'dm', contextId: id, contextLabel: otherName || 'this chat',
             })}
           >

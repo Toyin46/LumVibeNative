@@ -123,3 +123,47 @@ export const GIFT_PACKAGES = [
   { id: 'castle', name: 'Castle', icon: '🏰', coins: 400, color: '#9d4edd' },
   { id: 'trophy', name: 'Trophy', icon: '🏆', coins: 500, color: '#cd7f32' },
 ];
+
+// ───────────────────────── posting ─────────────────────────
+const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvllxm0wg';
+const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'Kinsta_unsigned';
+
+// upload a photo / video to Cloudinary with progress; resolves to the https link, or null
+export function uploadStatusMedia(uri: string, type: 'image' | 'video', onProgress?: (pct: number) => void): Promise<string | null> {
+  return new Promise(resolve => {
+    try {
+      const fd = new FormData();
+      fd.append('file', { uri, type: type === 'video' ? 'video/mp4' : 'image/jpeg', name: `status_${Date.now()}.${type === 'video' ? 'mp4' : 'jpg'}` } as any);
+      fd.append('upload_preset', UPLOAD_PRESET);
+      fd.append('folder', 'lumvibe_status');
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/${type === 'video' ? 'video' : 'image'}/upload`);
+      xhr.timeout = type === 'video' ? 240000 : 90000;
+      xhr.upload.onprogress = (e: any) => { if (onProgress && e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)); };
+      xhr.onload = () => {
+        try {
+          if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText).secure_url || null);
+          else { console.warn('status upload failed', xhr.status, (xhr.responseText || '').slice(0, 200)); resolve(null); }
+        } catch { resolve(null); }
+      };
+      xhr.onerror = () => resolve(null);
+      xhr.ontimeout = () => resolve(null);
+      xhr.send(fd);
+    } catch { resolve(null); }
+  });
+}
+
+export type PostStatusArgs = {
+  mediaUrl?: string; mediaType: 'image' | 'video' | 'text'; caption?: string; text?: string; bg?: string;
+  visibility: 'friends' | 'public' | 'private'; contextType?: 'dm' | 'group' | 'circle'; contextId?: string;
+};
+
+// ONE safe path for posting; the database keeps exactly the privacy you picked
+export async function postStatus(a: PostStatusArgs): Promise<{ success: boolean; error?: string; id?: string }> {
+  const { data, error } = await supabase.rpc('post_status', {
+    p_media_url: a.mediaUrl || '', p_media_type: a.mediaType, p_caption: a.caption || null, p_text: a.text || null,
+    p_bg: a.bg || null, p_visibility: a.visibility, p_context_type: a.contextType || null, p_context_id: a.contextId || null,
+  });
+  if (error) return { success: false, error: error.message };
+  return (data as any) || { success: false, error: 'No answer from the server.' };
+}

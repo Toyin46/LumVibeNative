@@ -48,11 +48,11 @@ export default function StatusStrip() {
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row}>
         {/* My status */}
         <TouchableOpacity style={styles.item} activeOpacity={0.85}
-          onPress={() => me && user ? navigation.navigate('StatusViewer', { userId: user.id, name: 'My status', avatar: myPic || '' }) : navigation.navigate('Story')}
+          onPress={() => me && user ? navigation.navigate('StatusViewer', { userId: user.id, name: 'My status', avatar: myPic || '' }) : navigation.navigate('AddStatus')}
           onLongPress={() => navigation.navigate('MyStatus')}>
           <View>
             <Bubble uri={myPic} letter={myLetter} ring={me ? GREEN : 'transparent'} />
-            <TouchableOpacity style={styles.plus} onPress={() => navigation.navigate('Story')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <TouchableOpacity style={styles.plus} onPress={() => navigation.navigate('AddStatus')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Ionicons name="add" size={16} color="#000" />
             </TouchableOpacity>
           </View>

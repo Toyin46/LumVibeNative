@@ -37,6 +37,7 @@ import PremiumScreen             from '../premium-subscription';
 import StoryScreen                from '../story';
 import StatusViewerScreen         from '../status/StatusViewerScreen';   // ✅ NEW
 import MyStatusScreen             from '../status/MyStatusScreen';       // ✅ NEW
+import AddStatusScreen            from '../status/AddStatusScreen';      // ✅ NEW
 import WeeklyScreen               from '../weekly/WeeklyScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -112,6 +113,7 @@ export function RootNavigator() {
           <Stack.Screen name="Story"               component={StoryScreen} />
           <Stack.Screen name="StatusViewer"        component={StatusViewerScreen as any} options={{ animation: 'fade' }} />
           <Stack.Screen name="MyStatus"            component={MyStatusScreen as any} />
+          <Stack.Screen name="AddStatus"           component={AddStatusScreen as any} />
           <Stack.Screen name="Challenge"           component={ChallengeScreen as any} />
           <Stack.Screen name="Weekly"             component={WeeklyScreen as any} />
         </>

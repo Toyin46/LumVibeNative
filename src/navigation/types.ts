@@ -32,6 +32,7 @@ export type RootStackParamList = {
   // ✅ NEW: Status (see src/status)
   StatusViewer: { userId: string; startStoryId?: string; name?: string; avatar?: string };
   MyStatus: undefined;
+  AddStatus: { contextType?: 'dm' | 'group' | 'circle'; contextId?: string; contextLabel?: string; mode?: 'text' } | undefined;
 };
 
 export type MainTabParamList = {

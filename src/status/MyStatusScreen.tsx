@@ -148,10 +148,10 @@ export default function MyStatusScreen() {
       )}
 
       <View style={styles.fabs}>
-        <TouchableOpacity style={styles.fabSmall} onPress={() => setTextOpen(true)}>
+        <TouchableOpacity style={styles.fabSmall} onPress={() => navigation.navigate('AddStatus', { mode: 'text' })}>
           <Ionicons name="pencil" size={22} color="#fff" />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('Story')}>
+        <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('AddStatus')}>
           <Ionicons name="camera" size={26} color="#000" />
         </TouchableOpacity>
       </View>
