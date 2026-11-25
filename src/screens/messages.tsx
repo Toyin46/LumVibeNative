@@ -52,6 +52,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 import StatusStrip from '../status/StatusStrip';   // ✅ NEW
+import StatusAvatar from '../components/StatusAvatar';   // ✅ NEW: tap a picture = their status or the BIG picture
+import AsyncStorage from '@react-native-async-storage/async-storage';   // ✅ NEW (clears a deleted chat's saved copy)
 // ✅ NEW: "watch with someone who isn't on LumVibe" (invite by link)
 import { createLinkRoom, LINK_ROOM_MARKER } from '../lib/linkRoom';
 import NetInfo from '@react-native-community/netinfo';
@@ -138,14 +140,18 @@ async function fetchConversations(currentUserId: string): Promise<Conversation[]
   try {
     const { data: myParticipations } = await supabase
       .from('conversation_participants')
-      .select('conversation_id, unread_count')
+      .select('conversation_id, unread_count, hidden_at')
       .eq('user_id', currentUserId);
 
     if (!myParticipations || myParticipations.length === 0) return [];
 
     const convIds = myParticipations.map((p: any) => p.conversation_id);
     const unreadMap: Record<string, number> = {};
-    myParticipations.forEach((p: any) => { unreadMap[p.conversation_id] = p.unread_count || 0; });
+    const hiddenMap: Record<string, string> = {};
+    myParticipations.forEach((p: any) => {
+      unreadMap[p.conversation_id] = p.unread_count || 0;
+      if (p.hidden_at) hiddenMap[p.conversation_id] = p.hidden_at;
+    });
 
     const { data: convs } = await supabase
       .from('conversations')
@@ -154,7 +160,13 @@ async function fetchConversations(currentUserId: string): Promise<Conversation[]
       .order('last_message_at', { ascending: false });
 
     // ✅ NEW: hidden one-person rooms used for link invites never show in the list
-    const visibleConvs = (convs || []).filter((c: any) => c.group_name !== LINK_ROOM_MARKER);
+    // ✅ NEW: a chat I deleted stays gone until the other person sends something NEW
+    const visibleConvs = (convs || []).filter((c: any) => {
+      if (c.group_name === LINK_ROOM_MARKER) return false;
+      const h = hiddenMap[c.id];
+      if (h && (!c.last_message_at || new Date(c.last_message_at).getTime() <= new Date(h).getTime())) return false;
+      return true;
+    });
     if (visibleConvs.length === 0) return [];
 
     const { data: allParticipants } = await supabase
@@ -504,18 +516,24 @@ function Avatar({ user, size = 52, showOnline = false }: {
   size?: number; showOnline?: boolean;
 }) {
   const av = getAvColor(user.id);
+  // ✅ CHANGED: same look as before, but now every picture in the inbox works like everywhere else:
+  //   tap  → their status (green ring) or the BIG picture;  hold → always the big picture;
+  //   no picture → big first letter. (The chat row itself still opens when you tap the row.)
+  const letterBox = (
+    <View style={[styles.avatarBase, { width: size, height: size, borderRadius: size / 2, backgroundColor: av.bg, borderColor: av.text }]}>
+      <Text style={{ color: av.text, fontSize: size * 0.36, fontWeight: '700' }}>
+        {(user.display_name || 'U')[0].toUpperCase()}
+      </Text>
+    </View>
+  );
   return (
     <View style={{ position: 'relative', width: size, height: size }}>
-      {user.photo_url
-        ? <Image source={{ uri: user.photo_url }} style={{ width: size, height: size, borderRadius: size / 2 }} />
-        : <View style={[styles.avatarBase, {
-            width: size, height: size, borderRadius: size / 2,
-            backgroundColor: av.bg, borderColor: av.text,
-          }]}>
-            <Text style={{ color: av.text, fontSize: size * 0.36, fontWeight: '700' }}>
-              {(user.display_name || 'U')[0].toUpperCase()}
-            </Text>
-          </View>}
+      <StatusAvatar
+        userId={user.id} avatarUrl={user.photo_url} name={user.display_name}
+        letter={(user as any).username || user.display_name}
+        size={size} style={{ position: 'absolute', left: -5, top: -5 }}
+        placeholder={letterBox}
+      />
       {showOnline && (
         <View style={[styles.onlineDot, {
           width: size * 0.24, height: size * 0.24, borderRadius: size * 0.12,
@@ -716,7 +734,7 @@ function StoryViewer({
 
 // ── CONVERSATION ITEM ─────────────────────────────────────────
 // (identical to original)
-function ConvoItem({ convo, onPress }: { convo: Conversation; onPress: () => void }) {
+function ConvoItem({ convo, onPress, onLongPress }: { convo: Conversation; onPress: () => void; onLongPress?: () => void }) {
   const hasUnread = (convo.unread_count || 0) > 0;
   const other = convo.other_user;
   const timeAgo = (d?: string) => {
@@ -726,7 +744,7 @@ function ConvoItem({ convo, onPress }: { convo: Conversation; onPress: () => voi
     if (m < 1) return 'now'; if (m < 60) return `${m}m`; if (h < 24) return `${h}h`; return `${dy}d`;
   };
   return (
-    <TouchableOpacity style={styles.convoItem} onPress={onPress} activeOpacity={0.7}>
+    <TouchableOpacity style={styles.convoItem} onPress={onPress} onLongPress={onLongPress} delayLongPress={350} activeOpacity={0.7}>
       {other
         ? <Avatar user={other} size={52} />
         : <View style={[styles.avatarBase, { width: 52, height: 52, borderRadius: 26, backgroundColor: C.card2, borderColor: C.border }]}>
@@ -995,6 +1013,22 @@ export default function MessagesScreen() {
   const [loading,       setLoading]       = useState(true);
   const [refreshing,    setRefreshing]    = useState(false);
   const [startingChat,  setStartingChat]  = useState<string | null>(null);
+  // ✅ NEW: search finds ANY person on LumVibe (name or @username), not just chats you already have
+  const [people,        setPeople]        = useState<any[]>([]);
+  const [peopleBusy,    setPeopleBusy]    = useState(false);
+  useEffect(() => {
+    const q = search.trim();
+    if (!q) { setPeople([]); setPeopleBusy(false); return; }
+    let dead = false;
+    setPeopleBusy(true);
+    const t = setTimeout(async () => {
+      const { data, error } = await supabase.rpc('search_people', { p_query: q });
+      if (dead) return;
+      setPeople(!error && Array.isArray(data) ? data : []);
+      setPeopleBusy(false);
+    }, 250);
+    return () => { dead = true; clearTimeout(t); };
+  }, [search]);
   // ✅ NEW: loadAll previously failed completely silently on error (just a
   // console.error, nothing shown to the user at all) — a failed load just
   // looked like an empty inbox forever with zero explanation. These two
@@ -1157,6 +1191,22 @@ export default function MessagesScreen() {
     });
   }, [navigation]);
 
+  // ✅ NEW: long-press a chat → delete it for ME (the other person keeps theirs)
+  const confirmDeleteChat = useCallback((convo: Conversation) => {
+    Alert.alert(
+      `Delete chat with ${convo.other_user?.display_name || 'this person'}?`,
+      'It disappears from your list and your copy of the messages is cleared. The other person keeps theirs. It only comes back if they send you a new message.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete chat', style: 'destructive', onPress: async () => {
+            const { data, error } = await supabase.rpc('delete_chat_for_me', { p_conversation_id: convo.id });
+            if (error || !data) { Alert.alert('Could not delete', error?.message || 'Please try again.'); return; }
+            setConversations(prev => prev.filter(c => c.id !== convo.id));
+            AsyncStorage.removeItem(`lumvibe_chat_cache_${convo.id}`).catch(() => {});
+        } },
+      ]);
+  }, []);
+
   // FIX: previously navigated to '/chat/new' with a userId param that
   // NewChatScreen doesn't accept (it's a search screen with no params).
   // Now creates the conversation directly and opens ChatDM — matches
@@ -1220,7 +1270,10 @@ export default function MessagesScreen() {
   const allItems: AllItem[] = [
     ...filteredConvos.map(c => ({ kind: 'convo' as const,  key: `convo-${c.id}`,  ts: c.last_message_at || c.created_at, data: c })),
     ...filteredGroups.map(g => ({ kind: 'group' as const,  key: `group-${g.id}`,  ts: g.last_message_at || g.created_at, data: g })),
-    ...filteredCircles.map(c => ({ kind: 'circle' as const, key: `circle-${c.id}`, ts: c.last_post_at || c.created_at,    data: c })),
+    // ✅ CHANGED: "All" only shows circles I own or follow. Other people's circles
+    // (the "Follow" cards) live on the Circles tab, not mixed into your chats.
+    ...filteredCircles.filter(c => c.is_subscribed || c.owner_id === user?.id)
+      .map(c => ({ kind: 'circle' as const, key: `circle-${c.id}`, ts: c.last_post_at || c.created_at, data: c })),
   ].sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
 
   // ── Tab content ────────────────────────────────────────────
@@ -1233,6 +1286,65 @@ export default function MessagesScreen() {
       );
     }
 
+    // ✅ NEW: while you type in the search bar you see PEOPLE first (anyone on LumVibe),
+    // then chats / groups that match. Circles never appear in search.
+    if (search.trim()) {
+      const peopleIds = new Set(people.map((p: any) => p.id));
+      const chatMatches = filteredConvos.filter(c => !c.other_user || !peopleIds.has(c.other_user.id));
+      type Row =
+        | { k: 'head'; key: string; title: string }
+        | { k: 'person'; key: string; p: any }
+        | { k: 'convo'; key: string; c: Conversation }
+        | { k: 'group'; key: string; g: Group };
+      const rows: Row[] = [
+        ...(people.length ? [{ k: 'head' as const, key: 'h-people', title: 'People' }] : []),
+        ...people.map((p: any) => ({ k: 'person' as const, key: `p-${p.id}`, p })),
+        ...(chatMatches.length ? [{ k: 'head' as const, key: 'h-chats', title: 'Your chats' }] : []),
+        ...chatMatches.map(c => ({ k: 'convo' as const, key: `c-${c.id}`, c })),
+        ...(filteredGroups.length ? [{ k: 'head' as const, key: 'h-groups', title: 'Groups' }] : []),
+        ...filteredGroups.map(g => ({ k: 'group' as const, key: `g-${g.id}`, g })),
+      ];
+      return (
+        <FlatList
+          data={rows} keyExtractor={r => r.key} keyboardShouldPersistTaps="handled"
+          renderItem={({ item }) => {
+            if (item.k === 'head') return <Text style={styles.searchHead}>{item.title}</Text>;
+            if (item.k === 'convo') return <ConvoItem convo={item.c} onPress={() => openChat(item.c)} onLongPress={() => confirmDeleteChat(item.c)} />;
+            if (item.k === 'group') return <GroupCard group={item.g} onPress={() => navigation.navigate('GroupChat', { id: item.g.id })} />;
+            const p = item.p;
+            const asUser: ChatUser = { id: p.id, username: p.username, display_name: p.display_name || p.username, photo_url: p.avatar_url || '' } as any;
+            return (
+              <TouchableOpacity style={styles.personRow} activeOpacity={0.75} onPress={() => openFriendChat(asUser)}>
+                <Avatar user={asUser} size={50} />
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    <Text style={styles.personName} numberOfLines={1}>{p.display_name || p.username}</Text>
+                    {p.is_verified && <Ionicons name="checkmark-circle" size={15} color={C.green} />}
+                  </View>
+                  <Text style={styles.personSub} numberOfLines={1}>@{p.username}{p.is_friend ? '  ·  Friend' : ''}</Text>
+                </View>
+                <View style={styles.personBtn}>
+                  {startingChat === p.id
+                    ? <ActivityIndicator size="small" color="#000" />
+                    : <Text style={styles.personBtnText}>Message</Text>}
+                </View>
+              </TouchableOpacity>
+            );
+          }}
+          ListEmptyComponent={
+            <View style={styles.emptyWrap}>
+              {peopleBusy
+                ? <ActivityIndicator color={C.green} />
+                : <>
+                    <Ionicons name="search-outline" size={48} color={C.border} />
+                    <Text style={styles.emptyTitle}>No one found</Text>
+                    <Text style={styles.emptySubtitle}>Try a different name or @username</Text>
+                  </>}
+            </View>}
+        />
+      );
+    }
+
     switch (activeTab) {
       case 'All':
         return (
@@ -1240,7 +1352,7 @@ export default function MessagesScreen() {
             data={allItems}
             keyExtractor={item => item.key}
             renderItem={({ item }) => {
-              if (item.kind === 'convo') return <ConvoItem convo={item.data} onPress={() => openChat(item.data)} />;
+              if (item.kind === 'convo') return <ConvoItem convo={item.data} onPress={() => openChat(item.data)} onLongPress={() => confirmDeleteChat(item.data)} />;
               if (item.kind === 'group') return (
                 <GroupCard group={item.data} onPress={() => navigation.navigate('GroupChat', { id: item.data.id })} />
               );
@@ -1481,7 +1593,7 @@ export default function MessagesScreen() {
         <TextInput
           ref={searchRef}
           style={styles.searchInput}
-          placeholder="Search messages…"
+          placeholder="Search people, chats…"
           placeholderTextColor={C.muted2}
           value={search}
           onChangeText={setSearch}
@@ -1633,6 +1745,12 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, color: C.white, fontSize: 14, paddingVertical: 10 },
 
   storiesWrap: { paddingBottom: 8 },
+  searchHead: { color: C.muted, fontSize: 12.5, fontWeight: '800', letterSpacing: 0.6, textTransform: 'uppercase', paddingHorizontal: 20, paddingTop: 14, paddingBottom: 6 },
+  personRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingVertical: 10 },
+  personName: { color: C.white, fontSize: 16, fontWeight: '700', flexShrink: 1 },
+  personSub: { color: C.muted, fontSize: 13, marginTop: 1 },
+  personBtn: { backgroundColor: C.green, paddingHorizontal: 16, paddingVertical: 9, borderRadius: 18, minWidth: 86, alignItems: 'center' },
+  personBtnText: { color: '#000', fontSize: 13.5, fontWeight: '800' },
   storiesRow:  { paddingHorizontal: 20, gap: 14 },
   storyItem:   { alignItems: 'center', gap: 5 },
   storyRing:   { borderWidth: 2.5, borderRadius: 30, padding: 2 },

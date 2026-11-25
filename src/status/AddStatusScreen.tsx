@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioPlayer, useAudioRecorder } from 'expo-audio';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -25,6 +27,10 @@ const { height: H } = Dimensions.get('window');
 const BG_COLORS = ['#128c7e', '#075e54', '#6a1b9a', '#c2185b', '#e65100', '#1565c0', '#37474f', '#000000'];
 type Vis = 'friends' | 'public' | 'private';
 type Picked = { uri: string; type: 'image' | 'video'; duration?: number };
+type Sound  = { uri: string; kind: 'voice' | 'music'; title: string; duration: number };
+// voice notes: mono, 32 kbps — clear for speech and small to upload
+const VOICE_PRESET = { ...RecordingPresets.HIGH_QUALITY, numberOfChannels: 1, sampleRate: 22050, bitRate: 32000 };
+const fmt = (n: number) => `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, '0')}`;
 
 function VideoPreview({ uri }: { uri: string }) {
   const player = useVideoPlayer(uri, p => { p.loop = true; p.muted = true; p.play(); });
@@ -48,6 +54,61 @@ export default function AddStatusScreen() {
   const [pct, setPct]         = useState(0);
   const [lift, setLift]       = useState(0);
   const boxRef = useRef<View>(null);
+
+  // ── voice note / music ──
+  const [sound, setSound]       = useState<Sound | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [recSecs, setRecSecs]   = useState(0);
+  const recorder   = useAudioRecorder(VOICE_PRESET as any);
+  const recTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recStart   = useRef(0);
+  const preview    = useAudioPlayer(sound ? { uri: sound.uri } : null);
+  const [playing, setPlaying] = useState(false);
+
+  useEffect(() => () => {                       // leaving the screen: stop everything cleanly
+    if (recTimer.current) clearInterval(recTimer.current);
+    try { recorder.stop(); } catch {}
+  }, []);
+
+  const startVoice = async () => {
+    if (recording) return;
+    try {
+      const perm = await AudioModule.requestRecordingPermissionsAsync();
+      if (!perm.granted) { Alert.alert('Permission needed', 'Please allow microphone access.'); return; }
+      try { await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true }); } catch {}
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      recStart.current = Date.now(); setRecSecs(0); setRecording(true);
+      recTimer.current = setInterval(() => {
+        const d = Math.floor((Date.now() - recStart.current) / 1000);
+        setRecSecs(d);
+        if (d >= 60) stopVoice();                // 60-second limit
+      }, 250);
+    } catch (e) { setRecording(false); Alert.alert('Could not record', 'Please try again.'); }
+  };
+  const stopVoice = async () => {
+    if (recTimer.current) { clearInterval(recTimer.current); recTimer.current = null; }
+    setRecording(false);
+    const secs = Math.max(1, Math.round((Date.now() - recStart.current) / 1000));
+    try {
+      await recorder.stop();
+      try { await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }); } catch {}
+      if (recorder.uri) setSound({ uri: recorder.uri, kind: 'voice', title: 'Voice note', duration: Math.min(secs, 60) });
+    } catch { Alert.alert('Could not save the recording', 'Please try again.'); }
+  };
+  const pickMusic = async () => {
+    try {
+      const r = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true, multiple: false });
+      if (r.canceled || !r.assets?.[0]) return;
+      const a: any = r.assets[0];
+      if (a.size && a.size > 20 * 1024 * 1024) { Alert.alert('File too big', 'Choose a song smaller than 20 MB.'); return; }
+      setSound({ uri: a.uri, kind: 'music', title: String(a.name || 'Music').replace(/\.[^.]+$/, ''), duration: 30 });
+    } catch { Alert.alert('Could not open the file', 'Please try another one.'); }
+  };
+  const togglePreview = () => {
+    try { if (playing) { preview.pause(); setPlaying(false); } else { preview.seekTo(0); preview.play(); setPlaying(true); } } catch {}
+  };
+  useEffect(() => { setPlaying(false); }, [sound?.uri]);
 
   // remember what the person chose as their usual privacy
   useEffect(() => {
@@ -98,13 +159,23 @@ export default function AddStatusScreen() {
     if (busy) return;
     setBusy(true); setPct(0);
     try {
+      try { preview.pause(); } catch {}
       let mediaUrl = '';
       if (mode === 'media' && asset) {
         const url = await uploadStatusMedia(asset.uri, asset.type, setPct);
         if (!url) { Alert.alert('Upload failed', 'Please check your internet and try again.'); return; }
         mediaUrl = url;
       }
+      let audioUrl: string | undefined;
+      if (sound) {
+        setPct(0);
+        const au = await uploadStatusMedia(sound.uri, 'audio', setPct);
+        if (!au) { Alert.alert('Upload failed', 'The sound could not be uploaded. Please try again.'); return; }
+        audioUrl = au;
+      }
       const r = await postStatus({
+        audioUrl, audioKind: sound?.kind, audioTitle: sound?.title,
+        audioDuration: sound ? (sound.kind === 'music' ? Math.min(Math.round(preview.duration || 0) || 30, 30) : sound.duration) : undefined,
         mediaUrl, mediaType: mode === 'text' ? 'text' : asset!.type,
         caption: mode === 'media' ? caption : undefined, text: mode === 'text' ? text : undefined, bg: mode === 'text' ? bg : undefined,
         visibility: vis, contextType: inChat && vis === 'private' ? contextType : undefined, contextId: inChat && vis === 'private' ? contextId : undefined,
@@ -116,6 +187,41 @@ export default function AddStatusScreen() {
       Alert.alert('Status posted 🎉', where, [{ text: 'OK', onPress: () => navigation.goBack() }]);
     } finally { setBusy(false); }
   };
+
+  const soundPicker = (
+    <View style={{ gap: 8 }}>
+      <Text style={styles.label}>Add sound</Text>
+      {recording ? (
+        <TouchableOpacity style={[styles.opt, { borderColor: '#ff4d4d' }]} onPress={stopVoice} activeOpacity={0.85}>
+          <View style={styles.recDot} />
+          <Text style={[styles.optTitle, { flex: 1 }]}>Recording… {fmt(recSecs)}</Text>
+          <Text style={{ color: '#ff6b6b', fontWeight: '800' }}>Tap to stop</Text>
+        </TouchableOpacity>
+      ) : sound ? (
+        <View style={[styles.opt, styles.optOn]}>
+          <TouchableOpacity onPress={togglePreview} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name={playing ? 'pause-circle' : 'play-circle'} size={34} color={GREEN} />
+          </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.optTitle} numberOfLines={1}>{sound.kind === 'voice' ? '🎤 Voice note' : `🎵 ${sound.title}`}</Text>
+            <Text style={styles.optSub}>{sound.kind === 'voice' ? fmt(sound.duration) : 'Plays with your status (up to 30 seconds)'}</Text>
+          </View>
+          <TouchableOpacity onPress={() => { try { preview.pause(); } catch {} setSound(null); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="close-circle" size={24} color="#8a8f93" />
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <View style={{ flexDirection: 'row', gap: 10 }}>
+          <TouchableOpacity style={[styles.opt, { flex: 1, justifyContent: 'center' }]} onPress={startVoice} activeOpacity={0.85}>
+            <Ionicons name="mic" size={20} color={GREEN} /><Text style={styles.optTitle}>Voice note</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.opt, { flex: 1, justifyContent: 'center' }]} onPress={pickMusic} activeOpacity={0.85}>
+            <Ionicons name="musical-notes" size={20} color={GREEN} /><Text style={styles.optTitle}>Music</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+    </View>
+  );
 
   const privacyPicker = (
     <View style={{ gap: 8 }}>
@@ -161,6 +267,10 @@ export default function AddStatusScreen() {
             <View style={styles.bigIcon}><Ionicons name="text" size={26} color="#000" /></View>
             <View style={{ flex: 1 }}><Text style={styles.bigTitle}>Text</Text><Text style={styles.bigSub}>Write something on a colour</Text></View>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.big} onPress={() => { setMode('text'); setTimeout(startVoice, 300); }}>
+            <View style={styles.bigIcon}><Ionicons name="mic" size={26} color="#000" /></View>
+            <View style={{ flex: 1 }}><Text style={styles.bigTitle}>Voice note</Text><Text style={styles.bigSub}>Record up to 60 seconds</Text></View>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.link}
             onPress={() => navigation.replace('Story', { contextType, contextId, contextLabel })}>
             <Text style={styles.linkText}>Use the camera with effects instead</Text>
@@ -184,8 +294,9 @@ export default function AddStatusScreen() {
               <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
                 {BG_COLORS.map(c => <TouchableOpacity key={c} onPress={() => setBg(c)} style={[styles.swatch, { backgroundColor: c }, c === bg && { borderColor: '#fff' }]} />)}
               </View>
+              {soundPicker}
               {privacyPicker}
-              <TouchableOpacity style={[styles.post, (!text.trim() || busy) && { opacity: 0.5 }]} disabled={!text.trim() || busy} onPress={post}>
+              <TouchableOpacity style={[styles.post, ((!text.trim() && !sound) || busy) && { opacity: 0.5 }]} disabled={(!text.trim() && !sound) || busy || recording} onPress={post}>
                 {busy ? <ActivityIndicator color="#000" /> : <Text style={styles.postText}>Post status</Text>}
               </TouchableOpacity>
             </View>
@@ -204,8 +315,9 @@ export default function AddStatusScreen() {
         </View>
         <ScrollView style={{ maxHeight: H * 0.46 }} contentContainerStyle={styles.sheetScroll} keyboardShouldPersistTaps="handled">
           <TextInput style={styles.caption} value={caption} onChangeText={setCaption} placeholder="Add a caption…" placeholderTextColor="#777" maxLength={300} />
+          {soundPicker}
           {privacyPicker}
-          <TouchableOpacity style={[styles.post, busy && { opacity: 0.7 }]} disabled={busy} onPress={post}>
+          <TouchableOpacity style={[styles.post, busy && { opacity: 0.7 }]} disabled={busy || recording} onPress={post}>
             {busy ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}><ActivityIndicator color="#000" /><Text style={styles.postText}>{pct > 0 && pct < 100 ? `Uploading ${pct}%` : 'Posting…'}</Text></View>
                   : <Text style={styles.postText}>Post status</Text>}
           </TouchableOpacity>
@@ -238,5 +350,6 @@ const styles = StyleSheet.create({
   postText: { color: '#000', fontSize: 16, fontWeight: '800' },
   textInput: { color: '#fff', fontSize: 30, fontWeight: '700', textAlign: 'center', maxHeight: 340 },
   sheet: { backgroundColor: 'rgba(0,0,0,0.55)', padding: 14, gap: 10, borderTopLeftRadius: 18, borderTopRightRadius: 18 },
+  recDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#ff4d4d' },
   swatch: { width: 30, height: 30, borderRadius: 15, borderWidth: 2, borderColor: 'transparent' },
 });

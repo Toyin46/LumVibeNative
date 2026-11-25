@@ -10,7 +10,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from '../locales/LanguageContext';
 import { useAuthStore } from '../store/authStore';
-import { useUserStatusInfo } from '../components/StatusAvatar';   // ✅ NEW: status ring on my picture
+import StatusAvatar, { useUserStatusInfo } from '../components/StatusAvatar';   // ✅ NEW: status ring + big picture
 import { supabase } from '../config/supabase';
 import { notifyNewFollower } from '../utils/notificationHelpers';
 // ✅ FIX: this import was missing entirely — I added the notifyBadgeEarned()
@@ -2885,9 +2885,7 @@ export default function ProfileScreen() {
                   keyExtractor={i => i.id}
                   renderItem={({ item }) => (
                     <TouchableOpacity style={s.userItem} onPress={() => { setFollowersModalVisible(false); navigateToUserProfile(item.id); }}>
-                      {item.avatar_url
-                        ? <Image source={{ uri: item.avatar_url }} style={s.userAvatar} />
-                        : <View style={[s.userAvatar, s.avatarPh]}><Feather name="user" size={20} color="#00ff88" /></View>}
+                      <StatusAvatar userId={item.id} avatarUrl={item.avatar_url} name={item.display_name} letter={item.username} size={44} style={{ margin: -5, marginRight: 7 }} />
                       <View style={{ flex: 1 }}>
                         <View style={s.nameRow}>
                           <Text style={s.userName}>{item.display_name}</Text>
@@ -2920,9 +2918,7 @@ export default function ProfileScreen() {
                   renderItem={({ item }) => (
                     <View style={s.userItem}>
                       <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }} onPress={() => { setFollowingModalVisible(false); navigateToUserProfile(item.id); }}>
-                        {item.avatar_url
-                          ? <Image source={{ uri: item.avatar_url }} style={s.userAvatar} />
-                          : <View style={[s.userAvatar, s.avatarPh]}><Feather name="user" size={20} color="#00ff88" /></View>}
+                        <StatusAvatar userId={item.id} avatarUrl={item.avatar_url} name={item.display_name} letter={item.username} size={44} style={{ margin: -5, marginRight: 7 }} />
                         <View style={{ flex: 1 }}>
                           <View style={s.nameRow}>
                             <Text style={s.userName}>{item.display_name}</Text>

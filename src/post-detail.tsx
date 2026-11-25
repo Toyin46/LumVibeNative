@@ -25,6 +25,7 @@ import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuthStore } from './store/authStore';
 import { supabase } from './config/supabase';
+import StatusAvatar from './components/StatusAvatar';   // ✅ NEW
 // FIX: expo-av is deprecated — replaced with expo-video's hook-based player.
 import { useVideoPlayer, VideoView } from 'expo-video';
 import EntryVoteBar from './challenge/EntryVoteBar';
@@ -345,13 +346,9 @@ export default function ViewPostScreen() {
 
   const renderComment = ({ item }: { item: Comment }) => (
     <View style={styles.commentItem}>
-      {item.user_photo_url ? (
-        <Image source={{ uri: item.user_photo_url }} style={styles.commentAvatar} />
-      ) : (
-        <View style={[styles.commentAvatar, styles.avatarPlaceholder]}>
-          <Feather name="user" size={16} color="#00ff88" />
-        </View>
-      )}
+      {/* ✅ CHANGED: tap = their status or the BIG picture; hold = big picture */}
+      <StatusAvatar userId={(item as any).user_id} avatarUrl={item.user_photo_url} name={item.display_name} letter={item.username}
+        size={36} imageBorder="#00ff88" style={{ margin: -5, marginRight: 7 }} />
       <View style={styles.commentContent}>
         <View style={styles.commentHeader}>
           <Text style={styles.commentDisplayName}>{item.display_name}</Text>
@@ -397,13 +394,9 @@ export default function ViewPostScreen() {
             style={styles.userInfo}
             onPress={() => navigation.navigate('UserProfile', { userId: post.user_id })}
           >
-            {post.user_photo_url ? (
-              <Image source={{ uri: post.user_photo_url }} style={styles.userAvatar} />
-            ) : (
-              <View style={[styles.userAvatar, styles.avatarPlaceholder]}>
-                <Feather name="user" size={20} color="#00ff88" />
-              </View>
-            )}
+            {/* ✅ CHANGED: tap the picture = their status or the BIG picture (tap the name = their profile) */}
+            <StatusAvatar userId={post.user_id} avatarUrl={post.user_photo_url} name={post.display_name} letter={post.username}
+              size={40} imageBorder="#00ff88" style={{ margin: -5, marginRight: 7 }} />
             <View style={styles.userDetails}>
               <Text style={styles.displayName}>{post.display_name}</Text>
               <Text style={styles.username}>@{post.username}</Text>

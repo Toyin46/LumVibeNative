@@ -12,7 +12,7 @@ import React, { useCallback, useState } from 'react';
 import { Image, StyleSheet, Text, TouchableOpacity, View, ViewStyle } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useAuthStore } from '../store/authStore';
-import { fetchUserStatuses } from '../status/statusApi';
+import { loadStatusInfo } from '../status/statusInfoCache';
 import ProfilePhotoViewer from './ProfilePhotoViewer';
 
 export function useUserStatusInfo(userId?: string | null) {
@@ -20,19 +20,16 @@ export function useUserStatusInfo(userId?: string | null) {
   const [info, setInfo] = useState({ count: 0, hasUnseen: false });
   useFocusEffect(useCallback(() => {
     let dead = false;
-    if (!userId) return;
-    fetchUserStatuses(userId).then(list => {
-      if (dead) return;
-      setInfo({ count: list.length, hasUnseen: list.some(s => !s.viewed && s.user_id !== user?.id) });
-    });
+    if (!userId) { setInfo({ count: 0, hasUnseen: false }); return; }
+    loadStatusInfo(userId).then(i => { if (!dead) setInfo(i); });
     return () => { dead = true; };
-  }, [userId, user?.id]));
+  }, [userId]));
   return info;
 }
 
-export default function StatusAvatar({ userId, avatarUrl, name, letter, size = 44, style, disableStatus }: {
+export default function StatusAvatar({ userId, avatarUrl, name, letter, size = 44, style, disableStatus, imageBorder, placeholder }: {
   userId?: string | null; avatarUrl?: string | null; name?: string; letter?: string;
-  size?: number; style?: ViewStyle; disableStatus?: boolean;
+  size?: number; style?: ViewStyle; disableStatus?: boolean; imageBorder?: string; placeholder?: React.ReactNode;
 }) {
   const navigation = useNavigation<any>();
   const { user } = useAuthStore();
@@ -56,10 +53,11 @@ export default function StatusAvatar({ userId, avatarUrl, name, letter, size = 4
         hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
         <View style={{ width: outer, height: outer, borderRadius: outer / 2, borderWidth: hasStatus ? 2.5 : 0, borderColor: ring, alignItems: 'center', justifyContent: 'center' }}>
           {avatarUrl
-            ? <Image source={{ uri: avatarUrl }} style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: '#111' }} />
-            : <View style={[styles.ph, { width: size, height: size, borderRadius: size / 2 }]}>
-                <Text style={{ color: '#00ff88', fontWeight: '800', fontSize: size * 0.42 }}>{first}</Text>
-              </View>}
+            ? <Image source={{ uri: avatarUrl }} style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: '#111', ...(imageBorder ? { borderWidth: 2, borderColor: imageBorder } : {}) }} />
+            : (placeholder || (
+                <View style={[styles.ph, { width: size, height: size, borderRadius: size / 2 }]}>
+                  <Text style={{ color: '#00ff88', fontWeight: '800', fontSize: size * 0.42 }}>{first}</Text>
+                </View>))}
         </View>
       </TouchableOpacity>
       <ProfilePhotoViewer visible={bigOpen} uri={avatarUrl} name={name} letter={letter} onClose={() => setBigOpen(false)} />

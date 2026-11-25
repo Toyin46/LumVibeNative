@@ -977,7 +977,7 @@ function formatTime(dateStr: string): string {
 }
 
 // ── SERVICE CALLS ─────────────────────────────────────────────
-async function getMessages(conversationId: string, limit = 50, before?: string): Promise<Message[]> {
+async function getMessages(conversationId: string, limit = 50, before?: string, after?: string | null): Promise<Message[]> {
   if (!isValidUUID(conversationId)) return [];
   try {
     let query = (supabase as any)
@@ -985,6 +985,7 @@ async function getMessages(conversationId: string, limit = 50, before?: string):
       .eq('conversation_id', conversationId).eq('is_deleted', false)
       .order('created_at', { ascending: false }).limit(limit);
     if (before) query = query.lt('created_at', before);
+    if (after) query = query.gt('created_at', after);   // ✅ NEW: a chat I deleted starts empty
     const { data: msgs, error } = await query;
     if (error) throw error;
     if (!msgs || msgs.length === 0) return [];
@@ -1281,6 +1282,7 @@ function useMessages(
   const reactionsRef = useRef<RealtimeChannel | null>(null);
 
   const cacheLoadedRef = useRef(false);
+  const hiddenAtRef    = useRef<string | null | undefined>(undefined);
   const messagesRef    = useRef<Message[]>([]);
   const loadMessages = useCallback(async () => {
     if (!conversationId || !isValidUUID(conversationId)) { setLoading(false); return; }
@@ -1295,16 +1297,27 @@ function useMessages(
           if (raw) { setMessages(JSON.parse(raw)); setLoading(false); }
         } catch (_) {}
       }
-      const data = await getMessages(conversationId);
+      // ✅ NEW: if I deleted this chat earlier, only messages AFTER that moment are shown
+      if (hiddenAtRef.current === undefined && currentUserId) {
+        try {
+          const { data: part, error: pe } = await supabase.from('conversation_participants')
+            .select('hidden_at').eq('conversation_id', conversationId).eq('user_id', currentUserId).maybeSingle();
+          if (!pe) hiddenAtRef.current = (part as any)?.hidden_at || null;
+        } catch (_) {}
+      }
+      const data = await getMessages(conversationId, 50, undefined, hiddenAtRef.current);
       if (data.length > 0) {
         setMessages(data);
         AsyncStorage.setItem(cacheKey, JSON.stringify(data.slice(-60))).catch(() => {});
+      } else if (hiddenAtRef.current) {
+        setMessages([]);                                   // deleted chat with nothing new yet
+        AsyncStorage.removeItem(cacheKey).catch(() => {});
       } else {
         setMessages(prev => prev.length ? prev : data);   // offline: keep what we have
       }
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
-  }, [conversationId]);
+  }, [conversationId, currentUserId]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   useEffect(() => {
@@ -2282,13 +2295,14 @@ function MessageBubble({ message, isMe, onLongPress, onCowatch, lowData, onOpenM
     <View style={[styles.msgRow, isMe && styles.msgRowMe]}>
       {!isMe && (
         <View style={styles.msgAv}>
-          {(message.sender?.photo_url || (message.sender as any)?.avatar_url || fallbackPhoto)
-            ? <Image source={{ uri: (message.sender?.photo_url || (message.sender as any)?.avatar_url || fallbackPhoto) as string }} style={styles.msgAvImg} />
-            : <View style={styles.msgAvPlaceholder}>
-                <Text style={{ color: C.green, fontSize: 10, fontWeight: '700' }}>
-                  {String((message.sender as any)?.username || message.sender?.display_name || fallbackName || 'U').charAt(0).toUpperCase()}
-                </Text>
-              </View>}
+          {/* ✅ CHANGED: tap = their status or the BIG picture; hold = big picture; no picture = first letter */}
+          <StatusAvatar
+            userId={message.sender_id}
+            avatarUrl={(message.sender?.photo_url || (message.sender as any)?.avatar_url || fallbackPhoto) as string}
+            name={message.sender?.display_name || fallbackName}
+            letter={String((message.sender as any)?.username || message.sender?.display_name || fallbackName || 'U')}
+            size={28} style={{ margin: -5 }}
+          />
         </View>
       )}
       <View style={[styles.msgCol, isMe && styles.msgColMe]}>

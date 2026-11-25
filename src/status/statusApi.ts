@@ -19,6 +19,7 @@ export type StatusItem = {
   caption: string | null; text_content: string | null; bg_color: string | null;
   visibility: 'friends' | 'public'; created_at: string; expires_at: string;
   view_count: number; viewed: boolean; my_reaction: string | null; gift_total: number;
+  audio_url?: string | null; audio_kind?: 'voice' | 'music' | null; audio_title?: string | null; audio_duration?: number | null;
 };
 
 export type StatusViewerRow = {
@@ -129,16 +130,18 @@ const CLOUD_NAME    = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME    || 'dvllx
 const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || 'Kinsta_unsigned';
 
 // upload a photo / video to Cloudinary with progress; resolves to the https link, or null
-export function uploadStatusMedia(uri: string, type: 'image' | 'video', onProgress?: (pct: number) => void): Promise<string | null> {
+export function uploadStatusMedia(uri: string, type: 'image' | 'video' | 'audio', onProgress?: (pct: number) => void): Promise<string | null> {
   return new Promise(resolve => {
     try {
       const fd = new FormData();
-      fd.append('file', { uri, type: type === 'video' ? 'video/mp4' : 'image/jpeg', name: `status_${Date.now()}.${type === 'video' ? 'mp4' : 'jpg'}` } as any);
+      const mime = type === 'video' ? 'video/mp4' : type === 'audio' ? 'audio/mp4' : 'image/jpeg';
+      const ext  = type === 'video' ? 'mp4' : type === 'audio' ? 'm4a' : 'jpg';
+      fd.append('file', { uri, type: mime, name: `status_${Date.now()}.${ext}` } as any);
       fd.append('upload_preset', UPLOAD_PRESET);
       fd.append('folder', 'lumvibe_status');
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/${type === 'video' ? 'video' : 'image'}/upload`);
-      xhr.timeout = type === 'video' ? 240000 : 90000;
+      xhr.open('POST', `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/${type === 'image' ? 'image' : 'video'}/upload`);   // Cloudinary stores audio under "video"
+      xhr.timeout = type === 'image' ? 90000 : 240000;
       xhr.upload.onprogress = (e: any) => { if (onProgress && e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)); };
       xhr.onload = () => {
         try {
@@ -156,6 +159,7 @@ export function uploadStatusMedia(uri: string, type: 'image' | 'video', onProgre
 export type PostStatusArgs = {
   mediaUrl?: string; mediaType: 'image' | 'video' | 'text'; caption?: string; text?: string; bg?: string;
   visibility: 'friends' | 'public' | 'private'; contextType?: 'dm' | 'group' | 'circle'; contextId?: string;
+  audioUrl?: string; audioKind?: 'voice' | 'music'; audioTitle?: string; audioDuration?: number;
 };
 
 // ONE safe path for posting; the database keeps exactly the privacy you picked
@@ -163,6 +167,8 @@ export async function postStatus(a: PostStatusArgs): Promise<{ success: boolean;
   const { data, error } = await supabase.rpc('post_status', {
     p_media_url: a.mediaUrl || '', p_media_type: a.mediaType, p_caption: a.caption || null, p_text: a.text || null,
     p_bg: a.bg || null, p_visibility: a.visibility, p_context_type: a.contextType || null, p_context_id: a.contextId || null,
+    p_audio_url: a.audioUrl || null, p_audio_kind: a.audioKind || null, p_audio_title: a.audioTitle || null,
+    p_audio_duration: a.audioDuration ? Math.round(a.audioDuration) : null,
   });
   if (error) return { success: false, error: error.message };
   return (data as any) || { success: false, error: 'No answer from the server.' };

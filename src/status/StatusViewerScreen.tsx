@@ -16,6 +16,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useVideoPlayer, VideoView } from 'expo-video';
+import { useAudioPlayer } from 'expo-audio';
+import { invalidateStatusInfo } from './statusInfoCache';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
 import {
@@ -116,6 +118,24 @@ export default function StatusViewerScreen() {
     try { if (isVideo) { if (paused) player.pause(); else player.play(); } } catch {}
   }, [paused, isVideo, player]);
 
+  // ── voice note / music that goes with the status ──
+  const audioUrl = !isVideo && cur?.audio_url ? cur.audio_url : null;
+  const audio = useAudioPlayer(audioUrl ? { uri: audioUrl } : null);
+  useEffect(() => {
+    if (!audioUrl) return;
+    try { audio.seekTo(0); } catch {}
+  }, [cur?.id]);
+  useEffect(() => {
+    if (!audioUrl) return;
+    try { if (paused) audio.pause(); else audio.play(); } catch {}
+  }, [paused, cur?.id, audioUrl]);
+  useEffect(() => () => { try { audio.pause(); } catch {} }, [cur?.id]);
+  // how long a photo / text status stays: as long as its voice note (max 60 s) or up to 30 s of music
+  const itemMs = !cur || isVideo ? IMAGE_MS
+    : cur.audio_kind === 'voice' ? Math.min(Math.max((cur.audio_duration || 10) * 1000, IMAGE_MS), 60000)
+    : cur.audio_kind === 'music' ? Math.min(Math.max((cur.audio_duration || 20) * 1000, 10000), 30000)
+    : IMAGE_MS;
+
   // ── progress bar clock ──
   useEffect(() => { setProg(0); }, [index]);
   useEffect(() => {
@@ -127,11 +147,11 @@ export default function StatusViewerScreen() {
           if (d > 0) setProg(Math.min(1, c / d));
         } catch {}
       } else {
-        setProg(p => Math.min(1, p + 50 / IMAGE_MS));
+        setProg(p => Math.min(1, p + 50 / itemMs));
       }
     }, 50);
     return () => clearInterval(t);
-  }, [cur?.id, paused, isVideo, player]);
+  }, [cur?.id, paused, isVideo, player, itemMs]);
 
   const goNext = useCallback(() => {
     if (index < items.length - 1) setIndex(i => i + 1);
@@ -139,6 +159,8 @@ export default function StatusViewerScreen() {
   }, [index, items.length, navigation]);
   const goPrev = useCallback(() => { if (index > 0) setIndex(i => i - 1); else setProg(0); }, [index]);
   useEffect(() => { if (prog >= 1) goNext(); }, [prog]);
+
+  useEffect(() => () => { invalidateStatusInfo(); }, []);   // rings everywhere refresh after you watch
 
   // ── count the view (once per person, never the owner) ──
   useEffect(() => {
@@ -263,7 +285,9 @@ export default function StatusViewerScreen() {
       <View style={StyleSheet.absoluteFill}>
         {cur.media_type === 'text' ? (
           <View style={[styles.textBg, { backgroundColor: cur.bg_color || '#128c7e' }]}>
-            <Text style={styles.textBig}>{cur.text_content}</Text>
+            {cur.text_content
+              ? <Text style={styles.textBig}>{cur.text_content}</Text>
+              : <Ionicons name={cur.audio_kind === 'music' ? 'musical-notes' : 'mic'} size={96} color="rgba(255,255,255,0.9)" />}
           </View>
         ) : cur.media_type === 'video' ? (
           <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} surfaceType="textureView" />
@@ -311,6 +335,14 @@ export default function StatusViewerScreen() {
 
       {/* bottom */}
       <View ref={footRef} collapsable={false} style={[styles.bottom, { paddingBottom: insets.bottom + 10, marginBottom: lift }]} pointerEvents="box-none">
+        {!!cur.audio_url && (
+          <View style={styles.soundChip} pointerEvents="none">
+            <Ionicons name={cur.audio_kind === 'music' ? 'musical-notes' : 'mic'} size={15} color={GREEN} />
+            <Text style={styles.soundChipText} numberOfLines={1}>
+              {cur.audio_kind === 'music' ? (cur.audio_title || 'Music') : 'Voice note'}
+            </Text>
+          </View>
+        )}
         {!!cur.caption && cur.media_type !== 'text' && (
           <View style={styles.capBox} pointerEvents="none"><Text style={styles.cap}>{cur.caption}</Text></View>
         )}
@@ -460,6 +492,8 @@ const styles = StyleSheet.create({
   toast: { position: 'absolute', alignSelf: 'center', top: H * 0.42, backgroundColor: 'rgba(0,0,0,0.75)', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20 },
   toastText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 12, paddingTop: 30, backgroundColor: 'rgba(0,0,0,0.0)' },
+  soundChip: { flexDirection: 'row', alignItems: 'center', gap: 7, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7, marginBottom: 10, maxWidth: W - 60 },
+  soundChipText: { color: '#fff', fontSize: 13.5, fontWeight: '700', flexShrink: 1 },
   capBox: { backgroundColor: 'rgba(0,0,0,0.45)', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 9, marginBottom: 10, alignSelf: 'center', maxWidth: W - 40 },
   cap: { color: '#fff', fontSize: 16, textAlign: 'center' },
   ownerRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },

@@ -27,6 +27,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
 import { useAuthStore } from '../store/authStore';
+import StatusAvatar from '../components/StatusAvatar';   // ✅ NEW: status ring + BIG picture
 import type { RootStackParamList } from '../navigation/types';
 
 type UserProfileRouteProp = RouteProp<RootStackParamList, 'UserProfile'>;
@@ -217,26 +218,36 @@ export default function UserProfileScreen() {
       >
         <View style={styles.profileSection}>
           <View style={styles.topRow}>
-            {avatarUrl ? (
-              <Image source={{ uri: avatarUrl }} style={styles.avatar} />
-            ) : (
-              <View style={[styles.avatar, styles.avatarPlaceholder]}>
-                <Ionicons name="person" size={40} color="#00ff88" />
-              </View>
-            )}
+            {/* ✅ CHANGED: same size and spacing as before, but now:
+                • green ring when this person has a status you may see (grey once you have seen it)
+                • tap  → their status, or the BIG picture if they have none
+                • hold → always the big picture
+                • no picture → big first letter of their username */}
+            <StatusAvatar
+              userId={id}
+              avatarUrl={avatarUrl}
+              name={profile.display_name || profile.username}
+              letter={profile.username || profile.display_name}
+              size={80}
+              imageBorder="#00ff88"
+              style={{ margin: -5, marginRight: 15 }}
+            />
             <View style={styles.statsRow}>
               <View style={styles.stat}>
                 <Text style={styles.statNumber}>{stats.posts}</Text>
                 <Text style={styles.statLabel}>Posts</Text>
               </View>
-              <View style={styles.stat}>
+              {/* ✅ CHANGED: tap Followers / Following to see WHO — and open their profiles, pictures and status */}
+              <TouchableOpacity style={styles.stat} activeOpacity={0.7}
+                onPress={() => navigation.navigate('FollowList', { userId: id, type: 'followers', name: profile.display_name || profile.username })}>
                 <Text style={styles.statNumber}>{stats.followers}</Text>
                 <Text style={styles.statLabel}>Followers</Text>
-              </View>
-              <View style={styles.stat}>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.stat} activeOpacity={0.7}
+                onPress={() => navigation.navigate('FollowList', { userId: id, type: 'following', name: profile.display_name || profile.username })}>
                 <Text style={styles.statNumber}>{stats.following}</Text>
                 <Text style={styles.statLabel}>Following</Text>
-              </View>
+              </TouchableOpacity>
             </View>
           </View>
 

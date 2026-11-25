@@ -32,6 +32,7 @@ export type RootStackParamList = {
   // ✅ NEW: Status (see src/status)
   StatusViewer: { userId: string; startStoryId?: string; name?: string; avatar?: string };
   MyStatus: undefined;
+  FollowList: { userId: string; type: 'followers' | 'following'; name?: string };
   AddStatus: { contextType?: 'dm' | 'group' | 'circle'; contextId?: string; contextLabel?: string; mode?: 'text' } | undefined;
 };
 
