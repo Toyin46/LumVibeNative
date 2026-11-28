@@ -846,6 +846,18 @@ function ContactInviteModal({
 export default function ProfileScreen() {
   const { userProfile, user, logout, loadProfile } = useAuthStore();
   const myStatus = useUserStatusInfo(user?.id);   // ✅ NEW: do I have a status right now?
+  // ✅ NEW: "Hide my followers and following" — only I can open my lists, others see the numbers only
+  const [hideLists, setHideLists] = useState(false);
+  useEffect(() => {
+    if (!user?.id) return;
+    supabase.from('users').select('hide_follow_lists').eq('id', user.id).maybeSingle()
+      .then(({ data }: any) => { if (data) setHideLists(!!data.hide_follow_lists); });
+  }, [user?.id]);
+  const toggleHideLists = async (v: boolean) => {
+    setHideLists(v);
+    const { error } = await supabase.rpc('set_hide_follow_lists', { p_hidden: v });
+    if (error) { setHideLists(!v); Alert.alert('Could not save', error.message); }
+  };
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
   // ✅ NEW: ProfileScreen never read route params at all before this —
@@ -2876,6 +2888,15 @@ export default function ProfileScreen() {
               <Text style={s.modalTitle}>{t.common.followers}</Text>
               <TouchableOpacity onPress={() => setFollowersModalVisible(false)}><Feather name="x" size={24} color="#fff" /></TouchableOpacity>
             </View>
+            {/* ✅ NEW: privacy for my lists */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' }}>
+              <Feather name={hideLists ? 'lock' : 'unlock'} size={18} color={hideLists ? '#00ff88' : '#888'} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: '#fff', fontSize: 14, fontWeight: '700' }}>Hide my followers and following</Text>
+                <Text style={{ color: '#888', fontSize: 12, marginTop: 1 }}>{hideLists ? 'Only you can open these lists' : 'Anyone who opens your profile can see these lists'}</Text>
+              </View>
+              <Switch value={hideLists} onValueChange={toggleHideLists} trackColor={{ false: '#333', true: '#00ff88' }} thumbColor="#fff" />
+            </View>
             {loadingFollowers
               ? <ActivityIndicator size="large" color="#00ff88" style={{ marginTop: 20 }} />
               : followers.length === 0
@@ -2907,6 +2928,15 @@ export default function ProfileScreen() {
             <View style={s.modalHeader}>
               <Text style={s.modalTitle}>{t.common.following}</Text>
               <TouchableOpacity onPress={() => setFollowingModalVisible(false)}><Feather name="x" size={24} color="#fff" /></TouchableOpacity>
+            </View>
+            {/* ✅ NEW: privacy for my lists */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' }}>
+              <Feather name={hideLists ? 'lock' : 'unlock'} size={18} color={hideLists ? '#00ff88' : '#888'} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: '#fff', fontSize: 14, fontWeight: '700' }}>Hide my followers and following</Text>
+                <Text style={{ color: '#888', fontSize: 12, marginTop: 1 }}>{hideLists ? 'Only you can open these lists' : 'Anyone who opens your profile can see these lists'}</Text>
+              </View>
+              <Switch value={hideLists} onValueChange={toggleHideLists} trackColor={{ false: '#333', true: '#00ff88' }} thumbColor="#fff" />
             </View>
             {loadingFollowing
               ? <ActivityIndicator size="large" color="#00ff88" style={{ marginTop: 20 }} />

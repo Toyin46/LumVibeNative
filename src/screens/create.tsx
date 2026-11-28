@@ -4637,6 +4637,23 @@ export default function CreateScreen() {
   const [selectedMusic, setSelectedMusic] = useState<string | null>(null);
   const [selectedMusicName, setSelectedMusicName] = useState<string | null>(null);
   const [musicArtist, setMusicArtist]   = useState<string | null>(null);
+
+  // ✅ NEW: "Use this sound" from the feed — arrive with a song already chosen.
+  // The feed sends { useSound: { url, name, artist, nonce } }; nonce makes a second
+  // tap on the same song apply again. (Applied twice, the second a moment later,
+  // in case this screen resets its own state while it is being shown.)
+  const useSoundParam = route.params?.useSound;
+  useEffect(() => {
+    if (!useSoundParam?.url) return;
+    const apply = () => {
+      setSelectedMusic(useSoundParam.url);
+      setSelectedMusicName(useSoundParam.name || 'Original sound');
+      setMusicArtist(useSoundParam.artist || null);
+    };
+    apply();
+    const t = setTimeout(apply, 700);
+    return () => clearTimeout(t);
+  }, [useSoundParam?.nonce]);
   const [musicVolume, setMusicVolume]   = useState(0.85);
   const [originalVolume, setOriginalVolume] = useState(1.0);
   // 🆕 Trim: which segment of the song to use, so a user making a 20s video

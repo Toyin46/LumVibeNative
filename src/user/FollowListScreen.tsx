@@ -29,26 +29,21 @@ export default function FollowListScreen() {
   const [loading, setLoading] = useState(true);
   const [q, setQ]             = useState('');
   const [busy, setBusy]       = useState<string | null>(null);
+  const [hidden, setHidden]   = useState(false);   // this person keeps their lists private
 
   const load = useCallback(async () => {
     try {
-      const col = type === 'followers' ? 'follower_id' : 'following_id';
-      const key = type === 'followers' ? 'following_id' : 'follower_id';
-      const { data: f } = await supabase.from('follows').select(col).eq(key, userId).order('created_at', { ascending: false }).limit(300);
-      const ids = (f || []).map((r: any) => r[col]).filter(Boolean);
-      if (!ids.length) { setRows([]); setLoading(false); return; }
-      const { data: us } = await supabase.from('users').select('id, username, display_name, avatar_url, photo_url, is_verified').in('id', ids);
-      const byId = new Map((us || []).map((u: any) => [u.id, u]));
-      setRows(ids.map((id: string) => byId.get(id)).filter(Boolean).map((u: any) => ({
-        id: u.id, username: u.username, display_name: u.display_name, avatar_url: u.avatar_url || u.photo_url || null, is_verified: u.is_verified,
-      })));
-      if (user?.id) {
-        const { data: m } = await supabase.from('follows').select('following_id').eq('follower_id', user.id).in('following_id', ids);
-        setMine(new Set((m || []).map((r: any) => r.following_id)));
-      }
+      // the SERVER decides: if the person chose to hide their lists, only they can open them
+      const { data, error } = await supabase.rpc('get_follow_list', { p_user_id: userId, p_type: type });
+      if (error) throw error;
+      const res: any = data || {};
+      setHidden(!!res.hidden);
+      const list: any[] = Array.isArray(res.rows) ? res.rows : [];
+      setRows(list.map(u => ({ id: u.id, username: u.username, display_name: u.display_name, avatar_url: u.avatar_url, is_verified: u.is_verified })));
+      setMine(new Set(list.filter(u => u.i_follow).map(u => u.id)));
     } catch (e) { console.warn('follow list failed:', e); }
     setLoading(false);
-  }, [userId, type, user?.id]);
+  }, [userId, type]);
   useEffect(() => { load(); }, [load]);
 
   const toggleFollow = async (id: string) => {
@@ -99,7 +94,12 @@ export default function FollowListScreen() {
       {loading ? <ActivityIndicator color={GREEN} style={{ marginTop: 40 }} /> : (
         <FlatList
           data={shown} keyExtractor={r => r.id} keyboardShouldPersistTaps="handled"
-          ListEmptyComponent={<Text style={styles.empty}>{q ? 'No one found' : type === 'followers' ? 'No followers yet' : 'Not following anyone yet'}</Text>}
+          ListEmptyComponent={hidden
+            ? <View style={{ padding: 40, alignItems: 'center', gap: 10 }}>
+                <Ionicons name="lock-closed" size={34} color="#777" />
+                <Text style={styles.empty}>{(name || 'This person')} keeps their {type === 'followers' ? 'followers' : 'following'} list private.</Text>
+              </View>
+            : <Text style={styles.empty}>{q ? 'No one found' : type === 'followers' ? 'No followers yet' : 'Not following anyone yet'}</Text>}
           renderItem={({ item }) => {
             const isMe = item.id === user?.id;
             const following = mine.has(item.id);

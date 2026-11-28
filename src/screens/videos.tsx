@@ -18,7 +18,7 @@ import React, { useEffect, useState, useRef, useCallback, useMemo, memo } from '
 import {
   View, Text, StyleSheet, FlatList, Image, TouchableOpacity, Dimensions,
   ActivityIndicator, Alert, Modal, TextInput, Share, ScrollView, Animated,
-  PanResponder, GestureResponderEvent, RefreshControl, Platform, Linking,
+  PanResponder, GestureResponderEvent, RefreshControl, Platform, Linking, Easing,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -54,7 +54,7 @@ async function fetchWithTimeout(input: RequestInfo, init?: RequestInit, ms = 150
   } catch (e) { clearTimeout(timer); throw e; }
 }
 
-const FEED_POST_SELECT = 'id,user_id,caption,media_url,watermarked_url,media_type,views_count,coins_received,comments_count,saved_by,liked_by,location,music_name,music_artist,music_url,music_volume,original_volume,music_start_offset_ms,music_end_offset_ms,voice_duration,created_at,has_watermark,applied_filter,video_effect,video_filter_tint,playback_rate,vibe_type,cloudinary_public_id,is_published,marketplace_listing_id,marketplace_price,marketplace_title';
+const FEED_POST_SELECT = 'id,user_id,caption,media_url,media_urls,shares_count,music_id,watermarked_url,media_type,views_count,coins_received,comments_count,saved_by,liked_by,location,music_name,music_artist,music_url,music_volume,original_volume,music_start_offset_ms,music_end_offset_ms,voice_duration,created_at,has_watermark,applied_filter,video_effect,video_filter_tint,playback_rate,vibe_type,cloudinary_public_id,is_published,marketplace_listing_id,marketplace_price,marketplace_title';
 const SEEN_BOOSTS = new Set<string>();   // boosted posts already counted for this person in this session
 
 // ── Data saver ───────────────────────────────────────────────────────────
@@ -315,6 +315,11 @@ interface Post {
   video_effect?: string; video_filter_tint?: string; playback_rate?: number;
   vibe_type?: string | null;
   vibe_room_id?: string | null;
+  // ✅ NEW
+  media_urls?: string[] | null;          // every photo of a multi-photo post
+  shares_count?: number;                 // successful shares, one per account
+  music_id?: string | null; music_cover?: string | null;
+  reposts_count?: number; reposted_by_me?: boolean; reposted_by_name?: string | null;
 }
 
 interface VibeRoomPreview {
@@ -659,9 +664,154 @@ const nativeAdStyles = StyleSheet.create({
 });
 
 // ─── VIDEO POST ───────────────────────────────────────────────────────────────
+// ═════════ ✅ NEW: sound disc, scrolling song name, repost chip, photo carousel ═════════
+const fmtCount = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K` : String(n);
+
+// TikTok-style round record that spins while the post plays. Centre picture =
+// the song's own banner → else the poster's profile picture → else a plain black record.
+const SpinningDisc = memo(function SpinningDisc({ cover, avatar, spinning, size = 46, onPress }: {
+  cover?: string | null; avatar?: string | null; spinning: boolean; size?: number; onPress?: () => void;
+}) {
+  const rot = useRef(new Animated.Value(0)).current;
+  const loop = useRef<Animated.CompositeAnimation | null>(null);
+  useEffect(() => {
+    if (spinning) {
+      loop.current = Animated.loop(Animated.timing(rot, { toValue: 1, duration: 4500, easing: Easing.linear, useNativeDriver: true }));
+      loop.current.start();
+    } else { loop.current?.stop(); }
+    return () => { loop.current?.stop(); };
+  }, [spinning]);
+  const spin = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const pic = cover || avatar || null;
+  const inner = size * 0.6;
+  return (
+    <TouchableOpacity activeOpacity={0.85} onPress={onPress} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+      <Animated.View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: '#0a0a0a', borderWidth: 2, borderColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center', transform: [{ rotate: spin }] }}>
+        <View style={{ position: 'absolute', width: size - 8, height: size - 8, borderRadius: (size - 8) / 2, borderWidth: 1, borderColor: '#1c1c1c' }} />
+        <View style={{ width: inner, height: inner, borderRadius: inner / 2, overflow: 'hidden', backgroundColor: '#111', alignItems: 'center', justifyContent: 'center' }}>
+          {pic ? <Image source={{ uri: pic }} style={{ width: inner, height: inner }} /> : <Feather name="music" size={inner * 0.5} color="#00ff88" />}
+        </View>
+        <View style={{ position: 'absolute', width: 6, height: 6, borderRadius: 3, backgroundColor: '#000', borderWidth: 1, borderColor: '#333' }} />
+      </Animated.View>
+    </TouchableOpacity>
+  );
+});
+
+// song name that scrolls sideways when it is too long for the space
+const MarqueeText = memo(function MarqueeText({ text, style }: { text: string; style?: any }) {
+  const x = useRef(new Animated.Value(0)).current;
+  const [tw, setTw] = useState(0);
+  const [cw, setCw] = useState(0);
+  useEffect(() => {
+    x.setValue(0);
+    if (!tw || !cw || tw <= cw + 2) return;
+    const dist = tw + 28;
+    const anim = Animated.loop(Animated.sequence([
+      Animated.delay(900),
+      Animated.timing(x, { toValue: -dist, duration: dist * 26, easing: Easing.linear, useNativeDriver: true }),
+      Animated.timing(x, { toValue: 0, duration: 0, useNativeDriver: true }),
+    ]));
+    anim.start();
+    return () => anim.stop();
+  }, [tw, cw, text]);
+  return (
+    <View style={{ overflow: 'hidden', flex: 1 }} onLayout={e => setCw(e.nativeEvent.layout.width)}>
+      <Animated.View style={{ flexDirection: 'row', alignSelf: 'flex-start', transform: [{ translateX: x }] }}>
+        <Text style={[style, { flexShrink: 0 }]} numberOfLines={1} onLayout={e => setTw(e.nativeEvent.layout.width)}>{text}</Text>
+        {tw > cw + 2 && <Text style={[style, { flexShrink: 0, marginLeft: 28 }]} numberOfLines={1}>{text}</Text>}
+      </Animated.View>
+    </View>
+  );
+});
+
+// "♪ song — artist" under the caption. Tap = use this sound for your own post.
+const SoundRow = memo(function SoundRow({ item, onUseSound }: { item: Post; onUseSound: (p: Post) => void }) {
+  return (
+    <TouchableOpacity activeOpacity={0.8} onPress={() => onUseSound(item)} style={soundStyles.row}>
+      <Feather name="music" size={13} color="#fff" />
+      <MarqueeText text={`${item.music_name}${item.music_artist ? '  ·  ' + item.music_artist : ''}`} style={soundStyles.text} />
+      <View style={soundStyles.useTag}><Text style={soundStyles.useTagText}>Use</Text></View>
+    </TouchableOpacity>
+  );
+});
+
+// "Repost to followers" pill (and "Reposted by …" when it came to you through someone you follow)
+const RepostChip = memo(function RepostChip({ item, isOwnPost, onRepost }: { item: Post; isOwnPost: boolean; onRepost: (p: Post) => void }) {
+  const mine = !!item.reposted_by_me;
+  const n = item.reposts_count || 0;
+  return (
+    <View style={{ marginBottom: 10, alignItems: 'flex-start', gap: 6 }}>
+      {!!item.reposted_by_name && (
+        <View style={soundStyles.by}><MaterialCommunityIcons name="repeat" size={13} color="#00ff88" /><Text style={soundStyles.byText}>Reposted by {item.reposted_by_name}</Text></View>
+      )}
+      {!isOwnPost ? (
+        <TouchableOpacity activeOpacity={0.8} onPress={() => onRepost(item)} style={[soundStyles.chip, mine && soundStyles.chipOn]}>
+          <MaterialCommunityIcons name="repeat" size={16} color={mine ? '#00ff88' : '#fff'} />
+          <Text style={[soundStyles.chipText, mine && { color: '#00ff88' }]}>{mine ? 'Reposted' : 'Repost to followers'}{n > 0 ? `  ·  ${fmtCount(n)}` : ''}</Text>
+        </TouchableOpacity>
+      ) : n > 0 ? (
+        <View style={soundStyles.chip}><MaterialCommunityIcons name="repeat" size={16} color="#fff" /><Text style={soundStyles.chipText}>{fmtCount(n)} reposts</Text></View>
+      ) : null}
+    </View>
+  );
+});
+
+// a post with several photos: swipe sideways through ALL of them (like TikTok photo mode)
+function PhotoCarousel({ urls, topOffset, onIndexChange }: { urls: string[]; topOffset: number; onIndexChange?: (i: number) => void }) {
+  const W = Dimensions.get('window').width;
+  const [idx, setIdx] = useState(0);
+  const settle = (e: any) => {
+    const i = Math.max(0, Math.min(urls.length - 1, Math.round(e.nativeEvent.contentOffset.x / W)));
+    if (i !== idx) { setIdx(i); onIndexChange?.(i); }
+  };
+  const current = urls[idx] || urls[0];
+  return (
+    <View style={StyleSheet.absoluteFill}>
+      <Image source={{ uri: current }} style={StyleSheet.absoluteFill} resizeMode="cover" blurRadius={28} />
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.35)' }]} />
+      {urls.length > 1 ? (
+        <FlatList
+          data={urls} horizontal pagingEnabled showsHorizontalScrollIndicator={false}
+          keyExtractor={(u, i) => `${i}-${u}`} onMomentumScrollEnd={settle}
+          getItemLayout={(_, i) => ({ length: W, offset: W * i, index: i })}
+          initialNumToRender={2} windowSize={3} nestedScrollEnabled
+          renderItem={({ item: u }) => <Image source={{ uri: u }} style={{ width: W, height: '100%' }} resizeMode="contain" />}
+        />
+      ) : (
+        <Image source={{ uri: urls[0] }} style={StyleSheet.absoluteFill} resizeMode="contain" />
+      )}
+      {urls.length > 1 && (
+        <>
+          <View pointerEvents="none" style={[soundStyles.counter, { top: topOffset + 44 }]}><Text style={soundStyles.counterText}>{idx + 1}/{urls.length}</Text></View>
+          <View pointerEvents="none" style={[soundStyles.dots, { top: topOffset + 78 }]}>
+            {urls.map((_, i) => <View key={i} style={[soundStyles.dot, i === idx && soundStyles.dotOn]} />)}
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+const soundStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10, alignSelf: 'flex-start', maxWidth: '100%', backgroundColor: 'rgba(0,0,0,0.38)', borderRadius: 16, paddingLeft: 10, paddingRight: 6, paddingVertical: 6 },
+  text: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  useTag: { backgroundColor: 'rgba(0,255,136,0.2)', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
+  useTagText: { color: '#00ff88', fontSize: 11, fontWeight: '800' },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: 'rgba(0,0,0,0.42)', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7 },
+  chipOn: { borderWidth: 1, borderColor: '#00ff88' },
+  chipText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  by: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  byText: { color: '#d8ffe9', fontSize: 12.5, fontWeight: '700' },
+  counter: { position: 'absolute', alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 3 },
+  counterText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  dots: { position: 'absolute', left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 5 },
+  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.4)' },
+  dotOn: { backgroundColor: '#00ff88', width: 16 },
+});
+
 const VideoPost = memo(function VideoPost({
   item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onSaveMedia, onDelete, onReport, user, onView, followStatusMap,
-  vibeRoomMap, topOffset, isOffline,
+  vibeRoomMap, topOffset, isOffline, onRepost, onUseSound,
 }: {
   item: Post; activePostId: string | null; onLike: (post: Post) => void; onComment: (post: Post) => void;
   onGift: (post: Post) => void; onFollow: (userId: string, isFollowing: boolean) => Promise<void>;
@@ -669,6 +819,7 @@ const VideoPost = memo(function VideoPost({
   onDelete: (post: Post) => void; onReport: (post: Post) => void;
   user: any; onView: (postId: string) => void; followStatusMap: Map<string, boolean>;
   vibeRoomMap: Map<string, VibeRoomPreview>; topOffset: number; isOffline: boolean;
+  onRepost: (post: Post) => void; onUseSound: (post: Post) => void;
 }) {
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
@@ -1186,14 +1337,8 @@ const VideoPost = memo(function VideoPost({
         </View>
       </Modal>
 
-      {item.music_name && (
-        <View style={styles.musicContainer}>
-          <Feather name="music" size={12} color="#00ff88" />
-          <Text style={styles.musicText}>{item.music_name}{item.music_artist ? ` - ${item.music_artist}` : ''}</Text>
-        </View>
-      )}
-
       <View style={styles.videoInfo}>
+        <RepostChip item={item} isOwnPost={isOwnPost} onRepost={onRepost} />
         <View style={styles.userInfoOverlay}>
           <TouchableOpacity style={styles.userInfoContent} onPress={() => onUserPress(item.user_id)} activeOpacity={0.7}>
             {item.user_photo_url ? <Image source={{ uri: item.user_photo_url }} style={styles.videoUserAvatar} /> : <View style={[styles.videoUserAvatar, styles.avatarPlaceholder]}><Feather name="user" size={20} color="#00ff88" /></View>}
@@ -1210,6 +1355,8 @@ const VideoPost = memo(function VideoPost({
         </View>
         {(item.caption || (item as any).boost_id) && <Text style={styles.videoCaption} numberOfLines={3}>{(item as any).boost_id ? '🚀 Boosted · ' : ''}{item.caption}</Text>}
         {item.location && (<View style={styles.locationContainer}><Feather name="map-pin" size={12} color="#00ff88" /><Text style={styles.locationText}>{item.location}</Text></View>)}
+
+        {!!item.music_name && item.media_type !== 'voice' && <SoundRow item={item} onUseSound={onUseSound} />}
 
         {item.vibe_type === 'marketplace' && (() => {
           const listingIdFromColumn = (item as any).marketplace_listing_id as string | null | undefined;
@@ -1250,7 +1397,7 @@ const VideoPost = memo(function VideoPost({
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButtonRight} onPress={() => onShare(item)} activeOpacity={0.7}>
           <View style={styles.iconContainer}><Feather name="share" size={28} color="#00ff88" /></View>
-          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>Share</Text>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>{(item.shares_count || 0) > 0 ? fmtCount(item.shares_count || 0) : 'Share'}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButtonRight} onPress={() => onGift(item)} activeOpacity={0.7}>
           <View style={styles.iconContainer}><MaterialCommunityIcons name="gift-outline" size={32} color="#ffd700" /></View>
@@ -1293,6 +1440,12 @@ const VideoPost = memo(function VideoPost({
             visible control, so sound always plays by default now. */}
         {/* ✅ REMOVED: public view-count badge — views_count is still tracked
             (below) for the ranking algorithm, just no longer shown on the post. */}
+        {!!item.music_name && item.media_type !== 'voice' && (
+          <View style={{ marginTop: 6 }}>
+            <SpinningDisc cover={item.music_cover} avatar={item.user_photo_url} spinning={activePostId === item.id} onPress={() => onUseSound(item)} />
+          </View>
+        )}
+
         {item.coins_received > 0 && (<View style={styles.coinsOverlay}><MaterialCommunityIcons name="diamond" size={20} color="#ffd700" /><Text style={styles.coinsOverlayText}>{item.coins_received.toFixed(2)}</Text></View>)}
       </View>
 
@@ -1395,6 +1548,10 @@ const VideoPost = memo(function VideoPost({
   prev.item.likes_count     === next.item.likes_count &&
   prev.item.comments_count  === next.item.comments_count &&
   prev.item.coins_received  === next.item.coins_received &&
+  prev.item.shares_count    === next.item.shares_count &&
+  prev.item.reposts_count   === next.item.reposts_count &&
+  prev.item.reposted_by_me  === next.item.reposted_by_me &&
+  prev.item.reposted_by_name === next.item.reposted_by_name &&
   prev.activePostId         === next.activePostId
 );
 
@@ -1466,13 +1623,14 @@ function fmtClock(sec: number): string { const s = Math.max(0, Math.floor(sec));
 let stopCurrentPostAudio: (() => void) | null = null;
 
 const MediaPost = memo(function MediaPost({
-  item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onDelete, onReport, user, onView, followStatusMap, vibeRoomMap, topOffset,
+  item, activePostId, onLike, onComment, onGift, onFollow, onUserPress, onShare, onDelete, onReport, user, onView, followStatusMap, vibeRoomMap, topOffset, onRepost, onUseSound,
 }: {
   item: Post; activePostId: string | null; onLike: (post: Post) => void; onComment: (post: Post) => void;
   onGift: (post: Post) => void; onFollow: (userId: string, isFollowing: boolean) => Promise<void>;
   onUserPress: (userId: string) => void; onShare: (post: Post) => void;
   onDelete: (post: Post) => void; onReport: (post: Post) => void;
   user: any; onView: (postId: string) => void; followStatusMap: Map<string, boolean>; vibeRoomMap: Map<string, VibeRoomPreview>; topOffset: number;
+  onRepost: (post: Post) => void; onUseSound: (post: Post) => void;
 }) {
   const { t } = useTranslation();
   const navigation = useNavigation<any>();
@@ -1492,6 +1650,14 @@ const MediaPost = memo(function MediaPost({
     item.media_type === 'voice' ? 'voice'
     : (item.media_url && item.media_type !== 'text') ? 'image'
     : 'text';
+
+  // ✅ NEW: all photos of the post (the cover first), not only the first one
+  const photoUrls = useMemo(() => {
+    const list = Array.isArray(item.media_urls) ? item.media_urls.filter(Boolean) : [];
+    if (list.length) return list;
+    return item.media_url ? [item.media_url] : [];
+  }, [item.media_urls, item.media_url]);
+  const [photoIdx, setPhotoIdx] = useState(0);
 
   // voice posts play their recording; photo/text posts play their background music (if any)
   const audioUrl = kind === 'voice' ? item.media_url : (item.music_url || null);
@@ -1562,7 +1728,7 @@ const MediaPost = memo(function MediaPost({
   // Save a photo post to the gallery (videos have their own watermark-aware saver)
   const saveImage = () => {
     if (!item.media_url) return;
-    Alert.alert('Save Photo', 'Save this photo to your gallery?', [
+    Alert.alert('Save Photo', photoUrls.length > 1 ? `Save photo ${photoIdx + 1} of ${photoUrls.length} to your gallery?` : 'Save this photo to your gallery?', [
       { text: t.common.cancel, style: 'cancel' },
       { text: t.common.save, onPress: async () => {
         try {
@@ -1570,7 +1736,7 @@ const MediaPost = memo(function MediaPost({
           if (status !== 'granted') { Alert.alert(t.videos.permissionDenied, t.videos.permissionMsg); return; }
           const cacheDir = (FileSystem as any).cacheDirectory ?? (FileSystem as any).documentDirectory ?? '';
           const dest = `${cacheDir}lumvibe_${item.id}_${Date.now()}.jpg`;
-          const r = await FileSystem.downloadAsync(item.media_url!, dest);
+          const r = await FileSystem.downloadAsync((photoUrls[photoIdx] || item.media_url)!, dest);
           if (r.status !== 200) { Alert.alert('Error', 'Download failed. Please try again.'); return; }
           const asset = await MediaLibrary.createAssetAsync(dest);
           await MediaLibrary.createAlbumAsync('LumVibe', asset, false);
@@ -1597,13 +1763,7 @@ const MediaPost = memo(function MediaPost({
       )}
 
       {/* ── page background, by post type ── */}
-      {kind === 'image' && (
-        <>
-          <Image source={{ uri: item.media_url }} style={StyleSheet.absoluteFill} resizeMode="cover" blurRadius={28} />
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.35)' }]} />
-          <Image source={{ uri: item.media_url }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-        </>
-      )}
+      {kind === 'image' && <PhotoCarousel urls={photoUrls} topOffset={topOffset} onIndexChange={setPhotoIdx} />}
       {kind === 'text' && (
         <LinearGradient colors={grad} style={StyleSheet.absoluteFill}>
           <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: 28, paddingTop: topOffset, paddingBottom: 170 }}>
@@ -1813,15 +1973,9 @@ const MediaPost = memo(function MediaPost({
         </View>
       </Modal>
 
-      {item.music_name && kind !== 'voice' && (
-        <View style={styles.musicContainer}>
-          <Feather name="music" size={12} color="#00ff88" />
-          <Text style={styles.musicText}>{item.music_name}{item.music_artist ? ` - ${item.music_artist}` : ''}</Text>
-        </View>
-      )}
-
       {/* ── user + caption ── */}
       <View style={styles.videoInfo}>
+        <RepostChip item={item} isOwnPost={isOwnPost} onRepost={onRepost} />
         <View style={styles.userInfoOverlay}>
           <TouchableOpacity style={styles.userInfoContent} onPress={() => onUserPress(item.user_id)} activeOpacity={0.7}>
             {item.user_photo_url ? <Image source={{ uri: item.user_photo_url }} style={styles.videoUserAvatar} /> : <View style={[styles.videoUserAvatar, styles.avatarPlaceholder]}><Feather name="user" size={20} color="#00ff88" /></View>}
@@ -1838,6 +1992,8 @@ const MediaPost = memo(function MediaPost({
         </View>
         {((kind !== 'text' && !!item.caption) || (item as any).boost_id) && <Text style={styles.videoCaption} numberOfLines={3}>{(item as any).boost_id ? '🚀 Boosted · ' : ''}{kind !== 'text' ? item.caption : ''}</Text>}
         {item.location && (<View style={styles.locationContainer}><Feather name="map-pin" size={12} color="#00ff88" /><Text style={styles.locationText}>{item.location}</Text></View>)}
+
+        {!!item.music_name && item.media_type !== 'voice' && <SoundRow item={item} onUseSound={onUseSound} />}
 
         {item.vibe_type === 'marketplace' && (() => {
           const listingIdFromColumn = (item as any).marketplace_listing_id as string | null | undefined;
@@ -1877,7 +2033,7 @@ const MediaPost = memo(function MediaPost({
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButtonRight} onPress={() => onShare(item)} activeOpacity={0.7}>
           <View style={styles.iconContainer}><Feather name="share" size={28} color="#00ff88" /></View>
-          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>Share</Text>
+          <Text style={[styles.actionTextRight, { color: '#00ff88' }]}>{(item.shares_count || 0) > 0 ? fmtCount(item.shares_count || 0) : 'Share'}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButtonRight} onPress={() => onGift(item)} activeOpacity={0.7}>
           <View style={styles.iconContainer}><MaterialCommunityIcons name="gift-outline" size={32} color="#ffd700" /></View>
@@ -1907,6 +2063,12 @@ const MediaPost = memo(function MediaPost({
               {vibeRoom.status === 'live' ? '🔴 LIVE' : '⏰ Soon'}
             </Text>
           </TouchableOpacity>
+        )}
+
+        {!!item.music_name && item.media_type !== 'voice' && (
+          <View style={{ marginTop: 6 }}>
+            <SpinningDisc cover={item.music_cover} avatar={item.user_photo_url} spinning={activePostId === item.id} onPress={() => onUseSound(item)} />
+          </View>
         )}
 
         {item.coins_received > 0 && (<View style={styles.coinsOverlay}><MaterialCommunityIcons name="diamond" size={20} color="#ffd700" /><Text style={styles.coinsOverlayText}>{item.coins_received.toFixed(2)}</Text></View>)}
@@ -2124,10 +2286,38 @@ export default function VideosScreen() {
         }
       } catch { /* boosts are a bonus: never block the feed */ }
 
+      // ✅ NEW: posts that people I follow reposted — they appear in my Following tab ("Reposted by …")
+      const repostedByMap = new Map<string, string>();
+      try {
+        const { data: rps } = await supabase.rpc('get_followed_reposts', { p_limit: 30 });
+        if (Array.isArray(rps) && rps.length && postsData) {
+          rps.forEach((r: any) => repostedByMap.set(r.post_id, r.reposter_name || r.reposter_username || 'someone'));
+          const have = new Set((postsData as any[]).map((p: any) => p.id));
+          const need = rps.map((r: any) => r.post_id).filter((id: string) => !have.has(id));
+          if (need.length) {
+            const { data: extra } = await supabase.from('posts').select(FEED_POST_SELECT).in('id', need);
+            if (extra && extra.length) (postsData as any[]).push(...(extra as any[]));
+          }
+        }
+      } catch { /* reposts are a bonus: never block the feed */ }
+
       if (!postsData || postsData.length === 0) { setPosts([]); setFeedItems([]); setLoading(false); isLoadingRef.current = false; return; }
 
       const userIds = [...new Set(postsData.map(p => p.user_id))];
       const postIds = postsData.map(p => p.id);
+
+      // ✅ NEW: repost counts, and the song banner when the sound has one
+      const repostInfo = new Map<string, { count: number; mine: boolean }>();
+      const coverMap = new Map<string, string>();
+      try {
+        const { data: ri } = await supabase.rpc('get_repost_info', { p_post_ids: postIds });
+        if (Array.isArray(ri)) ri.forEach((r: any) => repostInfo.set(r.post_id, { count: r.count || 0, mine: !!r.mine }));
+        const musicIds = [...new Set(postsData.map((p: any) => p.music_id).filter((m: any) => typeof m === 'string' && /^[0-9a-f-]{36}$/i.test(m)))];
+        if (musicIds.length) {
+          const { data: covers } = await supabase.from('music_tracks').select('id, cover_image').in('id', musicIds as string[]);
+          covers?.forEach((c: any) => { if (c.cover_image) coverMap.set(c.id, c.cover_image); });
+        }
+      } catch { /* optional extras */ }
 
       const [usersResult, likesResult, commentsResult, followingResult] = await Promise.all([
         supabase.from('users').select('id, username, display_name, avatar_url, followers_count').in('id', userIds),
@@ -2169,6 +2359,13 @@ export default function VideosScreen() {
           playback_rate: p.playback_rate || null,
           vibe_type: p.vibe_type ?? null,
           vibe_room_id: null,
+          media_urls: Array.isArray(p.media_urls) ? p.media_urls : null,
+          shares_count: p.shares_count || 0,
+          music_id: p.music_id ?? null,
+          music_cover: p.music_id ? (coverMap.get(p.music_id) || null) : null,
+          reposts_count: repostInfo.get(p.id)?.count || 0,
+          reposted_by_me: repostInfo.get(p.id)?.mine || false,
+          reposted_by_name: repostedByMap.get(p.id) || null,
         };
       });
 
@@ -2200,6 +2397,11 @@ export default function VideosScreen() {
         const rest = topPosts.filter(p => !boostedIds.has(p.id));
         boosted.forEach((bp, i) => rest.splice(Math.min(i === 0 ? 2 : 8, rest.length), 0, { ...bp, boost_id: boostMap.get(bp.id) } as any));
         topPosts = rest;
+      }
+      {
+        // ✅ NEW: reposts from people I follow must not be cut off by the ranking
+        const keep = scoredPosts.filter(p => (p as any).reposted_by_name && !topPosts.includes(p)).slice(0, 10);
+        if (keep.length) topPosts = [...topPosts, ...keep];
       }
       setPosts(topPosts);
 
@@ -2531,10 +2733,42 @@ export default function VideosScreen() {
     } catch (e: any) { throw e; }
   }, [userId, userProfile]);
 
+  // ✅ NEW: reposts ("Repost to followers") — tap again to undo; one per account
+  const handleRepost = useCallback(async (post: Post) => {
+    if (!userId) return;
+    if (post.user_id === userId) { Alert.alert('Repost', 'You cannot repost your own post.'); return; }
+    const apply = (reposted: boolean, count: number) => {
+      const upd = (p: Post): Post => p.id === post.id ? { ...p, reposted_by_me: reposted, reposts_count: count } : p;
+      setPosts(prev => prev.map(upd));
+      setFeedItems(prev => prev.map(item => (!isAd(item) && !isWinnerCard(item)) ? upd(item as Post) : item));
+    };
+    const was = !!post.reposted_by_me; const n = post.reposts_count || 0;
+    apply(!was, Math.max(0, n + (was ? -1 : 1)));                    // instant
+    const { data, error } = await supabase.rpc('toggle_repost', { p_post_id: post.id });
+    if (error || !(data as any)?.success) { apply(was, n); Alert.alert('Repost', (data as any)?.error || error?.message || 'Please try again.'); return; }
+    apply(!!(data as any).reposted, (data as any).count ?? 0);
+  }, [userId]);
+
+  // ✅ NEW: "use this sound" — opens Create with the song already chosen
+  const handleUseSound = useCallback((post: Post) => {
+    if (!post.music_url) { Alert.alert('Sound', 'This sound cannot be reused.'); return; }
+    navigation.navigate('Create', { useSound: { url: post.music_url, name: post.music_name || 'Original sound', artist: post.music_artist || null, nonce: Date.now() } });
+  }, [navigation]);
+
   const handleShare = useCallback(async (post: Post) => {
     try {
       const deepLink = `https://lively-sun-4c51.lumvibe86.workers.dev/p/${post.id}`;  // preview card (thumbnail + title) in WhatsApp; the link then opens the video page
       const result = await Share.share({ message: `Check out this video by @${post.username} on LumVibe!\n\n${post.caption || ''}\n\n${deepLink}`, title: `Video by @${post.username}` });
+      // ✅ NEW: a SUCCESSFUL share counts once per account per post (the database enforces it)
+      if (result.action === Share.sharedAction) {
+        supabase.rpc('record_post_share', { p_post_id: post.id }).then(({ data }: any) => {
+          if (data?.counted && typeof data.shares_count === 'number') {
+            const upd = (p: Post): Post => p.id === post.id ? { ...p, shares_count: data.shares_count } : p;
+            setPosts(prev => prev.map(upd));
+            setFeedItems(prev => prev.map(item => (!isAd(item) && !isWinnerCard(item)) ? upd(item as Post) : item));
+          }
+        }, () => {});
+      }
       if (result.action === Share.sharedAction && post.user_id !== userId) {
         try { const { data: ownerData } = await supabase.from('users').select('points').eq('id', post.user_id).single(); if (ownerData) { const multipliers = await getOwnerBadgeMultipliers(post.user_id); await supabase.from('users').update({ points: (ownerData.points || 0) + multipliers.sharePoints }).eq('id', post.user_id); } } catch (e) {}
         // ✅ NEW (weekly leaderboard): shares have no DB table to trigger
@@ -2651,6 +2885,7 @@ export default function VideosScreen() {
           item={item as Post} activePostId={activePostId}
           onLike={handleLike} onComment={handleComment} onGift={handleGift}
           onFollow={handleFollow} onUserPress={handleUserPress} onShare={handleShare}
+          onRepost={handleRepost} onUseSound={handleUseSound}
           onDelete={handleDeletePost} onReport={handleReport}
           user={user} onView={handleView} followStatusMap={followStatusMap} vibeRoomMap={vibeRoomMap} topOffset={HEADER_HEIGHT}
         />
@@ -2662,17 +2897,18 @@ export default function VideosScreen() {
         onLike={handleLike} onComment={handleComment} onGift={handleGift}
         onFollow={handleFollow} onUserPress={handleUserPress} onShare={handleShare}
         onSaveMedia={handleSaveMedia} onDelete={handleDeletePost} onReport={handleReport}
+        onRepost={handleRepost} onUseSound={handleUseSound}
         user={user} onView={handleView} followStatusMap={followStatusMap}
         vibeRoomMap={vibeRoomMap} topOffset={HEADER_HEIGHT} isOffline={isOffline}
       />
     );
-  }, [activePostId, weeklyWinners, followStatusMap, vibeRoomMap, handleLike, handleComment, handleGift, handleFollow, handleUserPress, handleShare, handleSaveMedia, handleDeletePost, handleReport, handleView, user, HEADER_HEIGHT, isOffline]);
+  }, [activePostId, weeklyWinners, followStatusMap, vibeRoomMap, handleLike, handleComment, handleGift, handleFollow, handleUserPress, handleShare, handleRepost, handleUseSound, handleSaveMedia, handleDeletePost, handleReport, handleView, user, HEADER_HEIGHT, isOffline]);
 
   // ✅ NEW: "Following" tab shows only posts from creators the viewer already follows,
   // filtered client-side from the same feed data (no extra network round-trip).
   const displayedFeedItems = useMemo(() => {
     if (activeFeedTab !== 'following') return feedItems;
-    return feedItems.filter(fi => !isAd(fi) && !isWinnerCard(fi) && followStatusMap.get((fi as Post).user_id) === true);
+    return feedItems.filter(fi => !isAd(fi) && !isWinnerCard(fi) && (followStatusMap.get((fi as Post).user_id) === true || !!(fi as Post).reposted_by_name));
   }, [feedItems, activeFeedTab, followStatusMap]);
 
   if (loading) return (<View style={styles.loadingContainer}><ActivityIndicator size="large" color="#00ff88" /><Text style={styles.loadingText}>{t.videos.loadingVideos}</Text></View>);
